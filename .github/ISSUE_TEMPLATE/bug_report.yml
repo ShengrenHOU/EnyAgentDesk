@@ -1,0 +1,54 @@
+name: Bug report
+description: 报告一个可以复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索已有 Issue，并删除日志、截图和配置里的密钥、token、聊天 id 和个人路径。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际行为和预期行为的差别。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量给出最小步骤；涉及界面的附脱敏截图。
+      placeholder: |
+        1. 配置 ...
+        2. 在 ... 发一条 ...
+        3. 看到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统、Node 版本、DSH 版本、本仓库提交或版本、使用的执行器。
+      placeholder: |
+        OS: Windows 11 / Ubuntu 24.04
+        Node: 24.x
+        DSH: 0.2.1-rc.3
+        dsh-superagent: 0.5.13
+        Executor: DSH / Codex
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与证据
+      description: 相关的错误文本、`scripts/dsh-superagent status` 输出或管理接口返回。先脱敏。
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已经搜索过已有 Issue。
+          required: true
+        - label: 我已经删除提交内容中的密钥、token、聊天 id 和个人路径。
+          required: true

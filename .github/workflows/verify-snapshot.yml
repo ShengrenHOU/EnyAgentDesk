@@ -1,0 +1,35 @@
+name: verify-snapshot
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify snapshot provenance
+        run: |
+          set -eu
+          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
+          if [ "$parents" -ne 1 ]; then
+            echo "main must be a root snapshot commit, not a merge or child commit"
+            exit 1
+          fi
+          if ! git log -1 --format=%B | grep -Eq '^Upstream-Commit: [0-9a-f]{40}$'; then
+            echo "missing Upstream-Commit trailer"
+            exit 1
+          fi
+          for path in GOAL.md docs/open-source docs/010-owner-pilot.md docs/011-development-principles.md; do
+            if [ -e "$path" ]; then
+              echo "forbidden path present: $path"
+              exit 1
+            fi
+          done
+          echo "snapshot provenance verified"

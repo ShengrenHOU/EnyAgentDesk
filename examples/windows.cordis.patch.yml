@@ -1,0 +1,28 @@
+# Use a dedicated DSH_HOME and a bot-only Lark config. Replace paths before use.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3083
+- id: agent-default-model
+  config:
+    provider: deepseek
+    model: deepseek-flash
+- id: llm-pi-ai
+  config:
+    providers:
+      deepseek:
+        apiKeyEnv: DEEPSEEK_API_KEY
+        baseURL: https://api.deepseek.com
+        api: openai-completions
+        models:
+          - id: deepseek-flash
+- id: session-telemetry-otel
+  disabled: true
+- id: dsh-superagent
+  config:
+    stateDir: C:/absolute/path/to/state
+    codexCommand: C:/absolute/current-codex/codex.exe
+    # codexModel is optional; omission keeps the local Codex model configuration.
+# Feishu is optional. Delete this entry when the Source is not used.
+- id: dsh-superagent-feishu
+  disabled: false
