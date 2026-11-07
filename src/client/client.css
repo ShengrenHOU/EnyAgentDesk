@@ -96,8 +96,24 @@ details.pw-runtime-note > .dt-section { margin-top: 16px; }
 .pw-notice { color: #426a68; background: #edf5f2; border-radius: 8px; padding: 10px 14px; font-size: 12px; }
 .pw-shell .pw-chat-toggle { display: none; }
 .pw-shell button:focus-visible, .pw-shell a:focus-visible { outline: 2px solid #6380cc; outline-offset: 3px; }
-@media (max-width: 1300px) { .pw-shell[data-chat=true] .pw-layout { grid-template-columns: minmax(360px, 1fr) 360px; } .pw-task-grid { grid-template-columns: 1fr; } .pw-header, .pw-main { padding-left: 22px; padding-right: 22px; } }
-@media (max-width: 960px) { .pw-layout { display: block; overflow: auto; } .pw-main { overflow: visible; } .pw-collaboration { display: none; height: 100%; border: 0; } .pw-shell .pw-chat-toggle { display: inline-flex; } .pw-shell[data-chat=true] .pw-main { display: none; } .pw-shell[data-chat=true] .pw-collaboration { display: flex; } .pw-header { padding: 16px; gap: 12px; flex-wrap: wrap; } .pw-header h1 { font-size: 23px; } .pw-header-actions { gap: 6px; } .pw-live { display: none; } .pw-main { padding: 0 16px 24px; } .pw-focus { padding: 18px; } }
+@media (max-width: 1300px) {
+.pw-shell[data-chat=true] .pw-layout { grid-template-columns: minmax(360px, 1fr) 360px; }
+.pw-task-grid { grid-template-columns: 1fr; }
+.pw-header, .pw-main { padding-left: 22px; padding-right: 22px; }
+}
+@media (max-width: 960px) {
+.pw-layout { display: block; overflow: auto; }
+.pw-main { overflow: visible; padding: 0 16px 24px; }
+.pw-collaboration { display: none; height: 100%; border: 0; }
+.pw-shell .pw-chat-toggle { display: inline-flex; }
+.pw-shell[data-chat=true] .pw-main { display: none; }
+.pw-shell[data-chat=true] .pw-collaboration { display: flex; }
+.pw-header { padding: 16px; gap: 12px; flex-wrap: wrap; }
+.pw-header h1 { font-size: 23px; }
+.pw-header-actions { gap: 6px; }
+.pw-live { display: none; }
+.pw-focus { padding: 18px; }
+}
 .dt-owner-desk { box-sizing: border-box; width: calc(100% - 32px); max-width: 860px; margin: 0 auto 10px; color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l3); border-radius: 16px; background: var(--dsw-alias-bg-module-platform); padding: 10px 14px; font-size: 13px; max-height: 48vh; overflow: auto; }
 .dt-owner-bar, .dt-owner-section-head, .dt-owner-task-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .dt-owner-name { display: flex; align-items: center; gap: 6px; font-weight: 600; white-space: nowrap; }
@@ -117,7 +133,11 @@ details.pw-runtime-note > .dt-section { margin-top: 16px; }
 .dt-owner-response > button { align-self: flex-end; }
 .dt-owner-preview { margin-top: 8px; }
 .dt-owner-preview iframe { width: 100%; height: 32vh; border: 0; border-radius: 8px; margin-top: 8px; background: white; }
-@media (max-width: 640px) { .dt-owner-bar { align-items: flex-start; flex-direction: column; } .dt-owner-tabs { width: 100%; } .dt-owner-task-head { align-items: flex-start; } }
+@media (max-width: 640px) {
+.dt-owner-bar { align-items: flex-start; flex-direction: column; }
+.dt-owner-tabs { width: 100%; }
+.dt-owner-task-head { align-items: flex-start; }
+}
 .dt-page { box-sizing: border-box; height: 100%; overflow: auto; scrollbar-gutter: stable; scroll-padding: 48px 0 72px; container-type: inline-size; padding: 28px clamp(24px, 4vw, 48px) 0; color: var(--dsw-alias-label-primary); }
 /* Deployment page rendered inside DSH Plugin Manager, which owns scrolling and padding. */
 .dt-embedded { container-type: inline-size; color: var(--dsw-alias-label-primary); }

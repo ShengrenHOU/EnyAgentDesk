@@ -5,7 +5,7 @@
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
   "license": "MIT",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
   "repository": {
@@ -46,7 +46,12 @@
     "locale/*.json",
     "README.md",
     "prompts",
-    "skills"
+    "skills",
+    "NOTICE",
+    "scripts/*.py",
+    "scripts/*.mjs",
+    "scripts/*.ps1",
+    "scripts/dsh-superagent"
   ],
   "dsh": {
     "bundle": {
@@ -83,7 +88,7 @@
   "packageManager": "pnpm@11.28.10",
   "dependencies": {
     "proper-lockfile": "4.1.2",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-ui-session": "^0.2.1-alpha.2",

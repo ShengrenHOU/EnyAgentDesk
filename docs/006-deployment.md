@@ -75,7 +75,7 @@ Run this block once, on a machine that has no `superagent` profile yet:
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk dsh-superagent && cd dsh-superagent
-pnpm install && pnpm build
+pnpm install --frozen-lockfile --ignore-scripts && pnpm build
 dsh superagent --from-default-profile web --dump-config > /dev/null
 dsh plugin --profile superagent add "link:$PWD"
 ```
@@ -97,6 +97,18 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+### Native owner workbench
+
+The personal profile example enables `dsh-superagent-workbench`. After startup, configure its owner Source and allowed sender together:
+
+```sh
+python scripts/configure-workbench.py --port 3082 --owner local-owner
+```
+
+Choose a stable local owner label. It is not a password or API key; access remains protected by the DSH owner connection. The helper calls only the loopback management API, preserves other sources and domains, refuses a different existing owner, and fails on a settings revision conflict. Re-running with the same label does not add duplicate allowed senders. Do not use it against an unrelated local instance.
+
+Open the authenticated DSH browser at `#main-conversation` to discuss and delegate. `#workbench` shows Today, Tickets, Source health and Settings. Add optional GitHub, Feishu or activity sources separately; native workbench setup grants no permission to send external messages, merge or deploy.
 
 ## Start and stop
 
@@ -235,7 +247,7 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 1. Wait until no Executor is in the middle of a turn.
 2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
+3. Run `git pull && pnpm install --frozen-lockfile --ignore-scripts && pnpm build`.
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
