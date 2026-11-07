@@ -48,7 +48,10 @@
     "prompts",
     "skills",
     "NOTICE",
-    "scripts"
+    "scripts/*.py",
+    "scripts/*.mjs",
+    "scripts/*.ps1",
+    "scripts/dsh-superagent"
   ],
   "dsh": {
     "bundle": {

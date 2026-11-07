@@ -7,6 +7,7 @@
 - Compact repeated role, dispatch and communication instructions while retaining the original model-context budgets, authorization and review limits.
 - Align regressions with queued main-Session delivery, optional GitHub setup, current Source fields and responsive CSS conventions.
 - Pin reviewed security updates for Zod, Vite, source-map-js and both undici major lines. Installation lifecycle scripts remain disabled.
+- Package source scripts without local Python bytecode or cache paths.
 - Run the complete Linux suite and a Windows native suite in CI, including owner setup and Windows launcher checks.
 
 Mail, calendar, task and approval collection are not built-in continuous Sources. WeChat requires separately authorized local tooling. Existing prompt overrides remain operator-owned; an upgrade does not silently rewrite them.
