@@ -1,5 +1,7 @@
 # 004 Prompts
 
+Role introductions stay small. Personal-workbench routing and focus instructions live in `dispatch`; both roles share the team's communication contract. Compacting these texts must retain authorization, waiting, original-conversation delivery and review limits. The model-surface tests keep the original character budgets; do not raise a budget to accept duplicated instructions. Saved operator overrides keep their original ownership and are compared against changed defaults during upgrades.
+
 This document explains what the agents read, what a team can edit, and when changes take effect. It builds on [000 Philosophy](000-philosophy.md) through [003 Execution](003-execution.md). Prompt text is written in English.
 
 ## What a team writes

@@ -56,7 +56,7 @@ Windows 上还有几条额外的注意点，见 [Codex on Windows](../009-codex-
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install && pnpm build
+pnpm install --frozen-lockfile --ignore-scripts && pnpm build
 
 dsh superagent --from-default-profile web --dump-config > /dev/null
 dsh plugin --profile superagent add "link:$PWD"
@@ -84,7 +84,7 @@ scripts/dsh-superagent status
 | 2 | 运行中，但某个来源或策略同步出错。重启通常没用，需要修配置 |
 | 3 | 运行中，但还在等安装配置完成 |
 
-启动后打开日志里的地址，选择侧边栏的 **Superagent**，或者直接进入 `#workbench`。
+启动后打开日志里的地址，选择侧边栏的 **主对话**（`#main-conversation`）；**个人工作台**（`#workbench`）提供今天、工单、来源健康和设置。
 
 ### 2.3 Windows
 

@@ -27,6 +27,7 @@ export function Workbench(props: Props) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
   const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  const ready = !!state?.masterId
   const focus = usePoll(() => read<ReturnType<typeof readFocus>>('focus'), [])
   const sources = usePoll(() => call('GET sources'), [])
   const [domainId, setDomainId] = useState('')
@@ -60,7 +61,8 @@ export function Workbench(props: Props) {
   }, [focus.data])
   /** Sends one line to the main Session; a decision or supplement still belongs to the selected matter. */
   const send = async (text: string): Promise<boolean> => {
-    if (!state?.masterId || busy) return false
+    if (busy) return false
+    if (!state?.masterId) { setFailure(t('masterNotReady')); return false }
     setBusy(true); setFailure(undefined)
     try {
       await props.send(state.masterId, text)
@@ -129,7 +131,8 @@ export function Workbench(props: Props) {
   return <div className="pw-shell" data-chat={chatOpen}>
     <div className="pw-layout"><main className="pw-main">
       <header className="pw-daily-heading"><div><h2>{t('homeDailyTitle')}</h2><p>{t('homeFocusHint')}</p></div>
-        <Button variant="primary" disabled={!state?.masterId} icon={<Icon name="message" size={17} />}
+        <Button variant="primary" disabled={!ready} icon={<Icon name="message" size={17} />}
+          title={ready ? undefined : t('masterNotReady')}
           onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('mainConversationEntry')}</Button></header>
       <section className="pw-domains" aria-label={t('homeDomains')}><div className="pw-section-title"><h2>{t('homeDomains')}</h2>
         <div className="pw-actions"><Button size="sm" variant="ghost" onClick={props.openDomainSettings}>{t('homeManageDomains')}</Button>
@@ -143,6 +146,7 @@ export function Workbench(props: Props) {
           })}</div>
       </section>
       {(stateError || error) && <LoadState error={stateError ?? error} loading={false} />}
+      {state && !ready && <p className="pw-muted" role="status">{t('masterNotReady')}</p>}
       {failure && <p className="dt-error" role="alert">{failure}</p>}
       {notice && <p className="pw-notice" role="status">{notice}</p>}
       {preview && <section className="pw-preview"><div className="pw-section-title"><h2>{preview.title}</h2>
@@ -173,10 +177,10 @@ export function Workbench(props: Props) {
                       <span>{t('homeLinkedMatter')}</span>{item.evidence}</Button>}
                     {item.threadKey && <Button size="sm" variant="ghost" className="pw-evidence" onClick={() => props.openManagement(undefined, item.threadKey)}>
                       <span>{t('homeSourceUpdate')}</span>{item.ticketId ? t('homeEvidence') : item.evidence}</Button>}
-                    <Button size="sm" variant="outline" disabled={busy} onClick={() => void discuss(`请先讨论这条建议及其当前依据，不启动执行。${item.ticketId ? `关联工单 ${item.ticketId}` : `关联来源线程 ${item.threadKey}`}。建议内容为以下引用材料。\n${item.title}\n${item.reason}\n${item.nextAction}`)}>{t('homeDiscuss')}</Button>
+                    <Button size="sm" variant="outline" disabled={busy || !ready} title={ready ? undefined : t('masterNotReady')} onClick={() => void discuss(`请先讨论这条建议及其当前依据，不启动执行。${item.ticketId ? `关联工单 ${item.ticketId}` : `关联来源线程 ${item.threadKey}`}。建议内容为以下引用材料。\n${item.title}\n${item.reason}\n${item.nextAction}`)}>{t('homeDiscuss')}</Button>
                   </div></div></article>)}</div>
               {selectedDomain && !suggestions.length && <div className="pw-focus-empty"><p>{t('homeDomainEmpty')}</p>
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => void discuss(`请先只读讨论关注域“${selectedDomain.name}”的进展和下一步，不启动业务执行。关注范围作为引用材料如下。\n${selectedDomain.scope}`)}>{t('homeDiscussDomain')}</Button></div>}</>
+                <Button size="sm" variant="outline" disabled={busy || !ready} title={ready ? undefined : t('masterNotReady')} onClick={() => void discuss(`请先只读讨论关注域“${selectedDomain.name}”的进展和下一步，不启动业务执行。关注范围作为引用材料如下。\n${selectedDomain.scope}`)}>{t('homeDiscussDomain')}</Button></div>}</>
               : <div className="pw-focus-empty"><Icon name="running" size={24} /><h3>{t(refreshing ? 'homePreparing' : 'homeFocusEmpty')}</h3><p>{t('homeFocusExplanation')}</p></div>}
           </section>
           {!data.person.length && <p className="pw-empty">{t('homeNoDecisions')}</p>}
@@ -192,7 +196,7 @@ export function Workbench(props: Props) {
       <footer className="pw-sources"><span>{t('homeSourceCaption')}</span>{sources.data?.filter(source => source.enabled).map(source => <span key={source.id}
         title={source.health.map(item => item.detail).filter(Boolean).join('\n')}><i data-state={source.state} />{localized(t, source.title)}{source.stats.lastAt && <small>{when(source.stats.lastAt, t('lang'))}</small>}</span>)}</footer>
     </main><aside className="pw-collaboration" aria-label={t('homeDiscussion')}><header><div><Icon name="message" size={17} /><strong>{t('homeDiscussion')}</strong></div>
-      <Button variant="ghost" size="sm" disabled={!state?.masterId} onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('homeFullConversation')}</Button>
+      <Button variant="ghost" size="sm" disabled={!ready} title={ready ? undefined : t('masterNotReady')} onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('homeFullConversation')}</Button>
       <Button variant="ghost" size="sm" className="pw-chat-toggle" onClick={() => setChatOpen(false)}>{t('homeBack')}</Button></header>
       <p className="pw-chat-hint">{t('homeSupplementHint')}</p>
       {reply ? <form className="pw-supplement" onSubmit={event => { event.preventDefault(); if (instruction.trim()) void send(`请继续已有工单 ${reply.id}。${reply.attention ? `针对问题 ${reply.attention.id}，本人的答复如下。` : '本人补充或修改要求如下。'}\n\n${instruction.trim()}`) }}>
@@ -201,7 +205,7 @@ export function Workbench(props: Props) {
         {reply.attention && <MarkdownLite text={reply.attention.question} />}
         <input autoFocus value={instruction} disabled={busy} maxLength={16000} aria-label={t('workbenchInstruction')}
           placeholder={t('ownerDeskReplyHint')} onChange={event => setInstruction(event.target.value)} />
-        <Button type="submit" variant="primary" disabled={busy || !instruction.trim()}>{t('workbenchSendUpdate')}</Button>
+        <Button type="submit" variant="primary" disabled={busy || !instruction.trim() || !ready} title={ready ? undefined : t('masterNotReady')}>{t('workbenchSendUpdate')}</Button>
       </form> : <p className="pw-supplement-empty">{t('homeSupplementEmpty')}</p>}
     </aside></div>
   </div>

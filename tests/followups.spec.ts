@@ -95,8 +95,8 @@ it('leaves a delivered follow-up to its ticket\'s worker: the main Session may s
 function modelCalls(host: Host) {
   const master = host.agents.get(host.runtime.masterId)!
   const seen: string[] = []
-  const steer = master.steer.getMockImplementation() as (message: unknown) => void
-  master.steer.mockImplementation((message: unknown) => { seen.push(master.status); steer(message) })
+  const steer = master.followup.getMockImplementation() as (message: unknown) => void
+  master.followup.mockImplementation((message: unknown) => { seen.push(master.status); steer(message) })
   return () => seen.filter(status => status === 'idle').length + (seen.includes('running') ? 1 : 0)
 }
 
@@ -119,7 +119,7 @@ it('keeps a follow-up\'s notice in the effect queue until the main Session takes
   h = await startRuntime()
   await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   h.deliveries.mockClear()
-  h.agents.get(h.runtime.masterId)!.steer.mockImplementationOnce(() => { throw new Error('session gone') })
+  h.agents.get(h.runtime.masterId)!.followup.mockImplementationOnce(() => { throw new Error('session gone') })
   const message = followup('2', '补充一点')
   h.runtime.receive(message)
   await h.runtime.idle()

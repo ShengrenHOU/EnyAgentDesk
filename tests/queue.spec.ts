@@ -17,7 +17,7 @@ it('delivers the relays, subscription changes and notifications that a version b
     store.set('settings-notification', 5)
   })
   await h.runtime.idle()
-  const steered = h.agents.get(h.runtime.masterId)!.steer.mock.calls.map(([message]) => text(message))
+  const steered = h.agents.get(h.runtime.masterId)!.followup.mock.calls.map(([message]) => text(message))
   expect(steered).toEqual([{ kind: 'worker_report', ticket_id: 't1', state: 'ready' }])
   expect(notices(h)).toEqual(expect.arrayContaining([{ subscription_changes: [{ thread: 'github:7', removed: true }] },
     { prompt_config_saved: 3, effect: 'next-request', read: 'prompts/3' }, { settings_saved: true, read: 'settings' }]))
