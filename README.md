@@ -14,8 +14,8 @@ EnyAgentDesk（中文名「任一」）是一个跑在你自己电脑上的个�
 
 聊天式 Agent 的问题不是不聪明，是没有连续性。
 
-- 关掉窗口，上下文就散了。
-- 一件事做到一半，你回来时它不记得昨天做到哪。
+- 多个会话之间的上下文和结果仍需要自己衔接。
+- 一件事跨多个阶段推进，需要持续保留目标、进展和等待条件。
 - 同时开三个窗口，最后你自己成了调度器。
 - 它每做一步都来问你，你被训练成它的进度条。
 - 它说做完了，但你看不到它改了什么、验证了什么。
@@ -47,6 +47,16 @@ EnyAgentDesk（中文名「任一」）是一个跑在你自己电脑上的个�
 - **权限与观察模式**。每个来源有自己的允许名单；主动接单可以先跑 `observe`，只记录会做什么，不真的做。
 - **管理面板**。来源、触发、评估、执行、设置和保存历史；健康状态和失败原因都在这里。
 
+## 原生工作台的首次配置
+
+示例 profile 已启用原生工作台插件。服务就绪后运行：
+
+```sh
+python scripts/configure-workbench.py --port 3082 --owner local-owner
+```
+
+`local-owner` 是稳定的本地 owner 标识，不是令牌。脚本保留其他配置与领域，拒绝覆盖不同 owner，并配置该来源的允许名单。DSH 仍负责浏览器认证。若使用其他端口，传入对应端口。其他来源单独启用；微信读取依赖你已授权安装的本机只读工具，仓库不包含聊天记录或解密材料。邮箱、日历、任务和审批不属于当前内置持续来源。
+
 ## 快速开始
 
 ### 让 Agent 帮你装
@@ -70,7 +80,7 @@ EnyAgentDesk（中文名「任一」）是一个跑在你自己电脑上的个�
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install && pnpm build
+pnpm install --frozen-lockfile --ignore-scripts && pnpm build
 
 # 从 DSH 的 Web 模板创建一个独立 profile，再把当前目录作为 bundle 装进去
 dsh superagent --from-default-profile web --dump-config > /dev/null
@@ -84,7 +94,7 @@ scripts/dsh-superagent start
 scripts/dsh-superagent status
 ```
 
-启动后打开日志里打印的地址，在侧边栏选择 **Superagent**，或者直接进入 `#workbench`。
+启动后打开日志里打印的地址，选择侧边栏的 **主对话**（`#main-conversation`）；**个人工作台**（`#workbench`）提供今天、工单、来源健康和设置。
 
 Windows 的安装、Codex 路径、启动器和恢复步骤见 [Codex on Windows](docs/009-codex-windows.md)。仓库里也有 `scripts/start-windows.ps1` 可以在前台排查问题。
 
@@ -131,6 +141,10 @@ flowchart LR
 中文的安装与日常使用说明在 [docs/zh/guide.md](docs/zh/guide.md)。英文文档是当前的主文档集，中文文档会继续补齐。
 
 ## 和上游的关系
+
+![协同架构](docs/assets/architecture.svg)
+
+持续跟进、事件唤醒和减少人工打断的设计也参考了 [Agent Autoloop](https://github.com/KKKKhazix/agent-autoloop)。这些能力通过 DSH 与 Superagent 的现有会话、工单和扩展接口实现。
 
 这个项目建立在 DeepSeek Harness 团队开源的 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) 之上。上游提供了事件、评估、工单、授权、订阅、执行器和面板的基本模型。本仓库补的是个人工作台这一层，包括原生工作台、Codex 执行器、Windows 启动与恢复、飞书和微信的活动来源、跟进与管理工具，以及更完整的多执行器路由。
 

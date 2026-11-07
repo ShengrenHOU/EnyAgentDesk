@@ -79,6 +79,26 @@ it('adds one line to the selected matter without leaving the workbench', async (
   expect(document.querySelector('.pw-shell')?.getAttribute('data-chat')).toBe('false')
 })
 
+it('explains why discussion, answers and updates are unavailable without a main Session', async () => {
+  server.masterId = ''
+  const { send } = await mount({ headline: '先核对原说明的实际使用情况', generatedAt: new Date().toISOString(), items: [
+    { title: '复核说明', reason: '原说明已有交付', nextAction: '先讨论是否需要补充', ticketId: 't1', evidence: '原事项', stale: false },
+  ] })
+  expect(document.body.textContent).toContain(zh.masterNotReady)
+  const discuss = [...document.querySelectorAll<HTMLButtonElement>('.pw-focus button')]
+    .find(button => button.textContent === zh.homeDiscuss)!
+  expect(discuss.disabled).toBe(true)
+  await click(zh.workbenchAnswer)
+  const input = document.querySelector<HTMLInputElement>('.pw-supplement input')!
+  await type(input, '先按 A 修，补充背景见上一条。')
+  const submit = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .find(button => button.textContent === zh.workbenchSendUpdate)!
+  expect(submit.disabled).toBe(true)
+  expect(input.disabled).toBe(false)
+  expect(input.value).toBe('先按 A 修，补充背景见上一条。')
+  expect(send).not.toHaveBeenCalled()
+})
+
 it('keeps detailed discussion in the main Session instead of a second transcript', async () => {
   const { send, openSession } = await mount({ headline: '先核对原说明的实际使用情况', generatedAt: '2026-11-05T00:00:00Z', items: [
     { title: '复核说明', reason: '原说明已有交付', nextAction: '先讨论是否需要补充', ticketId: 't1', evidence: '原事项', stale: false },

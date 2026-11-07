@@ -4,6 +4,8 @@ Instructions for an agent that sets up dsh-superagent with its operator. If you 
 
 For the personal-platform profile, GitHub is optional. A Feishu-only installation disables the GitHub Source and leaves its repository and CLI empty. Existing configured GitHub accounts remain usable when only event intake is switched off. Reuse the operator's accepted setup decisions and existing credentials. The personal-platform configuration and task controls are described in [Codex on Windows](docs/009-codex-windows.md).
 
+For the personal Web workbench, use `examples/profile.cordis.patch.yml`, which enables `dsh-superagent-workbench`. Once the runtime is ready, run `python scripts/configure-workbench.py --port <local-port> --owner <stable-owner-label>`. The owner label is a local identity namespace, not an access token; DSH still authenticates the browser. The helper preserves other settings and domains, refuses a different existing owner and uses settings revisions. This configures the Source and its allowed sender together. Open `#main-conversation` for delegation; `#workbench` is the four-tab daily view. Do not ask an owner to delegate before this setup is complete.
+
 ## How to run the setup
 
 The setup follows [docs/000-philosophy.md](docs/000-philosophy.md): it takes as little of the operator's attention as possible.

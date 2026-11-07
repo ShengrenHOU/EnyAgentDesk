@@ -825,41 +825,29 @@ it('leaves waiting and blocked assignments alone after a restart and keeps block
   expect(runtime.store.tickets.get(other.ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
 })
 
-it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothing is polled, assessed or dispatched', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
-  expect(() => runtime.checkSetup()).toThrow('Setup is complete')
-  controller.create.mockClear(); deliveries.mockClear()
+it('keeps the runtime and Feishu usable without a GitHub CLI, while exposing the recoverable source problem', async () => {
   const next = await restart({}, { github: { cli: '' } })
+  next.sources.register(feishuKind)
   await next.ready
-  expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toEqual({ place: 'github', code: 'agentCliUnset', values: {}, detail: 'The agent GitHub CLI is not set.' })
-  expect(next.health.runtime).toMatchObject({ state: 'paused', code: 'setupPending', detail: expect.stringContaining('version unconfirmed') })
-  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: The agent GitHub CLI is not set.')
-  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: null, machine: { stateDir: directory } } })
-  expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.setupProblem })
+  expect(next.configured()).toBe(true)
+  expect(next.setupProblem).toBeUndefined()
+  expect(next.health.runtime).toMatchObject({ state: 'ready' })
+  expect(next.deployment.feishu).toBeDefined()
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: {
+    problem: null, githubProblem: { place: 'github', code: 'agentCliUnset' }, machine: { stateDir: directory } } })
   await receive(feishu('30', '@bot 修一下'), next)
-  // A retry waits for setup instead of launching a worker that cannot run, and no report reaches the orchestrator.
-  await next.engine.retryTicket(ticket.id)
-  expect(next.store.tickets.get(ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
-  expect(controller.create).not.toHaveBeenCalled()
-  expect(deliveries).not.toHaveBeenCalled()
-  // A save that changes nothing records nothing; any other save runs setup again, since it may be the fix, and so does a
-  // check after a fix outside dsh-superagent.
-  const revision = next.store.get<number>('settings-revision')
-  expect(await next.settings.save('policy', next.store.settings().policy, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: false })
-  expect(next.store.get<number>('settings-revision')).toBe(revision)
-  expect(await next.settings.save('policy', { ...next.store.settings().policy, rules: [] }, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: true })
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
+  await next.pump(); await next.idle()
+  expect(next.store.triggers.get(feishu('30', '@bot 修一下').id)).toBeDefined()
+  expect(deliveries.mock.calls.some(([item]) => item.sessionId === next.masterId)).toBe(true)
   next.checkSetup()
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
 })
 
 it('reports repository access where the operator fixes it and probes the CLI in the worker environment', async () => {
   answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
   const next = await restart()
   await next.ready
-  expect(next.setupProblem).toMatchObject({ place: 'github', code: 'repositoryReadOnly', values: { account: 'agent-bot', repository: 'acme/widgets' } })
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: null, githubProblem: { place: 'github', code: 'repositoryReadOnly', values: { account: 'agent-bot', repository: 'acme/widgets' } } } })
   // The agent CLI runs in the workers' environment: without the shims on PATH.
   const check = subprocess.spawn.mock.calls.map(([spec]) => spec.argv).find(argv => argv.includes(AGENT()))!
   expect(check[0]).toBe('env')
@@ -878,7 +866,7 @@ it('reports a git version that ignores the isolated worker credential configurat
 it('reports the missing repository on the GitHub source', async () => {
   const next = await restart({}, { github: { repository: '' } })
   await next.ready
-  expect(next.setupProblem).toMatchObject({ place: 'github', code: 'repositoryUnset', values: {} })
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: null, githubProblem: { place: 'github', code: 'repositoryUnset', values: {} } } })
 })
 
 it('leaves a broken Feishu bot out while configured GitHub work remains available', async () => {

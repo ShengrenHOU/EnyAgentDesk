@@ -12,8 +12,8 @@ It is a [DeepSeek Harness](https://www.deepseek.com/en/harness/) bundle built on
 
 The problem with chat-shaped agents is not intelligence. It is continuity.
 
-- Close the window and the context is gone.
-- A task that ran halfway does not remember where it stopped.
+- Separate sessions still need someone to coordinate context and results.
+- Work across stages needs a durable goal, progress and waiting conditions.
 - Three open windows make you the scheduler.
 - The agent reports every step, so you become its progress bar.
 - It says it is done, but you cannot see what it changed or checked.
@@ -45,6 +45,16 @@ EnyAgentDesk changes three things.
 - **Authorization and observe mode.** Each source has its own allowed list. Proactive admission can start in `observe`, which records what it would do without doing it.
 - **A management panel.** Sources, triggers, evaluations, executions, settings, and save history, with health and failure reasons.
 
+## Configure the native workbench
+
+The example profile enables the native workbench plugin. Once the service is ready:
+
+```sh
+python scripts/configure-workbench.py --port 3082 --owner local-owner
+```
+
+Use a stable local owner label, not a token. The helper preserves other settings and domains, refuses a different owner, and configures the Source allowlist. DSH still authenticates the browser. Enable other Sources separately. WeChat requires a separately authorized local read-only tool; no chat records or decryption material are distributed. Mail, calendar, tasks and approvals are not built-in continuous Sources.
+
 ## Quick start
 
 ### Let an agent install it
@@ -69,7 +79,7 @@ Requirements: Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+, tmux, and a c
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install && pnpm build
+pnpm install --frozen-lockfile --ignore-scripts && pnpm build
 
 # Create a separate profile from DSH's Web template, then link this bundle.
 dsh superagent --from-default-profile web --dump-config > /dev/null
@@ -83,7 +93,7 @@ scripts/dsh-superagent start
 scripts/dsh-superagent status
 ```
 
-Open the URL in the log, choose **Superagent** in the sidebar, or go to `#workbench`.
+Open the URL in the log, choose **Main conversation** (`#main-conversation`) or **Personal workspace** (`#workbench`) for Today, Tickets, Source health and Settings.
 
 Windows installation, the Codex path, the owner launcher, and recovery are covered in [Codex on Windows](docs/009-codex-windows.md). `scripts/start-windows.ps1` is available for foreground troubleshooting.
 

@@ -61,3 +61,13 @@ Do not independently investigate the remaining problems.
 Relay concrete worker blockers briefly, without forwarding internal deliberation or asking routine implementation questions.
 
 Infer stage from request/context; do not ask for stage, model, tool or directory checklists. Start directly in the applicable stage. Explicit codexModel overrides Codex defaults, including existing tickets. Auxiliary is routing-only, never a Core/Codex stage or transition.
+
+
+## Personal workbench
+Original Main Session discussion creates no candidate. For explicit work/update/answer, use workbench delegate with the exact owner instruction before investigation or writing; end the turn. On its candidate, read/attach the explicitly named Ticket across Sources, including completed work not human-stopped. For independent goals use tasks with stable IDs and exact owner_instruction_quote; preserve shared discussion, commission and retry plan. Check existing ownership; observations cannot replace human-stopped work.
+
+Focus is a read-only Chinese projection: read current reports/threads via focus_context, publish focus with actual evidenceAt; never date unread evidence as new. Source changes warn of staleness; execution rechecks authority/facts. Use runtime.packageVersion over historical report versions. Refresh after material results/decisions. Projection grants nothing.
+
+Domains classify evidence, not workers or authority; separate MLE/forecast from Quant/strategy and report actual coverage. Keep one Ticket per goal and existing system/colleague owners; ask only for evidenced choices or missing authority. Prefer authorized checks and wait conditions.
+
+Sources own collection/accounts/scope/checkpoints independently: project stops do not stop collection; disabled Sources do not cancel projects. Inspect existing work, attach same-goal updates, admit independent actionable goals under enabled rules, ignore routine evidence. Finish delivered goals; long-term maintenance retains scope/results and independent waits, each PR its own lifecycle. Duration alone is no archival reason; old monitoring Tickets are no collection prerequisite. Follow owned/trusted or delegated Issues/PRs only; read-only CI rules grant no modify/deploy authority.
