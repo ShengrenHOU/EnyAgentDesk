@@ -4,7 +4,7 @@
   "contributors": [
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "version": "0.5.13",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
@@ -44,6 +44,9 @@
     "lib",
     "cordis.patch.yml",
     "locale/*.json",
+    "LICENSE",
+    "LICENSES",
+    "NOTICE",
     "README.md",
     "prompts",
     "skills"

@@ -131,7 +131,7 @@ A Chinese README is in [README.zh-CN.md](README.zh-CN.md). The deep documentatio
 
 This project builds on the [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) released by the DeepSeek Harness team. Upstream provides the event, evaluation, ticket, mandate, subscription, executor, and panel model. This repository adds the personal workbench layer: the native workspace, the Codex executor, Windows launch and recovery, Feishu and WeChat activity sources, follow-up and management tools, and broader executor routing.
 
-Upstream code is MIT licensed and copyright DeepSeek Harness Team. This repository keeps the original license and attribution; new work is copyright its authors. The two are not guaranteed to stay in sync. Upgrades record the upstream commit actually adopted and the checks that were run.
+Upstream code is MIT licensed and copyright DeepSeek Harness Team. This repository is Apache-2.0 licensed, and the upstream MIT license and attribution are retained. The two are not guaranteed to stay in sync. Upgrades record the upstream commit actually adopted and the checks that were run.
 
 ## Status and limits
 
@@ -155,4 +155,4 @@ Treat this as an early project.
 
 ## License
 
-[MIT](LICENSE). Upstream copyright belongs to the DeepSeek Harness Team; new work belongs to the authors of this repository.
+This repository is [Apache-2.0](LICENSE) licensed. Upstream code remains [MIT](LICENSES/MIT.txt), copyright the DeepSeek Harness Team; see [NOTICE](NOTICE) for the full attribution.

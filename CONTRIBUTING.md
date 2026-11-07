@@ -32,4 +32,4 @@ pnpm check
 
 ## 许可证
 
-提交即表示你同意以 MIT 许可证贡献这些改动。上游版权归 DeepSeek Harness Team，新增部分归本仓库作者；来源说明见 [NOTICE](NOTICE)。
+提交即表示你同意以 Apache-2.0 许可证贡献这些改动。上游代码仍使用 MIT 许可证，版权归 DeepSeek Harness Team；来源说明见 [NOTICE](NOTICE)。

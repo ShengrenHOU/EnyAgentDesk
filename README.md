@@ -134,7 +134,7 @@ flowchart LR
 
 这个项目建立在 DeepSeek Harness 团队开源的 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) 之上。上游提供了事件、评估、工单、授权、订阅、执行器和面板的基本模型。本仓库补的是个人工作台这一层，包括原生工作台、Codex 执行器、Windows 启动与恢复、飞书和微信的活动来源、跟进与管理工具，以及更完整的多执行器路由。
 
-上游代码使用 MIT 许可证，版权归 DeepSeek Harness Team。本仓库保留原许可证和来源说明，新增部分的版权归本仓库作者。两边的差异不保证和上游同步，升级时以实际采用的上游提交和验证记录为准。
+上游代码使用 MIT 许可证，版权归 DeepSeek Harness Team。本仓库以 Apache-2.0 许可证发布，并保留上游的 MIT 许可证和来源说明。两边的差异不保证和上游同步，升级时以实际采用的上游提交和验证记录为准。
 
 ## 现状与限制
 
@@ -158,4 +158,4 @@ flowchart LR
 
 ## License
 
-[MIT](LICENSE)。上游版权归 DeepSeek Harness Team，新增部分归本仓库作者。
+本仓库以 [Apache-2.0](LICENSE) 发布。上游代码保留 [MIT](LICENSES/MIT.txt) 许可证，版权归 DeepSeek Harness Team；完整来源说明见 [NOTICE](NOTICE)。
