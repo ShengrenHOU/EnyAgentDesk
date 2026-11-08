@@ -1,5 +1,6 @@
 /** Native discussion action; the Host captures source history and owns delegation receipts. */
 import { useEffect, useRef, useState } from 'react'
+import { answerAttention } from './api.ts'
 import type { WorkbenchRequest, WorkbenchUpdate, discussionTasks } from '../sources/workbench.ts'
 import { when, type T } from './text.ts'
 import { Button, Icon, Modal, Tag, type TagTone } from './controls.tsx'
@@ -123,7 +124,8 @@ export function WorkbenchAction({ sessionId, t, openTicket }: { sessionId: strin
       ...(target ? { ticketId: target.ticketId, ...(target.attentionId ? { attentionId: target.attentionId } : {}) } : {}) }
     setBusy(true); setError(''); setReceived(false)
     try {
-      await answer(await fetch(`/api/superagent-workbench/${'ticketId' in pending.current ? 'update' : 'delegate'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pending.current) }))
+      if (target?.attentionId) await answerAttention(t, target.ticketId, target.attentionId, pending.current.instruction)
+      else await answer(await fetch(`/api/superagent-workbench/${'ticketId' in pending.current ? 'update' : 'delegate'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pending.current) }))
       setReceived(true); pending.current = undefined; setInstruction('')
       summaries.delete(sessionId)
       void loadSummary(sessionId).then(setSummary, () => setSummary(undefined))

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Store, SCHEMA_VERSION } from '../src/app/store.ts'
-import { MemoryRepositories, key, type Assignment, type Decision, type Repositories, type Thread, type Ticket } from '../src/core/index.ts'
+import { MemoryRepositories, key, ticketStage, type Assignment, type Decision, type Repositories, type Thread, type Ticket } from '../src/core/index.ts'
 import { threadFacts } from '../src/app/views/records.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -46,6 +46,20 @@ const ticket = (id: string, state: 'open' | 'ended', assignments: Pick<Assignmen
   undelivered, createdAt: '', updatedAt: '', origin: { triggerId: '', triggerIds: [] } })
 const thread = (id: string, source: string, fields: Partial<Thread> = {}): Thread =>
   ({ key: `${source}:${id}`, ref: { source, id }, createdAt: '', subscriptions: [], correlated: [], pending: [], meta: {}, ...fields })
+
+it('retains the owner answer receipt and pending-processing stage after reopening SQLite', () => {
+  const path = join(directory, 'answers.sqlite')
+  const before = new Store(path)
+  const saved = ticket('one', 'open', [{ state: 'running' }], ['answer-1'])
+  saved.inputs = [{ id: 'answer-1', kind: 'answer', attentionId: 'question-1', question: 'Which scope?', text: 'Only the report.',
+    by: { source: 'workbench', id: 'owner' }, at: '2026-11-08T10:00:00.000Z' }]
+  before.tickets.save(saved); before.close()
+  const after = new Store(path)
+  try {
+    expect(after.tickets.get('one')).toEqual(saved)
+    expect(ticketStage(after.tickets.get('one')!)).toEqual({ stage: 'working', action: 'answer-pending' })
+  } finally { after.close() }
+})
 const ids = (items: { id?: string; key?: string }[]) => items.map(item => item.id ?? item.key).sort()
 
 it('migrates legacy GitHub relationships atomically while preserving work, decisions and delivery identities', () => {

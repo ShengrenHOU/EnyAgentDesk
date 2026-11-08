@@ -16,7 +16,8 @@ export function ticketMark(t: T, ticket: TicketStage & Pick<TicketSummary, 'ende
       return { label: t(`stage.${action}`), tone: action === 'failed' ? 'danger' : 'warning', dot: action === 'failed' ? 'error'
         : 'warning', icon }
     }
-    case 'working': return ticket.action === 'queued' ? { label: t('stage.queued'), tone: 'neutral', dot: 'idle', icon: 'queue' }
+    case 'working': return ticket.action === 'answer-pending' ? { label: t('stage.answer-pending'), tone: 'neutral', dot: 'idle', icon: 'inbox' }
+      : ticket.action === 'queued' ? { label: t('stage.queued'), tone: 'neutral', dot: 'idle', icon: 'queue' }
       : { label: t('stage.working'), tone: 'info', dot: 'ongoing', icon: 'running' }
     default: return { label: t('stage.idle'), tone: 'neutral', dot: 'idle', icon: 'clock' }
   }

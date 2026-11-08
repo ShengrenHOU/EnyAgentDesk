@@ -1,12 +1,14 @@
 /** Daily work index with a one-line supplement for one matter; full discussion stays in the main Session. */
 import { useEffect, useRef, useState } from 'react'
 import type { readFocus } from '../sources/workbench-focus.ts'
-import { usePoll, type TicketRow } from './api.ts'
+import { answerAttention, usePoll, type TicketRow } from './api.ts'
 import { Button, Icon, Tag } from './controls.tsx'
 import { ticketMark } from './marks.ts'
 import { ProblemList } from './overview.tsx'
 import { usePanel, usePanelData } from './provider.tsx'
-import { errorText, localized, valueLabel, when, type T } from './text.ts'
+import { ReplyForm } from './reply-form.tsx'
+import { PendingFollowups } from './rows.tsx'
+import { errorText, fullTime, localized, valueLabel, when, type T } from './text.ts'
 import { ConfirmButton, ExternalLink, LoadState, MarkdownLite } from './widgets.tsx'
 
 interface Props {
@@ -77,6 +79,17 @@ export function Workbench(props: Props) {
     await props.openSession(state.masterId).catch(error => setFailure(errorText(error)))
   }
   const respond = (ticket: Pick<TicketRow, 'id' | 'title' | 'attention'>) => { setReply(ticket); setInstruction(''); setNotice(''); setPreview(undefined); setChatOpen(true) }
+  const submitReply = async () => {
+    if (!reply || !instruction.trim() || busy) return
+    if (!reply.attention) { await send(`请继续已有工单 ${reply.id}。本人补充或修改要求如下。\n\n${instruction.trim()}`); return }
+    setBusy(true); setFailure(undefined)
+    try {
+      await answerAttention(t, reply.id, reply.attention.id, instruction.trim())
+      setNotice(t('ticketAnswerSent')); setReply(undefined); setInstruction(''); setChatOpen(false)
+      await Promise.all([reload(), detail.reload()])
+    } catch (error) { setFailure(errorText(error)) }
+    finally { setBusy(false) }
+  }
   const stop = async (ticket: Pick<TicketRow, 'id' | 'title'>) => {
     await call('POST tickets/:id/stop', { id: ticket.id })
     if (reply?.id === ticket.id) { setReply(undefined); setInstruction('') }
@@ -99,7 +112,7 @@ export function Workbench(props: Props) {
     {(ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => <div className="pw-actions" key={item.id}>
       <p className="pw-muted">{t('ticketFollowupAt')} {when(item.at, t('lang'))} · {item.reason}</p>
       <ConfirmButton label={t('homeCancelFollowup')} title={t('homeCancelFollowupTitle')}
-        message={t('homeCancelFollowupConfirm', { reason: item.reason })} onConfirm={async () => {
+        message={t('homeCancelFollowupConfirm', { title: ticket.title, at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
           await call('DELETE tickets/:id/followup', { id: ticket.id, query: { request_id: item.id } })
           setNotice(t('homeFollowupCancelled')); await Promise.all([reload(), detail.reload(), focus.reload()])
         }} />
@@ -111,6 +124,7 @@ export function Workbench(props: Props) {
       <time dateTime={ticket.updatedAt}>{when(ticket.updatedAt, t('lang'))}</time></div>
     <div className="pw-actions"><Button size="sm" variant="outline" onClick={() => respond(ticket)}>{t(ticket.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>
       {stopButton(ticket)}
+      <Button size="sm" variant="ghost" onClick={() => props.openManagement(ticket.id)}>{t('ticketAllActions')}</Button>
       {ticket.deliverables?.map(item => {
         const url = new URL(item.url, location.href)
         return url.origin === location.origin && url.pathname === '/api/superagent-workbench/artifact'
@@ -184,6 +198,7 @@ export function Workbench(props: Props) {
               : <div className="pw-focus-empty"><Icon name="running" size={24} /><h3>{t(refreshing ? 'homePreparing' : 'homeFocusEmpty')}</h3><p>{t('homeFocusExplanation')}</p></div>}
           </section>
           {!data.person.length && <p className="pw-empty">{t('homeNoDecisions')}</p>}
+          <PendingFollowups openTicket={setSelected} />
           <div className="pw-section-title"><h2>{t('homeProgress')}</h2><span>{(data.work?.workingTotal ?? 0) + (data.work?.waitingTotal ?? 0)}</span><button type="button" className="dt-textlink" onClick={() => props.openWorkList('open')}>{t('homeAllWork')}</button></div>
           <div className="pw-task-grid">{active.slice(0, 4).map(card)}</div>
           {section(t('homeResults'), data.work?.delivered.slice(0, 3) ?? [], t('homeNoResults'), data.work?.deliveredTotal, 'ended')}
@@ -199,14 +214,13 @@ export function Workbench(props: Props) {
       <Button variant="ghost" size="sm" disabled={!ready} title={ready ? undefined : t('masterNotReady')} onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('homeFullConversation')}</Button>
       <Button variant="ghost" size="sm" className="pw-chat-toggle" onClick={() => setChatOpen(false)}>{t('homeBack')}</Button></header>
       <p className="pw-chat-hint">{t('homeSupplementHint')}</p>
-      {reply ? <form className="pw-supplement" onSubmit={event => { event.preventDefault(); if (instruction.trim()) void send(`请继续已有工单 ${reply.id}。${reply.attention ? `针对问题 ${reply.attention.id}，本人的答复如下。` : '本人补充或修改要求如下。'}\n\n${instruction.trim()}`) }}>
+      {reply ? <section className="pw-supplement">
         <div className="pw-section-title"><h2>{t('workbenchUpdateTarget', { title: reply.title })}</h2>
           <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setReply(undefined); setChatOpen(false) }}>{t('cancel')}</Button></div>
         {reply.attention && <MarkdownLite text={reply.attention.question} />}
-        <input autoFocus value={instruction} disabled={busy} maxLength={16000} aria-label={t('workbenchInstruction')}
-          placeholder={t('ownerDeskReplyHint')} onChange={event => setInstruction(event.target.value)} />
-        <Button type="submit" variant="primary" disabled={busy || !instruction.trim() || !ready} title={ready ? undefined : t('masterNotReady')}>{t('workbenchSendUpdate')}</Button>
-      </form> : <p className="pw-supplement-empty">{t('homeSupplementEmpty')}</p>}
+        <ReplyForm autoFocus value={instruction} onChange={setInstruction} maxLength={16000} busy={busy} disabled={!ready}
+          onSubmit={() => void submitReply()} />
+      </section> : <p className="pw-supplement-empty">{t('homeSupplementEmpty')}</p>}
     </aside></div>
   </div>
 }

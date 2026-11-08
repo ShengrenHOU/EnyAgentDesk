@@ -7,6 +7,66 @@ import { usePanel, mount, remount, settle, all, find, tab, click, type, text, fi
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
+it('repairs legacy field types as JSON and preserves the revision guard', async () => {
+  const original = globalThis.fetch
+  let broken = true
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const response = await original(input, init)
+    if (decodeURIComponent(input).endsWith('/settings/source:feishu') && init?.method === 'PUT' && response.ok) broken = false
+    if (input.endsWith('/settings') && broken) {
+      const result = JSON.parse(await response.text())
+      result.sources = result.sources.map((row: { id: string; value: { enabled: boolean; config: object } }) => row.id === 'feishu'
+        ? { ...row, configError: ['chats'], value: { ...row.value, config: { ...row.value.config, chats: 'legacy value' } } } : row)
+      return Response.json(result)
+    }
+    return response
+  }))
+  at({ page: 'settings', query: { group: 'source' } }); await mount()
+  const input = field<HTMLTextAreaElement>(zh.sourceRawConfig)
+  const fixed = JSON.parse(input.value)
+  fixed.chats = [{ chatId: 'oc_team', listen: 'mentions' }]
+  await type(input, '{')
+  expect(document.querySelector<HTMLButtonElement>('#dt-source-feishu button[type="submit"]')?.disabled).toBe(true)
+  await type(input, JSON.stringify(fixed))
+  server.revisions['source:feishu'] = 1
+  await click(find(zh.save, '#dt-source-feishu button'))
+  expect(text()).toContain(zh.saveConflict)
+  expect(broken).toBe(true)
+  await click(zh.sourceReloadConfig)
+  await type(field<HTMLTextAreaElement>(zh.sourceRawConfig), JSON.stringify(fixed))
+  await click(find(zh.save, '#dt-source-feishu button'))
+  expect(broken).toBe(false)
+  expect(document.querySelector(`[aria-label="${zh.sourceRawConfig}"]`)).toBeNull()
+  expect(server.settings.sources.feishu!.config.chats).toEqual(fixed.chats)
+})
+
+it('shows an invalid Source diagnostic even when inactive and opens its editable saved fields', async () => {
+  const original = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const response = await original(input, init)
+    if (input.endsWith('/sources')) {
+      const rows = JSON.parse(await response.text())
+      return Response.json(rows.map((row: { id: string }) => row.id === 'feishu' ? { ...row, enabled: false, state: 'error',
+        configError: ['readPageSize'], health: [{ name: 'configuration', state: 'error', detail: '', code: 'sourceConfigInvalid',
+          values: { fields: 'readPageSize' } }] } : row))
+    }
+    if (input.endsWith('/settings')) {
+      const value = JSON.parse(await response.text())
+      value.sources = value.sources.map((row: { id: string }) => row.id === 'feishu'
+        ? { ...row, configError: ['readPageSize'] } : row)
+      return Response.json(value)
+    }
+    return response
+  }))
+  await mount()
+  await click(zh['tab.source'])
+  expect(text()).toContain('已保存的配置无效')
+  expect(text()).toContain('readPageSize')
+  await click(zh.sourceOpenSettings)
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('readPageSize')
+  expect(document.getElementById('dt-source-feishu')).not.toBeNull()
+})
+
 it('shows each Source\'s state on the Source status and opens its settings from a setup problem', async () => {
   await mount()
   await click(zh['tab.source'])

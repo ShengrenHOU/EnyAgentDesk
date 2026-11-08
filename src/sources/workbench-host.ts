@@ -8,9 +8,10 @@ import { createWorkbenchKind, delegateDiscussion, discussionSummary, discussionT
 import { discussionContext, readDiscussion } from './workbench-session.ts'
 import { publishWorkbenchFiles, readWorkbenchFile } from './workbench-files.ts'
 import { registerWorkbenchTool } from './workbench-tools.ts'
-import { AgentDelivery } from '../app/delivery.ts'
+import { AgentDelivery } from '../infra/delivery.ts'
 import { KV } from '../kv.ts'
 import { focusRequestKey, readFocus } from './workbench-focus.ts'
+import { UserError } from '../core/index.ts'
 
 export const name = 'dsh-superagent-workbench'
 export const inject = ['orchestrator', 'connection', 'sessionController', 'sessionPersistence', 'agents', 'attachments', 'webServer', 'tools']
@@ -35,6 +36,24 @@ export function apply(ctx: Context): void {
         })
     })))
   ctx.effect(() => registerWorkbenchTool(ctx))
+  ctx.effect(() => ctx.connection.fetch.register({ path: '/api/superagent-workbench/answer', methods: ['POST'], requestBody: 'buffered',
+    async fetch(request) {
+      try {
+        const source = ctx.orchestrator.context(workbenchKind)
+        await source.ready
+        const body = await request.text()
+        if (Buffer.byteLength(body) > 84_000) return Response.json({ error: 'Answer request is too large' }, { status: 413 })
+        const input = z.object({ ticketId: z.string().min(1), attentionId: z.string().min(1),
+          instruction: z.string().trim().min(1).max(20_000) }).strict().parse(JSON.parse(body))
+        return Response.json(source.tickets.answerAttention(input.ticketId, input.attentionId, input.instruction),
+          { headers: { 'cache-control': 'no-store' } })
+      } catch (error) {
+        if (error instanceof z.ZodError || error instanceof SyntaxError) return Response.json({ error: 'Invalid answer request' }, { status: 400 })
+        return Response.json({ error: error instanceof Error ? error.message : 'Answer was not saved',
+          ...error instanceof UserError ? { code: error.code } : {} }, { status: 409 })
+      }
+    },
+  }))
   ctx.effect(() => ctx.connection.fetch.register({
     path: '/api/superagent-workbench/focus', methods: ['GET'], requestBody: 'buffered',
     async fetch() {
@@ -115,6 +134,8 @@ export function apply(ctx: Context): void {
         const update = action === 'update' ? WorkbenchUpdateSchema.parse(parsed) : undefined
         const input = update ?? WorkbenchRequestSchema.parse(parsed)
         const context = await readDiscussion(ctx.sessionController, input.sessionId, input.throughSeq, request.signal, ctx.attachments)
+        if (update?.attentionId) return Response.json(source.tickets.answerAttention(update.ticketId, update.attentionId, update.instruction),
+          { headers: { 'cache-control': 'no-store' } })
         const receipt = update
           ? await updateDiscussionTask(source, owner, update, context, new Date().toISOString())
           : await delegateDiscussion(source, owner, input, context, new Date().toISOString())

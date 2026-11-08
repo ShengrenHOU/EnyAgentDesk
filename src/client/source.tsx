@@ -1,15 +1,59 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
 import { useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
-import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
+import { ApiError, usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
 import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
-import { usePanel, usePanelData } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
+
+function SourceConfigRepair({ source, fields }: { source: SourceView; fields: string[] }) {
+  const { t, call } = usePanel()
+  const { running } = usePanelData()
+  const { reload } = useSettings()
+  const [text, setText] = useState(() => JSON.stringify(source.value.config, null, 2))
+  const [enabled, setEnabled] = useState(source.value.enabled)
+  const [revision, setRevision] = useState(source.revision)
+  const config = (() => {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+    } catch { return undefined }
+  })()
+  const save = useAction(async () => {
+    if (!config) return
+    try { await call('PUT settings/:block', { block: `source:${source.id}`, body: { revision, value: { enabled, config } } }) }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 409) throw new Error(t('saveConflict'))
+      throw error
+    }
+    await reload()
+  })
+  const restarts = config && source.restarts.some(key => String(config[key] ?? '') !== String(source.value.config[key] ?? ''))
+  const readLatest = useAction(async () => {
+    const latest = (await call('GET settings')).sources.find(item => item.id === source.id)
+    if (!latest) throw new Error(t('sourceNotInstalledHint'))
+    setText(JSON.stringify(latest.value.config, null, 2)); setEnabled(latest.value.enabled); setRevision(latest.revision)
+    await reload()
+  })
+  return <form id={`dt-source-${source.id}`} className="dt-card" onSubmit={event => { event.preventDefault(); if (config) void save.run() }}>
+    <Fields disabled={save.busy || readLatest.busy}>
+      <div className="dt-card-head"><strong>{localized(t, source.title)}</strong>
+        <Switch checked={enabled} onChange={setEnabled} label={t('sourceEnable', { name: localized(t, source.title) })} /></div>
+      <p className="dt-error" role="alert">{t('healthCode.sourceConfigInvalid', { fields: fields.join(', ') })}</p>
+      <Hint>{t('sourceRawConfigHint')}</Hint>
+      <textarea aria-label={t('sourceRawConfig')} value={text} rows={10} style={{ width: '100%' }} onChange={event => setText(event.target.value)} />
+      {!config && <p className="dt-error" role="alert">{t('sourceRawConfigInvalid')}</p>}
+      {restarts && running > 0 && <Hint>{t('restartInterrupts', { count: running })}</Hint>}
+      <div className="dt-row-buttons"><Button variant="primary" type="submit" disabled={!config}>{t('save')}</Button>
+        <Button variant="ghost" onClick={() => void readLatest.run()}>{t('sourceReloadConfig')}</Button></div>
+    </Fields>
+  </form>
+}
 
 function SourceCard({ source }: { source: SourceView }) {
   const { t, call } = usePanel()
@@ -62,7 +106,8 @@ export function SourceSettings({ focus }: { focus?: string }) {
   const { sources } = useSettings().settings
   useEffect(() => { if (focus) document.getElementById(`dt-source-${focus}`)?.scrollIntoView?.({ block: 'start' }) }, [focus])
   return <div className="dt-form">
-    {sources.map(source => <SourceCard key={source.id} source={source} />)}
+    {sources.map(source => source.configError ? <SourceConfigRepair key={source.id} source={source} fields={source.configError} />
+      : <SourceCard key={source.id} source={source} />)}
     <ConfigHistory blocks={['source:']} />
   </div>
 }
@@ -100,7 +145,7 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
   const { dot, label: state } = sourceMark(t, source.state)
   const { received, filtered, lastAt } = source.stats
   // Omit healthy parts and suppress per-part notes when a setup problem already explains why the Source is stopped.
-  const notes = source.enabled && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
+  const notes = (source.enabled || source.configError) && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
     || item.state === 'paused') : []
   return <li className="dt-row">
     <Dot state={dot} label={state} />
@@ -122,6 +167,8 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
         {valueLabel(t, 'health', item.name)}{t('labelSeparator')}<span className={item.code ? undefined : 'dt-mono'}>{healthText(t,
           item)}</span>
       </p>)}
+      {source.configError && <button type="button" className="dt-textlink"
+        onClick={() => navigate(settingsRoute('source', { source: source.id }))}>{t('sourceOpenSettings')}</button>}
       {source.filtered.length > 0 && <DisclosureRow icon={<Icon name="filter" />} title={t('sourceFilteredTitle')} open={filteredOpen}
         onToggle={() => setFilteredOpen(!filteredOpen)}>
         <div className="dt-disclosure-body">

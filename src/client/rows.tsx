@@ -1,11 +1,31 @@
 /** Shared list rows for Tickets, Threads, and Decisions, plus Source fact chips and automated-message run folding. */
 import { useState } from 'react'
-import type { DecisionRow, ThreadFacts, ThreadRow, TicketRow } from './api.ts'
+import { usePoll, type DecisionRow, type ThreadFacts, type ThreadRow, type TicketRow } from './api.ts'
 import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
 import { usePanel } from './provider.tsx'
-import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
-import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
+import { actorName, fullTime, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
+import { ActionLink, ConfirmButton, LabelValue, LoadState, SessionButton, StageMark, When } from './widgets.tsx'
+
+/** Read-only global projection; cancellation uses the Ticket's existing command and receipt. */
+export function PendingFollowups({ openTicket }: { openTicket(id: string): void }) {
+  const { t, call } = usePanel()
+  const { data, error, reload } = usePoll(() => call('GET followups'), [])
+  return <details className="dt-followup-agenda" open><summary>{t('followupAgenda')} · {data?.length ?? '…'}</summary>
+    {error && <LoadState loading={false} error={error} />}
+    {!data ? !error && <LoadState loading /> : data.length ? <ul className="dt-list">{data.map(item => <li key={`${item.ticketId}:${item.id}`}>
+      <div className="dt-owner-task-head"><button className="dt-open" type="button" onClick={() => openTicket(item.ticketId)}>{item.title}</button>
+        <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag></div>
+      <p><time dateTime={item.at}>{fullTime(item.at, t('lang'))}</time> · {item.reason}</p>
+      {item.blocked && <p className="dt-error">{t(`followupBlock.${item.blocked}`)}</p>}
+      <ConfirmButton variant="ghost" icon="close" label={t('homeCancelFollowup')}
+        title={t('homeCancelFollowupTitle')} message={t('homeCancelFollowupConfirm', { title: item.title,
+          at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
+          await call('DELETE tickets/:id/followup', { id: item.ticketId, query: { request_id: item.id } }); await reload()
+        }} />
+    </li>)}</ul> : <p className="dt-hint">{t('followupAgendaEmpty')}</p>}
+  </details>
+}
 
 export function TicketLine({ ticket, question, onChanged, context }: {
   ticket: TicketRow; question?: boolean; onChanged?: () => Promise<void>; context?: boolean
@@ -32,8 +52,8 @@ export function TicketLine({ ticket, question, onChanged, context }: {
         {note ? <span className={note.error ? 'dt-ticket-note dt-ticket-note-error' : 'dt-ticket-note'} title={note.text}>{note.text}</span>
           : <When at={ticket.updatedAt} />}
       </div>
-      {ticket.followup && <div className="dt-row-meta"><LabelValue label={t('ticketFollowupAt')}
-        value={<When at={ticket.followup.at} />} /><span>{ticket.followup.reason}</span></div>}
+      {(ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => <div className="dt-row-meta" key={item.id}><LabelValue label={t('ticketFollowupAt')}
+        value={<When at={item.at} />} /><span>{item.reason}</span></div>)}
       {!!ticket.deliverables?.length && <div className="dt-ticket-actions">{ticket.deliverables.map(item => <ActionLink
         key={item.url} href={item.url}>{item.title}</ActionLink>)}</div>}
       {/* Always render the actions container so every Ticket row keeps a uniform three-line height. */}

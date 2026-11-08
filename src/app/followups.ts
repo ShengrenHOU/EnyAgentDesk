@@ -37,6 +37,14 @@ export class Followups {
 
   list(ticketId: string): TicketFollowup[] { return ticketFollowups(this.require(ticketId)) }
 
+  /** All pending checks are a projection of open Tickets, including those held by the same rules as runDue. */
+  pending() {
+    const now = this.now()
+    return this.host.store.tickets.open().flatMap(ticket => ticketFollowups(ticket).map(item => ({ ...item,
+      ticketId: ticket.id, title: ticket.title, due: Date.parse(item.at) <= now, blocked: this.blocker(ticket) })))
+      .sort((a, b) => a.at.localeCompare(b.at) || a.ticketId.localeCompare(b.ticketId) || a.id.localeCompare(b.id))
+  }
+
   schedule(ticketId: string, request: FollowupRequest): FollowupReceipt {
     const at = new Date(request.at).toISOString()
     return this.host.store.atomic(() => {
@@ -72,8 +80,7 @@ export class Followups {
   runDue(): number {
     if (this.host.paused()) return 0
     const now = this.now()
-    const due = this.host.store.tickets.open().filter(ticket => !ticket.paused && !ticket.attention && !waitsForPerson(ticket)
-      && runningAssignment(ticket) && this.host.authorized(ticket))
+    const due = this.host.store.tickets.open().filter(ticket => !this.blocker(ticket))
       .flatMap(ticket => ticketFollowups(ticket).filter(item => Date.parse(item.at) <= now).map(item => ({ ticketId: ticket.id, item })))
       .sort((a, b) => a.item.at.localeCompare(b.item.at) || a.ticketId.localeCompare(b.ticketId) || a.item.id.localeCompare(b.item.id)).slice(0, 32)
     let fired = 0
@@ -81,8 +88,7 @@ export class Followups {
       this.host.store.atomic(() => {
         const ticket = this.require(candidate.ticketId)
         const followup = ticketFollowups(ticket).find(item => item.id === candidate.item.id)
-        if (!followup || this.host.paused() || ticket.paused || !liveTicket(ticket)
-          || ticket.attention || waitsForPerson(ticket) || !runningAssignment(ticket) || !this.host.authorized(ticket)) return
+        if (!followup || !liveTicket(ticket) || this.blocker(ticket)) return
         // Clear the timer before note() reads and saves the ticket, in the same transaction as the wake-up input.
         this.finish(ticket, followup, 'fired', new Date(now).toISOString())
         this.host.engine.note(ticket.id, `Scheduled follow-up ${followup.id} is due (${followup.at}). ${followup.reason}\n`
@@ -97,6 +103,16 @@ export class Followups {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket) throw new Error('Unknown ticket')
     return ticket
+  }
+
+  private blocker(ticket: Ticket): 'paused' | 'ticketPaused' | 'attention' | 'person' | 'assignment' | 'authority' | undefined {
+    if (this.host.paused()) return 'paused'
+    if (ticket.paused) return 'ticketPaused'
+    if (ticket.attention) return 'attention'
+    if (waitsForPerson(ticket)) return 'person'
+    if (!runningAssignment(ticket)) return 'assignment'
+    if (!this.host.authorized(ticket)) return 'authority'
+    return undefined
   }
 
   private finish(ticket: Ticket, followup: TicketFollowup, status: Exclude<FollowupReceipt['status'], 'scheduled'>, finishedAt: string): FollowupReceipt {

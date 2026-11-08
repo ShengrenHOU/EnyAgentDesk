@@ -60,6 +60,38 @@ it('normalizes the supplied time and wakes the original assignment once after a 
   expect(current.assignments[0]!.id).toBe('assignment-task')
 })
 
+it('lists every pending check in time order with the same blockers as the scheduler, across restart and cancellation', () => {
+  for (let index = 0; index < 12; index++) {
+    const id = `task-${index}`
+    store.tickets.save(ticket(id))
+    followups.schedule(id, request('early', 1))
+    followups.schedule(id, request('later', 3))
+  }
+  const held = store.tickets.get('task-0')!
+  held.attention = { id: 'question', question: 'Proceed?' }; store.tickets.save(held)
+  const pausedTicket = store.tickets.get('task-1')!
+  pausedTicket.paused = true; store.tickets.save(pausedTicket)
+  const waiting = store.tickets.get('task-2')!
+  waiting.assignments = []; store.tickets.save(waiting)
+  clock += 90_000
+  const pending = followups.pending()
+  expect(pending).toHaveLength(24)
+  expect(pending.map(item => item.at)).toEqual(pending.map(item => item.at).sort())
+  expect(pending.find(item => item.ticketId === held.id)).toMatchObject({ due: true, blocked: 'attention' })
+  expect(pending.find(item => item.ticketId === pausedTicket.id)?.blocked).toBe('ticketPaused')
+  expect(pending.find(item => item.ticketId === waiting.id)?.blocked).toBe('assignment')
+  store.close(); store = new Store(join(directory, 'state.sqlite')); followups = startService()
+  expect(followups.pending()).toEqual(pending)
+  followups.cancel('task-0', 'early')
+  expect(followups.pending()).toHaveLength(23)
+  expect(followups.runDue()).toBe(9)
+  expect(followups.pending().filter(item => item.due)).toHaveLength(2)
+  paused = true
+  expect(followups.pending().every(item => item.blocked === 'paused')).toBe(true)
+  paused = false; authorized = false
+  expect(followups.pending().find(item => item.ticketId === 'task-3')?.blocked).toBe('authority')
+})
+
 it('keeps a due follow-up while paused, waiting for a person or lacking current authority', () => {
   followups.schedule('task', request())
   clock += 60_000

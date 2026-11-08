@@ -1002,7 +1002,7 @@ describe('the Executor\'s parts', () => {
   })
   it('relays a worker\'s question, result or answer to the main Session, and keeps its progress internal', () => {
     const ticket = { id: 't1', title: 'Fix', updatedAt: '2026-09-01T00:00:00Z', attention: { id: 'a1', question: 'Which color?' }, assignments: [],
-      mandate: { strength: 'explicit' }, origin: { triggerId: 'tr1' } } as unknown as Ticket
+      mandate: { strength: 'explicit' }, origin: { triggerId: 'tr1' }, inputs: [] } as unknown as Ticket
     expect(reportRelay(ticket, { state: 'progress', summary: 'halfway' })).toBeUndefined()
     expect(reportRelay(ticket, { state: 'blocked', summary: 'need input', question: 'Which color?' }))
       .toMatchObject({ id: 'attention:t1:a1', text: expect.stringContaining('"kind":"worker_attention"') })

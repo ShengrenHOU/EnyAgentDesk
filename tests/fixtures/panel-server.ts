@@ -298,6 +298,11 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
+  'GET followups': { answer: () => Object.values(server.ticketDetails).filter(ticket => ticket.state === 'open')
+    .flatMap(ticket => (ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => ({ ...item,
+      ticketId: ticket.id, title: ticket.title, due: Date.parse(item.at) <= Date.now(),
+      blocked: ticket.taskPaused ? 'ticketPaused' as const : ticket.attention ? 'attention' as const : undefined })))
+    .sort((a, b) => a.at.localeCompare(b.at)) },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
@@ -357,7 +362,10 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     const ticket = server.ticketDetails[params.id]
     if (!ticket) return refuse(404, 'Ticket not found')
     const createdAt = new Date().toISOString()
-    ticket.followup = { id: body.request_id, at: body.at, reason: body.reason, createdAt }
+    const pending = ticket.followups ?? (ticket.followup ? [ticket.followup] : [])
+    ticket.followups = pending.some(item => item.id === body.request_id) ? pending : [...pending,
+      { id: body.request_id, at: body.at, reason: body.reason, createdAt }]
+    ticket.followup = ticket.followups[0]
     return { requestId: body.request_id, ticketId: params.id, at: body.at, reason: body.reason, createdAt, status: 'scheduled' }
   } },
   'DELETE tickets/:id/followup': { query: ['request_id', 'all'], answer: ({ params, query }) => {

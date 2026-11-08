@@ -10,6 +10,7 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 | --- | --- | --- |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
 | person / answer | It has an Attention | Awaiting answer |
+| working / answer-pending | An owner's answer is saved, without a worker report after reading it | Answer received; awaiting worker |
 | person / review | The latest Report is `ready` | Awaiting review |
 | person / blocked, failed | The latest Report is `blocked` or `failed`, and no person's message reached the Ticket since | Blocked · Failed |
 | working / queued | No Assignment, or a pending one | Queued |
@@ -19,6 +20,14 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 A `person` stage means the Ticket cannot continue without human input. A new human message releases a `blocked` or `failed` Ticket to its Executor, so it moves to the next matching stage, usually `working`.
 
 An `idle` Ticket has finished its turn without an outstanding question. A Trigger on a subscribed Thread can continue it.
+
+### Owner answers
+
+`Engine.answerAttention` atomically saves an `answer` Input with the question ID, question text, owner identity and answer, clears that Attention and withdraws its unsent notification. The same question and answer return the original receipt; a different saved answer or replaced question is refused. A stopped/ended Ticket or revoked Mandate cannot take a new answer.
+
+All native owner entrypoints use this command through DSH's authenticated owner carrier or the workbench tool. The main discussion quotes the latest original owner instruction and names the exact Ticket and Attention. Model reports, source evidence and injected messages cannot supply owner authority. Other Sources cannot invoke this owner command. Existing source-thread messages keep their normal intake rules.
+
+Saving, delivery, reading and a subsequent worker report are recorded separately. An old report cannot finish a Ticket while its answer is unread. The answer stays in the Ticket across restarts; processing still follows pause, concurrency and existing scope. A receipt does not claim execution or completion. A changed question leaves the draft intact and requires explicit retargeting before it can answer the new question.
 
 ## The Executor
 
@@ -106,6 +115,8 @@ Chat Channels receive one final notice about the pull-request outcome. GitHub al
 "Awaiting review" therefore means a `ready` Report with a pull request.
 
 ### Follow-ups and context Threads
+
+Timed Ticket checks remain on the original Ticket. `GET followups` projects every open Ticket's pending checks in time order, including legacy single checks. The daily workbench and My work show this same list, its due times and reasons, and the scheduler's actual blockers: global/Ticket pause, pending owner answer, blocked/failed report, no running Assignment or revoked authority. Cancelling uses the existing per-Ticket receipt and removes only the selected check. This view creates no new scheduler or DSH automation entity; a held check remains visible until resolved, cancelled or its Ticket ends.
 
 The Executor decides human follow-ups on its Ticket's own Threads. It handles in-scope requests and hands back requests beyond its scope or for another Ticket. Once no Executor owns the message, it becomes a candidate for the main Session. The main Session may otherwise act on the follow-up only to stop work at the person's request.
 

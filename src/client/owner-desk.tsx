@@ -1,9 +1,11 @@
 /** Owner work beside the native conversation, projected from the existing overview. */
 import { useState } from 'react'
-import { usePoll, type TicketRow } from './api.ts'
+import { answerAttention, usePoll, type TicketRow } from './api.ts'
 import { Button, Icon, Tag } from './controls.tsx'
 import { ticketMark } from './marks.ts'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
+import { ReplyForm } from './reply-form.tsx'
+import { PendingFollowups } from './rows.tsx'
 import { errorText, when, type T } from './text.ts'
 import { ExternalLink, MarkdownLite } from './widgets.tsx'
 
@@ -15,7 +17,7 @@ type Group = 'person' | 'working' | 'waiting' | 'delivered'
 function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
-  const { data, error } = usePoll(() => call('GET overview'), [])
+  const { data, error, reload } = usePoll(() => call('GET overview'), [])
   const [group, setGroup] = useState<Group>()
   const [target, setTarget] = useState<TicketRow>()
   const [instruction, setInstruction] = useState('')
@@ -36,8 +38,10 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
     if (!target || !instruction.trim() || busy) return
     setBusy(true); setFailure(undefined)
     try {
-      await send(`对已有事项「${target.title}」（工单 ${target.id}）${target.attention ? `回答当前问题（${target.attention.id}）` : '补充要求或修改成果'}。请继续这件事。\n\n${instruction.trim()}`)
-      setReceipt(t('ownerDeskSent')); setInstruction(''); setTarget(undefined)
+      if (target.attention) await answerAttention(t, target.id, target.attention.id, instruction.trim())
+      else await send(`对已有事项「${target.title}」（工单 ${target.id}）补充要求或修改成果。请继续这件事。\n\n${instruction.trim()}`)
+      setReceipt(t(target.attention ? 'ticketAnswerSent' : 'ownerDeskSent')); setInstruction(''); setTarget(undefined)
+      await reload()
     } catch (error) { setFailure(errorText(error)) }
     finally { setBusy(false) }
   }
@@ -53,6 +57,7 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
       </Button>)}</div>
     </div>
     {(error || stateError) && <p role="alert" className="dt-error">{errorText(error ?? stateError)}</p>}
+    <PendingFollowups openTicket={openTicket} />
     {current && <div className="dt-owner-content">
       <div className="dt-owner-section-head"><strong>{current.label}</strong><Button variant="ghost" size="sm"
         aria-label={t('close')} onClick={() => setGroup(undefined)}><Icon name="close" size={14} /></Button></div>
@@ -60,9 +65,11 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
         <div className="dt-owner-task-head"><button type="button" className="dt-open" onClick={() => openTicket(ticket.id)}>{ticket.title}</button>
           <Tag tone={ticket.attention ? 'warning' : 'quiet'}>{ticketMark(t, ticket).label}</Tag></div>
         <p className={ticket.attention ? 'dt-owner-question' : 'dt-owner-summary'}>{ticket.attention?.question ?? ticket.summary}</p>
-        {ticket.followup && <p className="dt-hint">{t('ticketFollowupAt')} {when(ticket.followup.at, t('lang'))} · {ticket.followup.reason}</p>}
+        {(ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => <p key={item.id} className="dt-hint">
+          {t('ticketFollowupAt')} {when(item.at, t('lang'))} · {item.reason}</p>)}
         <div className="dt-owner-actions">
           <Button size="sm" variant="outline" onClick={() => choose(ticket)}>{t(ticket.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>
+          <Button size="sm" variant="ghost" onClick={() => openTicket(ticket.id)}>{t('ticketAllActions')}</Button>
           {ticket.deliverables?.map(item => {
             const url = new URL(item.url, location.href)
             return <span key={item.url}>{url.origin === location.origin && url.pathname === '/api/superagent-workbench/artifact'
@@ -77,14 +84,12 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
       <ExternalLink href={preview.url}>{t('details')}</ExternalLink><Button size="sm" variant="ghost" onClick={() => setPreview(undefined)}>{t('close')}</Button></div>
       <iframe src={preview.url} title={preview.title} sandbox="" />
     </section>}
-    {target && <form className="dt-owner-response" onSubmit={event => { event.preventDefault(); void submit() }}>
+    {target && <section className="dt-owner-response">
       <div className="dt-owner-section-head"><strong>{t('workbenchUpdateTarget', { title: target.title })}</strong>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => setTarget(undefined)}>{t('cancel')}</Button></div>
       {target.attention && <MarkdownLite text={target.attention.question} />}
-      <textarea autoFocus aria-label={t('workbenchInstruction')} value={instruction} maxLength={16000} disabled={busy}
-        placeholder={t('ownerDeskReplyHint')} onChange={event => setInstruction(event.target.value)} />
-      <Button type="submit" variant="primary" size="sm" disabled={busy || !instruction.trim()}>{t(busy ? 'workbenchSubmitting' : 'workbenchSendUpdate')}</Button>
-    </form>}
+      <ReplyForm autoFocus value={instruction} onChange={setInstruction} maxLength={16000} busy={busy} onSubmit={() => void submit()} />
+    </section>}
     {failure && <p role="alert" className="dt-error">{failure}</p>}
     {receipt && <p role="status" className="dt-hint">{receipt}</p>}
     {!group && !target && !receipt && <p className="dt-owner-hint">{t('ownerDeskHint')}</p>}

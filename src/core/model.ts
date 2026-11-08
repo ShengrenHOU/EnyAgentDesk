@@ -237,6 +237,9 @@ export interface Assignment {
 }
 
 export type TicketInput =
+  /** An authenticated owner's answer to this exact question; receipt and worker processing are separate facts. */
+  | { id: string; kind: 'answer'; attentionId: string; question: string; text: string; by: ActorRef; at: string;
+    readAt?: string | null; deliveredTo?: string; reportedAt?: string }
   /** A Trigger on one of its Threads, or attached to it; `human` when a person wrote it. */
   | { id: string; kind: 'trigger'; triggerId: string; at: string; note?: string; human?: true
     /** It reached the ticket only on a Thread its Executor follows for context. */
@@ -299,7 +302,7 @@ export interface Ticket {
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
-  /** Open question for a person; cleared by the executor or when the ticket ends. */
+  /** Open question for a person; cleared on an owner's saved answer, by the executor, or when the ticket ends. */
   attention?: Attention
   assignments: Assignment[]
   inputs: TicketInput[]
@@ -373,5 +376,6 @@ export function readUntil(ticket: Pick<Ticket, 'assignments'>, progress = true):
 export function waitsForPerson(ticket: Ticket): boolean {
   const report = latestAssignment(ticket)?.report
   if (report?.state !== 'blocked' && report?.state !== 'failed') return false
-  return !ticket.inputs.some(input => input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
+  return !ticket.inputs.some(input => input.kind === 'answer' ? !input.reportedAt
+    : input.kind === 'trigger' && input.human && !input.context && input.at > report.at)
 }

@@ -11,6 +11,7 @@ import { fill } from '../infra/text.ts'
 export const HEALTH_TEXT = {
   setupPending: 'Waiting for the deployment check; version unconfirmed',
   sourceOff: 'Off',
+  sourceConfigInvalid: 'Stored configuration is invalid. Correct these fields in Source settings: {fields}',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
@@ -54,6 +55,8 @@ export interface SourceContext {
   }
   tickets: {
     get(id: string): Ticket | undefined
+    /** Owner-only native workbench command; other Sources cannot invoke it. */
+    answerAttention(id: string, attentionId: string, text: string): { saved: true; inputId: string; at: string }
     /** Open tickets, newest first. */
     open(): Ticket[]
     /** Binds an open ticket to follow a Source Thread (`own` when opened by the ticket) so the Thread's close, not a ready report, ends the ticket. */

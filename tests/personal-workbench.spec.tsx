@@ -5,6 +5,7 @@ import { expect, it, vi } from 'vitest'
 import { Workbench } from '../src/client/personal-workbench.tsx'
 import { PanelProvider } from '../src/client/provider.tsx'
 import { zh } from '../src/client/locales.ts'
+import { fullTime } from '../src/client/text.ts'
 import { translator, click, settle, type } from './fixtures/panel.tsx'
 import { server, ticketSummary, usePanelServer } from './fixtures/panel-server.ts'
 
@@ -37,6 +38,22 @@ it('opens the existing GitHub source settings from the workbench', async () => {
   expect(openGithubSettings).toHaveBeenCalledOnce()
 })
 
+it('shows all checks beyond the four visible task cards and cancels only the selected check', async () => {
+  const original = server.ticketDetails.t1!
+  for (let index = 0; index < 12; index++) server.ticketDetails[`agenda-${index}`] = { ...original, id: `agenda-${index}`,
+    title: `后续事项 ${index}`, attention: index === 11 ? { id: 'choice', question: 'Which scope?' } : undefined,
+    followups: [{ id: 'first', at: '2099-01-01T00:00:00Z', reason: `核对结果 ${index}`, createdAt: '2026-11-08T00:00:00Z' },
+      { id: 'second', at: '2099-01-02T00:00:00Z', reason: `核对反馈 ${index}`, createdAt: '2026-11-08T00:00:00Z' }] }
+  await mount(null)
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(24)
+  expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain(zh['followupBlock.attention'])
+  const first = [...document.querySelectorAll<HTMLButtonElement>('.dt-followup-agenda li button')].find(button => button.textContent === zh.homeCancelFollowup)!
+  await click(first)
+  await click(zh.confirm)
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(23)
+  expect(server.requests).toContainEqual(expect.objectContaining({ method: 'DELETE', path: 'tickets/agenda-0/followup?request_id=first' }))
+})
+
 it('keeps unavailable-evaluation recovery reachable from the daily problem details', async () => {
   await mount(null)
   const details = document.querySelector<HTMLDetailsElement>('details.pw-runtime-note')!
@@ -61,6 +78,9 @@ it('shows independent follow-ups and cancels only the selected check', async () 
   expect(document.body.textContent).toContain('核对付款')
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('.pw-task button')].filter(button => button.textContent === zh.homeCancelFollowup)
   await click(buttons[0]!)
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(task.title)
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(fullTime(checks[0]!.at, 'zh'))
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(checks[0]!.reason)
   await click(zh.confirm)
   expect(server.requests.filter(item => item.method === 'DELETE').at(-1)?.path).toBe(`tickets/${task.id}/followup?request_id=first`)
   expect(server.ticketDetails[task.id]!.followups?.map(item => item.id)).toEqual(['second'])
@@ -69,7 +89,8 @@ it('shows independent follow-ups and cancels only the selected check', async () 
 it('adds one line to the selected matter without leaving the workbench', async () => {
   const { send, openSession } = await mount(null)
   await click(zh.ownerDeskRevise)
-  const input = document.querySelector<HTMLInputElement>('.pw-supplement input')!
+  const input = document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  expect(input.getAttribute('aria-label')).toBe(zh.workbenchReplyInstruction)
   await type(input, '先按 A 修，补充背景见上一条。')
   await click(zh.workbenchSendUpdate)
   expect(send).toHaveBeenCalledWith('master', expect.stringMatching(/^请继续已有工单 t\d+。本人补充或修改要求如下。/))
@@ -77,6 +98,22 @@ it('adds one line to the selected matter without leaving the workbench', async (
   expect(openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.homeSent)
   expect(document.querySelector('.pw-shell')?.getAttribute('data-chat')).toBe('false')
+})
+
+it('saves an answer on its Ticket without sending prose to the main Session', async () => {
+  const original = globalThis.fetch
+  const answers: unknown[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/answer')) { answers.push(JSON.parse(String(init?.body))); return Response.json({ saved: true }) }
+    return original(url, init)
+  }))
+  const { send } = await mount(null)
+  await click(zh.workbenchAnswer)
+  await type(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!, '其余工作建立独立单')
+  await click(zh.workbenchSendUpdate)
+  expect(answers).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: expect.any(String), instruction: '其余工作建立独立单' })])
+  expect(send).not.toHaveBeenCalled()
+  expect(document.body.textContent).toContain(zh.ticketAnswerSent)
 })
 
 it('explains why discussion, answers and updates are unavailable without a main Session', async () => {
@@ -89,7 +126,7 @@ it('explains why discussion, answers and updates are unavailable without a main 
     .find(button => button.textContent === zh.homeDiscuss)!
   expect(discuss.disabled).toBe(true)
   await click(zh.workbenchAnswer)
-  const input = document.querySelector<HTMLInputElement>('.pw-supplement input')!
+  const input = document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
   await type(input, '先按 A 修，补充背景见上一条。')
   const submit = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
     .find(button => button.textContent === zh.workbenchSendUpdate)!

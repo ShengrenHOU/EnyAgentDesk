@@ -125,7 +125,7 @@ export function ticketSummary(ticket: Ticket) {
   // A working ticket shows when its current turn started and, once it reported progress, the step it named; the panel adds the
   // waited time from `since`, so "working" and "stuck" no longer look the same.
   const progress = assignment?.report?.state === 'progress' ? assignment.report : undefined
-  const working = stage.stage === 'working' ? { since: assignment?.turnStartedAt ?? assignment?.deliveredAt ?? assignment?.startedAt
+  const working = stage.stage === 'working' && stage.action !== 'answer-pending' ? { since: assignment?.turnStartedAt ?? assignment?.deliveredAt ?? assignment?.startedAt
     ?? assignment?.createdAt ?? ticket.updatedAt,
     ...(progress ? { step: preview(progress.summary) } : {}) } : undefined
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const

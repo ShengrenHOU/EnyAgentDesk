@@ -1,4 +1,5 @@
 /** Settings tab shell routing between stage settings (Sources, Eval, Execution), Prompts, and Deployment. */
+import { useLayoutEffect, useRef } from 'react'
 import type { StateView } from './api.ts'
 import { DeploymentPage, type DeploymentForm } from './deployment.tsx'
 import { EvalSettings } from './eval.tsx'
@@ -14,6 +15,12 @@ export function SettingsPage({ group, query, state, deploymentForm }: {
   group: SettingsGroup; query: { source?: string; version?: string }; state: StateView; deploymentForm: DeploymentForm
 }) {
   const { t, navigate } = usePanel()
+  const body = useRef<HTMLDivElement>(null)
+  // Reset before SourceSettings focuses a deep-linked Source.
+  useLayoutEffect(() => {
+    const page = body.current?.closest('.dt-page')
+    if (page) page.scrollTop = 0
+  }, [group])
   const content = (() => {
     switch (group) {
       case 'source': return <SettingsProvider><SourceSettings {...query.source ? { focus: query.source } : {}} /></SettingsProvider>
@@ -23,7 +30,7 @@ export function SettingsPage({ group, query, state, deploymentForm }: {
       case 'deployment': return <DeploymentPage setup={state.setup} form={deploymentForm} />
     }
   })()
-  return <div className="dt-settings">
+  return <div className="dt-settings" ref={body}>
     <nav className="dt-settings-nav" aria-label={t('tab.settings')}>
       {SETTINGS_GROUPS.map(value => <button key={value} type="button" className="dt-settings-link" data-stage={STAGE_GROUPS.includes(value)
         || undefined}

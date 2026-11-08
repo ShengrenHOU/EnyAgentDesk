@@ -194,7 +194,7 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
 
-Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
+Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration leaves the instance inactive with `configError` field paths. Source status and the overview show a configuration error; Settings retains the original enabled choice and raw fields for repair. Invalid field types use a JSON repair form, which keeps the captured revision until an explicit reload; saves still pass the same schema/account checks. Pending Outbox replies wait until the configuration is valid again.
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
@@ -336,7 +336,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
-| `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
+| `src/infra/delivery.ts` | `AgentDelivery`: shared DSH transport for Sessions and Source plugins; delivers once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
@@ -385,6 +385,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/workbench-tools.ts` | Natural-language discussion handoff and linked-task status using original owner message evidence; excludes managed and subagent Sessions |
 | `src/client/workbench.tsx` | Native Session-row delegation and linked task view, with retained request identity on uncertain submissions |
 | `src/client/owner-desk.tsx` | Owner work projected beside the native conversation from the existing overview |
+| `src/client/reply-form.tsx` | Shared required multiline reply form for the daily, conversation and Ticket views |
 | `src/client/personal-workbench.tsx` | Daily work index with a one-line supplement for one matter; detailed discussion opens the main Session instead of a second transcript |
 | `src/sources/workbench-focus.ts` | Model-written reading projection of the owner focus, while Tickets and Threads remain the source of business state |
 | `src/app/github-migration.ts` | Atomic legacy repository identity upgrade, preserving ticket/session/receipt identities and checkpoint ownership |
@@ -500,6 +501,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/platform-integration.spec.ts` | Worker, timed pass, human answer and personal-only deployment integration |
 | `tests/management.spec.ts` | Priority, deadline and pause persistence |
 | `tests/single-writer.spec.ts` | The single-writer rule for Tickets: only the Engine's parts and the startup migration call `tickets.save` |
+| `tests/architecture.spec.ts` | Dependency directions for core, Source plugins and panel host-value imports |
 | `tests/executor-router.spec.ts` | Cross-executor routing and shared capacity |
 | `tests/executor-controls.spec.ts` | Per-ticket pause across DSH retries and preparation, native preparation shell, and DSH-only priority dispatch |
 

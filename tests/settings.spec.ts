@@ -4,7 +4,7 @@ import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
-import { startRuntime, type Host } from './fixtures/host.ts'
+import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
@@ -14,6 +14,40 @@ function deferred<T>() {
   return { promise, resolve }
 }
 const model = { provider: 'worker-provider', model: 'worker-model' }
+
+it('exposes invalid stored Source fields, preserves repair values and holds replies until repair', async () => {
+  h = await startRuntime()
+  const { store, sources, outbox } = h.runtime
+  const current = store.settings()
+  const original = current.sources.feishu!
+  const broken = { ...original, config: { ...original.config, readPageSize: -5 } }
+  store.saveSettings({ ...current, sources: { ...current.sources, feishu: broken } })
+  expect(sources.instance('feishu')).toMatchObject({ enabled: false, configError: ['readPageSize'] })
+  expect((await h.api('GET', 'sources')).body).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'feishu', state: 'error', enabled: false, health: expect.arrayContaining([
+      expect.objectContaining({ code: 'sourceConfigInvalid', values: { fields: 'readPageSize' } }),
+    ]) }),
+  ]))
+  expect((await h.api('GET', 'overview')).body).toMatchObject({ problems: expect.arrayContaining([
+    expect.objectContaining({ kind: 'source-error', source: expect.objectContaining({ id: 'feishu' }) }),
+  ]) })
+  expect((await h.api('GET', 'settings')).body).toMatchObject({ sources: expect.arrayContaining([
+    expect.objectContaining({ id: 'feishu', value: broken, configError: ['readPageSize'] }),
+  ]) })
+  expect(h.runtime.settings.block('source:feishu').value).toEqual(broken)
+  outbox.send({ id: 'config-repair-reply', channel: feishu('repair', 'Reply').channel!, text: 'Ready after repair', kind: 'reply' })
+  await h.runtime.idle()
+  expect(outbox.status('config-repair-reply')).toBe('pending')
+  const repaired = { ...original, config: { ...original.config, readPageSize: 20 } }
+  expect((await h.api('PUT', 'settings/source:feishu', {
+    revision: store.blockRevision('source:feishu'), value: repaired,
+  })).body).toMatchObject({ saved: true, restarting: false })
+  expect(sources.instance('feishu')).not.toHaveProperty('configError')
+  expect(sources.instance('feishu')?.enabled).toBe(true)
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 6000 })
+  try { await h.runtime.pump(); await h.runtime.idle() } finally { vi.useRealTimers() }
+  expect(outbox.status('config-repair-reply')).toBe('sent')
+})
 
 it('refuses a save of a block that another save changed during its model or account check, and saves nothing of it', async () => {
   h = await startRuntime()

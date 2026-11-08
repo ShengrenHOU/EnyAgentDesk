@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { expect, it, vi } from 'vitest'
-import { AgentDelivery } from '../src/app/delivery.ts'
+import { AgentDelivery } from '../src/infra/delivery.ts'
 
 function fixture(history: UserMessage[] = []) {
   const ctx = new Context()

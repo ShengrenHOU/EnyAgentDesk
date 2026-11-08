@@ -66,10 +66,10 @@ it('opens the linked task without submitting another delegation', async () => {
   expect(fetch.mock.calls.some(call => (call[1] as RequestInit | undefined)?.method === 'POST')).toBe(false)
 })
 
-it('answers the selected pending decision through the existing task update path', async () => {
+it('answers the selected pending decision through the shared owner answer command', async () => {
   const submitted: { url: string; body: unknown }[] = []
   vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
-    if (options?.method === 'POST') { submitted.push({ url, body: JSON.parse(String(options.body)) }); return Response.json({ received: 'stored' }) }
+    if (options?.method === 'POST') { submitted.push({ url, body: JSON.parse(String(options.body)) }); return Response.json({ saved: true }) }
     return Response.json({ ...state, requests: [{ triggerId: 'origin', instruction: 'Report', tickets: [
       { id: 'ticket-1', title: 'Report', attention: { id: 'decision-1', question: 'Which scope?' }, ended: null },
     ] }] })
@@ -86,7 +86,7 @@ it('answers the selected pending decision through the existing task update path'
   })
   await act(async () => { button(zh.workbenchSendUpdate).click() })
   expect(submitted).toHaveLength(1)
-  expect(submitted[0]).toMatchObject({ url: '/api/superagent-workbench/update', body: {
+  expect(submitted[0]).toMatchObject({ url: '/api/superagent-workbench/answer', body: {
     ticketId: 'ticket-1', attentionId: 'decision-1', instruction: 'Use the original scope.',
   } })
 })

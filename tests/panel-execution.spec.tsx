@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // The Execution status, a Ticket, and the Execution settings.
 import { act } from 'react'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
@@ -143,7 +143,7 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
   expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('修复回归')
   // Progress is in the Channels and the Session, so the page has no report section.
-  expect(all('.dt-section-title').map(title => title.querySelector('.dt-section-name')?.textContent)).toEqual(['授权详情', '未送达的输入', '订阅的线程'])
+  expect(all('.dt-section-title').map(title => title.querySelector('.dt-section-name')?.textContent)).toEqual(['下次跟进', '授权详情', '未送达的输入', '订阅的线程'])
   expect(document.querySelector('.dt-status-line .dt-stage')?.textContent).toBe(zh.executingLabel)
   expect(document.querySelector('.dt-status-line .dt-stage .dt-spinner')).not.toBeNull()
   // A Thread this Ticket follows reads as subscribed on its page, though no other Ticket follows it.
@@ -194,6 +194,150 @@ it('links a question to its Channel, folds consecutive automated messages among 
   expect(tip.closest('.dt-field')!.textContent).not.toContain('到期后记为未完成')
   await act(async () => { tip.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
   expect(document.querySelector('[role="tooltip"]')).toBeNull()
+})
+
+it('answers a workbench Ticket\'s pending question directly on its page', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
+    mandate: { ...t1.mandate, actor: { source: 'workbench', id: 'owner' } },
+    channels: [{ source: 'workbench', url: '#superagent', sessionId: 'master', label: { zh: 'DSH 工作台', en: 'DSH workbench' } }] }
+  const base = globalThis.fetch
+  const updates: unknown[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith('/api/superagent-workbench/discussion')) return Response.json({ throughSeq: 7 })
+    if (String(url) === '/api/superagent-workbench/answer') {
+      updates.push(JSON.parse(String(init?.body)))
+      return Response.json({ saved: true })
+    }
+    return base(url, init)
+  }))
+  at({ page: 'execution', id: 't1' }); await mount()
+  const answer = field<HTMLTextAreaElement>(zh.workbenchReplyInstruction)
+  await type(answer, '用蓝色')
+  await click(zh.workbenchSendUpdate)
+  expect(updates).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: 'q1',
+    instruction: '用蓝色' })])
+  expect(text()).toContain(zh.ticketAnswerSent)
+})
+
+it('supplements a workbench Ticket without requiring an outstanding question', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, attention: undefined,
+    mandate: { ...t1.mandate, actor: { source: 'workbench', id: 'owner' } },
+    channels: [{ source: 'workbench', url: '#superagent', sessionId: 'master', label: { zh: 'DSH 工作台', en: 'DSH workbench' } }] }
+  const original = globalThis.fetch
+  const updates: unknown[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.startsWith('/api/superagent-workbench/discussion')) return Response.json({ throughSeq: 7 })
+    if (url === '/api/superagent-workbench/update') { updates.push(JSON.parse(String(init?.body))); return Response.json({ received: 'stored' }) }
+    return original(url, init)
+  }))
+  at({ page: 'execution', id: 't1' }); await mount()
+  expect(document.activeElement).not.toBe(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction))
+  await type(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction), '补充一条背景\n继续沿原事项推进')
+  await click(zh.workbenchSendUpdate)
+  expect(updates).toEqual([expect.objectContaining({ ticketId: 't1', instruction: '补充一条背景\n继续沿原事项推进' })])
+  expect(updates[0]).not.toHaveProperty('attentionId')
+})
+
+it('schedules independent follow-ups on the Ticket and cancels only the selected one', async () => {
+  at({ page: 'execution', id: 't1' }); await mount()
+  await click(zh.ticketScheduleFollowup)
+  await type(field<HTMLInputElement>(zh.ticketFollowupTime), '2099-01-01T09:00')
+  await type(field<HTMLTextAreaElement>(zh.ticketFollowupReason), '核对第一次交付')
+  await click(zh.ticketSaveFollowup)
+  await type(field<HTMLInputElement>(zh.ticketFollowupTime), '2099-01-02T09:00')
+  await type(field<HTMLTextAreaElement>(zh.ticketFollowupReason), '核对后续反馈')
+  await click(zh.ticketSaveFollowup)
+  const checks = server.ticketDetails.t1!.followups!
+  expect(checks).toHaveLength(2)
+  expect(checks[0]!.id).not.toBe(checks[1]!.id)
+  await click(find(zh.homeCancelFollowup))
+  await click(zh.confirm)
+  expect(server.ticketDetails.t1!.followups?.map(item => item.id)).toEqual([checks[1]!.id])
+  expect(server.requests.filter(item => item.method === 'DELETE').at(-1)?.path).toBe(`tickets/t1/followup?request_id=${checks[0]!.id}`)
+})
+
+it('reuses a follow-up request after an uncertain connection failure', async () => {
+  const original = globalThis.fetch
+  const attempts: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/tickets/t1/followup') && init?.method === 'POST') {
+      attempts.push(String(init.body))
+      if (attempts.length === 1) throw new Error('Connection lost')
+    }
+    return original(url, init)
+  }))
+  at({ page: 'execution', id: 't1' }); await mount()
+  await click(zh.ticketScheduleFollowup)
+  await type(field<HTMLInputElement>(zh.ticketFollowupTime), '2099-01-01T09:00')
+  await type(field<HTMLTextAreaElement>(zh.ticketFollowupReason), '核对交付')
+  await click(zh.ticketSaveFollowup)
+  expect(field<HTMLTextAreaElement>(zh.ticketFollowupReason).value).toBe('核对交付')
+  await click(zh.ticketSaveFollowup)
+  expect(attempts).toHaveLength(2)
+  expect(attempts[0]).toBe(attempts[1])
+  expect(server.ticketDetails.t1!.followups).toHaveLength(1)
+})
+
+it('previews an authenticated local deliverable on the Ticket page', async () => {
+  server.ticketDetails.t1!.deliverables = [{ title: '交付报告', url: '/api/superagent-workbench/artifact?ticketId=t1&path=report.md&sha256=fixed' }]
+  at({ page: 'execution', id: 't1' }); await mount()
+  await click(zh.ticketPreview)
+  expect(document.querySelector('iframe')?.title).toBe('交付报告')
+  expect(document.querySelector('iframe')?.getAttribute('sandbox')).toBe('')
+})
+
+it('reuses the same answer after an uncertain transport result', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
+    mandate: { ...t1.mandate, actor: { source: 'workbench', id: 'owner' } },
+    channels: [{ source: 'workbench', url: '#superagent', sessionId: 'master', label: { zh: 'DSH 工作台', en: 'DSH workbench' } }] }
+  const base = globalThis.fetch
+  const updates: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).startsWith('/api/superagent-workbench/discussion')) return Response.json({ throughSeq: 7 })
+    if (String(url) === '/api/superagent-workbench/answer') {
+      updates.push(String(init?.body))
+      if (updates.length === 1) throw new Error('Connection lost')
+      return Response.json({ saved: true })
+    }
+    return base(url, init)
+  }))
+  at({ page: 'execution', id: 't1' }); await mount()
+  await type(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction), '用蓝色')
+  await click(zh.workbenchSendUpdate)
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('Connection lost')
+  await click(zh.workbenchSendUpdate)
+  expect(updates).toHaveLength(2)
+  expect(updates[0]).toBe(updates[1])
+  expect(text()).toContain(zh.ticketAnswerSent)
+})
+
+it('preserves a draft when the worker replaces the pending question and requires explicit retargeting', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
+    mandate: { ...t1.mandate, actor: { source: 'workbench', id: 'owner' } },
+    channels: [{ source: 'workbench', url: '#superagent', sessionId: 'master', label: { zh: 'DSH 工作台', en: 'DSH workbench' } }] }
+  at({ page: 'execution', id: 't1' }); await mount()
+  await type(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction), '用蓝色')
+  server.ticketDetails.t1 = { ...server.ticketDetails.t1, attention: { id: 'q2', question: '改用红色还是蓝色？' } }
+  // A management save reloads the Ticket, as the poll would when the worker replaces its question.
+  await click(zh.taskManagement)
+  await click(zh.managementSave)
+  expect(text()).toContain('改用红色还是蓝色？')
+  expect(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction).value).toBe('用蓝色')
+  expect(text()).toContain(zh.ticketAnswerChanged)
+  await click(zh.ticketAnswerUseCurrent)
+  expect(text()).not.toContain(zh.ticketAnswerChanged)
+})
+
+it('offers the same owner answer command on source Tickets and keeps their source link', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' } }
+  at({ page: 'execution', id: 't1' }); await mount()
+  expect(all('textarea')).toHaveLength(1)
+  expect(find('去飞书回答', 'a').getAttribute('href')).toBe('https://applink.feishu.cn/client/chat/open?openChatId=oc_1')
 })
 
 it('offers a Ticket awaiting review its review place and Session in the page head', async () => {

@@ -3,7 +3,7 @@ import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, ticketFollowups,
   waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, ExecutionHandoff, ExecutorKind, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy,
+import type { ActorRef, Assignment, ChannelRef, Evaluation, ExecutionHandoff, ExecutorKind, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy,
   TicketInput, TicketManagement, TicketManagementPatch, TicketOutcome, TicketFollowup, Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -196,6 +196,28 @@ export class Tickets extends EnginePart {
     if (!liveTicket(ticket) || runningAssignment(ticket)?.report?.state !== 'waiting') return false
     this.addInput(ticket, { id: `status:${ticketId}:${ticket.updatedAt}`, kind: 'text', text: STATUS_REQUEST, at: this.now() })
     return true
+  }
+  /** Save an owner's answer and withdraw the question in the same transaction, before scheduling delivery. */
+  answerAttention(ticketId: string, attentionId: string, text: string, by: ActorRef) {
+    const ticket = this.require(ticketId)
+    text = text.trim()
+    if (!text || text.length > 20_000) throw new UserError('invalidAnswer')
+    const id = key('attention-answer', ticketId, attentionId)
+    const previous = ticket.inputs.find(input => input.id === id)
+    if (previous?.kind === 'answer') {
+      if (previous.text !== text || previous.by.source !== by.source || previous.by.id !== by.id) throw new UserError('answerConflict')
+      return { saved: true as const, inputId: id, at: previous.at }
+    }
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (!this.policy().revalidate(ticket.mandate)) throw new UserError('mandateRevoked')
+    if (ticket.attention?.id !== attentionId) throw new UserError('staleAttention')
+    const input: Extract<TicketInput, { kind: 'answer' }> = { id, kind: 'answer', attentionId,
+      question: ticket.attention.question, text, by, at: this.now() }
+    delete ticket.attention
+    this.replies.withdrawAttention(attentionId)
+    this.addInput(ticket, input)
+    this.emit('ticket.updated', { ticketId, change: 'answer' })
+    return { saved: true as const, inputId: id, at: input.at }
   }
   /**
    * Stops a ticket on behalf of a human, ending any active assignments.
@@ -414,7 +436,7 @@ export class Tickets extends EnginePart {
    * in the Session out, so its delivery is the only one. An earlier end let go of what earlier Assignments left.
    */
   private requeueUntaken(ticket: Ticket, replaced: Assignment): void {
-    const untaken = ticket.inputs.filter(input => input.kind === 'trigger' && input.readAt === null && input.deliveredTo === replaced.id
+    const untaken = ticket.inputs.filter(input => (input.kind === 'trigger' || input.kind === 'answer') && input.readAt === null && input.deliveredTo === replaced.id
       && !ticket.undelivered.includes(input.id))
     ticket.undelivered.unshift(...untaken.map(input => input.id))
   }
@@ -451,6 +473,7 @@ export class Tickets extends EnginePart {
    * change asks for no work.
    */
   private unfinished(ticket: Ticket, at: string): boolean {
+    if (ticket.inputs.some(input => input.kind === 'answer' && !input.reportedAt)) return true
     const until = readUntil(ticket, false)
     const taken = this.triggersOf(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger' && !readBefore(input, until) ? [input.id] : []))
       .some(trigger => this.owners(trigger).includes(ticket.id) && this.takenUp(ticket, trigger))

@@ -64,7 +64,7 @@ Infer stage from request/context; do not ask for stage, model, tool or directory
 
 
 ## Personal workbench
-Original Main Session discussion creates no candidate. For explicit work/update/answer, use workbench delegate with the exact owner instruction before investigation or writing; end the turn. On its candidate, read/attach the explicitly named Ticket across Sources, including completed work not human-stopped. For independent goals use tasks with stable IDs and exact owner_instruction_quote; preserve shared discussion, commission and retry plan. Check existing ownership; observations cannot replace human-stopped work.
+Main discussion creates no candidate. Answers use workbench action answer with the current ticket_id, attention_id and exact owner_instruction_quote; return receipt and end. Ask which Ticket if ambiguous; never delegate/attach answers. Other explicit work/updates use workbench delegate before investigation/writing, then end. Route its candidate to the named Ticket across Sources, including completed work not human-stopped. Independent goals need stable task IDs, exact quotes, shared context and retry plan. Check ownership; observations cannot replace human-stopped work.
 
 Focus is a read-only Chinese projection: read current reports/threads via focus_context, publish focus with actual evidenceAt; never date unread evidence as new. Source changes warn of staleness; execution rechecks authority/facts. Use runtime.packageVersion over historical report versions. Refresh after material results/decisions. Projection grants nothing.
 

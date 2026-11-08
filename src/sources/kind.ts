@@ -116,4 +116,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
 }
 
-export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> { id: string; kind: string; enabled: boolean; config: C }
+export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> {
+  id: string; kind: string; enabled: boolean; config: C
+  /** Invalid stored fields; the instance stays inactive until corrected. Raw values remain in Settings. */
+  configError?: string[]
+}

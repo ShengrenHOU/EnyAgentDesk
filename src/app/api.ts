@@ -23,6 +23,7 @@ type Delivery = 'injected' | 'pending'
 export interface Api {
   'GET state': { response: StateView }
   'GET overview': { response: OverviewView }
+  'GET followups': { response: ReturnType<Followups['pending']> }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }

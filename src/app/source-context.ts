@@ -1,5 +1,5 @@
 /** Scoped runtime context exposed to each Source kind, isolating Sources from direct Store or Engine access. */
-import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
+import type { EngineForPeople, EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -9,9 +9,9 @@ import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
 
 export interface SourceContextDeps {
-  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
+  readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read' | 'settings'>
   readonly outbox: Pick<Outbox, 'send'>
-  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'>
+  readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'> & Pick<EngineForPeople, 'answerAttention'>
   readonly commands: Commands
   readonly sources: SourceRegistry
   /** Throws when accessed before initial setup completes. */
@@ -61,6 +61,15 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       open: () => store.tickets.open(),
       bindThread: (id, thread, own) => { deps.engine.bindThread(id, thread, own) },
       threadClosed: (thread, outcome, at) => { deps.engine.threadClosed(thread, outcome, at) },
+      answerAttention: (id, attentionId, text) => {
+        const instance = deps.sources.instance('workbench')
+        const owner = instance?.config.ownerId
+        if (kind.kind !== 'workbench' || !instance?.enabled || typeof owner !== 'string'
+          || !store.settings().policy.sources.workbench?.allowed.some(actor => actor.id === owner)) {
+          throw new Error('Only the enabled authenticated owner workbench may answer a question')
+        }
+        return deps.engine.answerAttention(id, attentionId, text, { source: 'workbench', id: owner })
+      },
     },
     triggers: { get: id => store.triggers.get(id), latest: thread => store.read.threadTriggers(thread, 1)[0] },
     notify: message => { deps.outbox.send(message) },

@@ -69,7 +69,7 @@ export function ticketDetail(host: ViewHost, id: string) {
     const shown = trigger && { id: trigger.id, actor: view.actor(trigger.actor, trigger.human), human: trigger.human,
       preview: preview(trigger.text), thread: threadKey(trigger.threads[0]!),
       ...handback ? { handback: { reason: handback.reason, at: handback.at } } : {} }
-    const text = (value.kind === 'text' || value.kind === 'note') && value.text ? { text: markdown(value.text) } : {}
+    const text = (value.kind === 'text' || value.kind === 'note' || value.kind === 'answer') && value.text ? { text: markdown(value.text) } : {}
     return { ...value, ...text, delivered: !ticket.undelivered.includes(value.id), ...shown ? { trigger: shown } : {} }
   }
   // Pass `human = false` for bot-originated mandates so the Source kind still labels the actor as a bot if removed from the policy list.

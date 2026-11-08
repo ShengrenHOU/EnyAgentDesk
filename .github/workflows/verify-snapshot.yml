@@ -13,23 +13,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
-      - name: Verify snapshot provenance
+          fetch-depth: 0
+      - name: Verify snapshot provenance and immutable version
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
           set -eu
           parents=$(git rev-list --parents -n 1 HEAD | wc -w)
-          if [ "$parents" -ne 1 ]; then
-            echo "main must be a root snapshot commit, not a merge or child commit"
+          if [ "$parents" -gt 2 ]; then
+            echo "a snapshot may only continue its public parent, without merging private history"
             exit 1
           fi
-          if ! git log -1 --format=%B | grep -Eq '^Upstream-Commit: [0-9a-f]{40}$'; then
-            echo "missing Upstream-Commit trailer"
-            exit 1
+          if [ -n "$BEFORE" ] && ! echo "$BEFORE" | grep -Eq '^0+$'; then
+            git merge-base --is-ancestor "$BEFORE" HEAD
           fi
+          git log -1 --format=%B | grep -Eq '^Upstream-Commit: [0-9a-f]{40}$'
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
+          test "$(git rev-parse "refs/tags/v$version^{commit}")" = "$(git rev-parse HEAD)"
           for path in GOAL.md docs/open-source docs/010-owner-pilot.md docs/011-development-principles.md; do
             if [ -e "$path" ]; then
               echo "forbidden path present: $path"
               exit 1
             fi
           done
-          echo "snapshot provenance verified"
+          echo "snapshot provenance and version verified"

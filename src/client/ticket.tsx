@@ -1,13 +1,14 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
-import { useState, type ReactNode } from 'react'
-import { ApiError, usePoll, type TicketPageView } from './api.ts'
+import { useRef, useState, type ReactNode } from 'react'
+import { answerAttention, ApiError, usePoll, type TicketPageView } from './api.ts'
 import { Button, DisclosureRow, Dot, Icon, Input, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
+import { ReplyForm } from './reply-form.tsx'
 import { Field } from './settings-kit.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
-import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
+import { actorName, errorText, fullTime, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
 
@@ -29,6 +30,60 @@ function localDateTime(value?: string): string {
   if (!value) return ''
   const date = new Date(value)
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+type AnswerRequest = { requestId: string; sessionId: string; throughSeq: number; ticketId: string; attentionId?: string;
+  instruction: string }
+async function readJson<T>(response: Response): Promise<T> {
+  const body: unknown = await response.json()
+  if (!response.ok) throw new Error(body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+    ? body.error : `Request failed (${response.status})`)
+  return body as T
+}
+/** Owner answers use the shared command; other supplements retain their original discussion and retry identity. */
+function AnswerComposer({ ticket, sessionId, reload }: { ticket: TicketPageView; sessionId?: string; reload: () => Promise<void> }) {
+  const { t } = usePanel()
+  const [question, setQuestion] = useState(ticket.attention)
+  const [instruction, setInstruction] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string>()
+  const [sent, setSent] = useState(false)
+  const pending = useRef<AnswerRequest>()
+  const submit = async () => {
+    const attention = question
+    const text = instruction.trim()
+    if (!text || busy) return
+    setBusy(true); setFailure(undefined); setSent(false)
+    try {
+      if (attention) await answerAttention(t, ticket.id, attention.id, text)
+      else {
+        if (!sessionId) throw new Error(t('ticketAnswerUnavailable'))
+        if (pending.current?.instruction !== text) {
+          const discussion = await readJson<{ throughSeq: number | null }>(await fetch(
+            `/api/superagent-workbench/discussion?sessionId=${encodeURIComponent(sessionId)}`))
+          if (discussion.throughSeq === null) throw new Error(t('ticketAnswerUnavailable'))
+          pending.current = { requestId: crypto.randomUUID(), sessionId, throughSeq: discussion.throughSeq,
+            ticketId: ticket.id, instruction: text }
+        }
+        await readJson(await fetch('/api/superagent-workbench/update', { method: 'POST',
+          headers: { 'content-type': 'application/json' }, body: JSON.stringify(pending.current) }))
+      }
+      pending.current = undefined
+      setInstruction(''); setSent(true)
+      await reload()
+    } catch (error) {
+      // Keep the text for a retry; the component keeps the same request until the text changes.
+      setFailure(errorText(error))
+    } finally { setBusy(false) }
+  }
+  return <>
+    {question && ticket.attention && question.id !== ticket.attention.id && <div role="status">
+      <Hint>{t('ticketAnswerChanged')}</Hint><Button size="sm" variant="outline"
+        onClick={() => { setQuestion(ticket.attention); setFailure(undefined) }}>{t('ticketAnswerUseCurrent')}</Button>
+    </div>}
+    <ReplyForm value={instruction} busy={busy} onChange={value => { setInstruction(value); setSent(false) }} onSubmit={() => void submit()} />
+    {sent && <span className="dt-hint" role="status">{t('ticketAnswerSent')}</span>}
+    {failure && <p className="dt-error" role="alert">{failure}</p>}
+  </>
 }
 function TicketManagement({ ticket, reload }: { ticket: TicketPageView; reload: () => Promise<void> }) {
   const { t, call } = usePanel()
@@ -52,6 +107,33 @@ function TicketManagement({ ticket, reload }: { ticket: TicketPageView; reload: 
     </form>
   </Details>
 }
+
+function FollowupEditor({ ticket, reload }: { ticket: TicketPageView; reload: () => Promise<void> }) {
+  const { t, call } = usePanel()
+  const [at, setAt] = useState('')
+  const [reason, setReason] = useState('')
+  const pending = useRef<{ request_id: string; at: string; reason: string }>()
+  const schedule = useAction(async () => {
+    const time = new Date(at).getTime()
+    if (!Number.isFinite(time) || time <= Date.now()) throw new Error(t('ticketFollowupFuture'))
+    const request = { at: new Date(time).toISOString(), reason: reason.trim() }
+    if (pending.current?.at !== request.at || pending.current.reason !== request.reason) {
+      pending.current = { ...request, request_id: crypto.randomUUID() }
+    }
+    await call('POST tickets/:id/followup', { id: ticket.id, body: pending.current })
+    pending.current = undefined; setAt(''); setReason('')
+  }, { reload })
+  return <Details icon="clock" title={t('ticketScheduleFollowup')}>
+    <Hint>{t('ticketScheduleFollowupHint')}</Hint>
+    <form className="dt-form" onSubmit={event => { event.preventDefault(); if (at && reason.trim()) void schedule.run() }}>
+      <Field label={t('ticketFollowupTime')}><Input type="datetime-local" value={at} disabled={schedule.busy}
+        onChange={event => setAt(event.target.value)} /></Field>
+      <Field label={t('ticketFollowupReason')}><textarea value={reason} maxLength={2000} disabled={schedule.busy}
+        onChange={event => setReason(event.target.value)} /></Field>
+      <Button type="submit" size="sm" variant="outline" disabled={schedule.busy || !at || !reason.trim()}>{t('ticketSaveFollowup')}</Button>
+    </form>
+  </Details>
+}
 function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: string; at: string; preview: string }[] }) {
   const { t, navigate } = usePanel()
   const trigger = input.kind === 'trigger' ? input.trigger : undefined
@@ -64,7 +146,8 @@ function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: stri
       </button></div> : <div className="dt-row-title">{valueLabel(t, 'input', input.kind)}</div>}
       <div className="dt-row-meta">{input.kind === 'trigger' && <span>{valueLabel(t, 'input', input.kind)}</span>}<When
         at={input.at} /></div>
-      {(input.kind === 'text' || input.kind === 'note') && input.text && <div className="dt-row-quote"><MarkdownLite text={input.text} /></div>}
+      {input.kind === 'answer' && <p className="dt-hint">{input.question}</p>}
+      {(input.kind === 'text' || input.kind === 'note' || input.kind === 'answer') && input.text && <div className="dt-row-quote"><MarkdownLite text={input.text} /></div>}
       {trigger?.handback && <Hint>{t('inputHandedBack', { reason: trigger.handback.reason })}</Hint>}
       <Earlier items={earlier} />
     </div>
@@ -149,6 +232,7 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { setup } = usePanelData()
+  const [preview, setPreview] = useState<{ title: string; url: string }>()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
@@ -167,6 +251,9 @@ export function TicketPage({ id }: { id: string }) {
     return reason ? t('endedAt', { time, outcome, reason }) : t('endedAtShort', { time, outcome })
   })()
   const channel = data.channels[0]
+  // A Ticket started in the owner discussion can take its answer there; a source Ticket keeps its source link.
+  const workbench = data.mandate.actor.source === 'workbench'
+    ? data.channels.find(item => item.source === 'workbench' && item.sessionId) : undefined
   return <>
     <PageHead title={data.title}>
       {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
@@ -187,20 +274,37 @@ export function TicketPage({ id }: { id: string }) {
     {ended && <Hint>{ended}</Hint>}
     {data.ended?.outcome === 'stopped' && setup?.machine.executor.kind === 'dsh' && <ContinueStopped id={id} reload={reload} />}
     {!data.ended && <TicketManagement key={`${data.id}:${data.priority}:${data.dueAt}:${data.taskPaused}`} ticket={data} reload={reload} />}
-    {!!(data.followups?.length || data.followup) && <Section title={t('ticketFollowupAt')} icon="clock">
-      {(data.followups ?? (data.followup ? [data.followup] : [])).map(item => <KeyValues key={item.id} rows={[[t('ticketFollowupAt'), when(item.at, t('lang'))],
-        [t('ticketFollowupReason'), item.reason]]} />)}
+    {(!data.ended || data.followups?.length || data.followup) && <Section title={t('ticketFollowupAt')} icon="clock">
+      {(data.followups ?? (data.followup ? [data.followup] : [])).map(item => <div key={item.id}>
+        <KeyValues rows={[[t('ticketFollowupAt'), fullTime(item.at, t('lang'))], [t('ticketFollowupReason'), item.reason]]} />
+        {!data.ended && <ConfirmButton label={t('homeCancelFollowup')} title={t('homeCancelFollowupTitle')}
+          message={t('homeCancelFollowupConfirm', { title: data.title, at: fullTime(item.at, t('lang')), reason: item.reason })}
+          onConfirm={() => after(call('DELETE tickets/:id/followup', { id, query: { request_id: item.id } }))} />}
+      </div>)}
+      {!data.ended && <FollowupEditor ticket={data} reload={reload} />}
     </Section>}
     {!!data.deliverables?.length && <Section title={t('ticketDeliverables')}>
-      <ul className="dt-plain-list">{data.deliverables.map(item => <li key={item.url}><ExternalLink
-        href={item.url}>{item.title}</ExternalLink></li>)}</ul>
+      <ul className="dt-plain-list">{data.deliverables.map(item => {
+        const url = new URL(item.url, location.href)
+        return <li key={item.url}><ExternalLink href={item.url}>{item.title}</ExternalLink>
+          {url.origin === location.origin && url.pathname === '/api/superagent-workbench/artifact' && <Button size="sm" variant="ghost"
+            onClick={() => setPreview(item)}>{t('ticketPreview')}</Button>}</li>
+      })}</ul>
+      {preview && <div className="dt-owner-preview"><div className="dt-owner-section-head"><strong>{preview.title}</strong>
+        <Button size="sm" variant="ghost" onClick={() => setPreview(undefined)}>{t('close')}</Button></div>
+        <iframe src={preview.url} title={preview.title} sandbox="" />
+      </div>}
     </Section>}
     {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
       text={data.attention.question} />
+      <AnswerComposer key={`${data.id}:answer`} ticket={data} reload={reload} />
       {channel && <div className="dt-banner-actions">
         {channel.sessionId ? <SessionButton sessionId={channel.sessionId} label={t('workbenchReturnDiscussion')} />
           : <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>}
       </div>}</div>}
+    {!data.attention && workbench?.sessionId && data.ended?.by !== 'human' && <Section title={t('ownerDeskRevise')} icon="message">
+      <AnswerComposer key={`${data.id}:update`} ticket={data} sessionId={workbench.sessionId} reload={reload} />
+    </Section>}
     {/* Ordinary progress stays in the Session/Channels; halted work also has its report beside the available retry. */}
     {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
       <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}

@@ -2,6 +2,7 @@
 import { threadKey } from '../../core/index.ts'
 import type { Deployment } from '../../deployment.ts'
 import type { Health } from '../../sources/host.ts'
+import { health as diagnostic } from '../../sources/host.ts'
 import type { SourceInstance } from '../../sources/kind.ts'
 import type { SourceRegistry } from '../../sources/registry.ts'
 import type { SetupProblem } from '../../setup.ts'
@@ -17,6 +18,8 @@ export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, 
     const entry = health[name]
     return { name, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
   })
+  if (instance.configError) parts.unshift({ name: 'configuration', ...diagnostic('error', 'sourceConfigInvalid',
+    { fields: instance.configError.join(', ') }) })
   return { id: instance.id, title: kind?.title ?? { zh: instance.id, en: instance.id }, health: parts }
 }
 export interface SetupState {
@@ -33,6 +36,7 @@ export const problemOf = (id: string, setup: SetupState) => [setup.problem, setu
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {
   if (!instance.installed) return 'missing'
+  if (instance.configError) return 'error'
   if (!instance.enabled) return 'off'
   if (problemOf(instance.id, setup) || parts.some(part => part.state === 'error')) return 'error'
   if (setup.problem) return 'setup'
@@ -52,6 +56,7 @@ export function sourcesStatus(host: ViewHost, health: HealthMap, setup: SetupSta
     const { health: parts, ...named } = sourceHealth(sources, instance, health)
     const problem = problemOf(instance.id, setup)
     return { ...named, installed: instance.installed, enabled: instance.enabled, state: sourceState(instance, parts, setup), health: parts,
+      ...instance.configError ? { configError: instance.configError } : {},
       ...problem ? { problem } : {}, stats: stats[instance.id] ?? { received: 0, filtered: 0, lastAt: '' }, filtered: filtered(instance.id),
       dropped: dropped.filter(item => item.channel.source === instance.id) }
   })

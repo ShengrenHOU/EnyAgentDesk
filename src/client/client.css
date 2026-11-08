@@ -63,6 +63,11 @@ button:has([data-superagent-entry]):has(> span + span) .sg-entry-caption { displ
 details.pw-runtime-note { display: block; }
 details.pw-runtime-note > summary { cursor: pointer; }
 details.pw-runtime-note > .dt-section { margin-top: 16px; }
+.dt-followup-agenda { border: 1px solid var(--dsw-alias-border-l3, #e6eaf0); border-radius: 12px; padding: 14px; margin: 12px 0 22px; min-width: 0; }
+.dt-followup-agenda > summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.dt-followup-agenda > ul { max-height: 300px; overflow-y: auto; margin-top: 12px; padding: 0; list-style: none; }
+.dt-followup-agenda li { border-top: 1px solid var(--dsw-alias-border-l3, #e6eaf0); padding: 10px 0; overflow-wrap: anywhere; }
+.dt-followup-agenda p { font-size: 12px; line-height: 1.6; margin: 6px 0; }
 .pw-task-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 22px; }
 .pw-task { background: var(--dsw-alias-bg-base, white); border: 1px solid var(--dsw-alias-border-l3, #e6eaf0); border-radius: 13px; padding: 16px; min-width: 0; }
 .pw-task-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
@@ -123,6 +128,7 @@ details.pw-runtime-note > .dt-section { margin-top: 16px; }
 .dt-owner-tabs button[data-needs-attention=true] { border-color: var(--dsw-alias-state-warning, #b7791f); background: color-mix(in srgb, var(--dsw-alias-state-warning, #b7791f) 14%, transparent); }
 .dt-owner-hint { color: var(--dsw-alias-label-tertiary); margin: 5px 0 0; font-size: 12px; }
 .dt-owner-content { max-height: min(34vh, 340px); overflow: auto; margin-top: 8px; border-top: 1px solid var(--dsw-alias-border-l3); padding-top: 8px; }
+.dt-owner-content .dt-list { margin: 0; }
 .dt-owner-task { list-style: none; padding: 12px 0; border-bottom: 1px solid var(--dsw-alias-border-l3); }
 .dt-owner-task:last-child { border-bottom: 0; }
 .dt-owner-task-head .dt-open { text-align: left; overflow-wrap: anywhere; }
@@ -180,6 +186,9 @@ details.pw-runtime-note > .dt-section { margin-top: 16px; }
 /* Transparent block borders preserve vertical spacing when line clamping clips padding. */
 .dt-banner:is(.dt-clamp, .dt-clamp-8) { padding-block: 0; border-block: 8px solid transparent; }
 .dt-banner-label { font-weight: 500; }
+.dt-answer { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.dt-answer textarea { width: 100%; min-height: 72px; resize: vertical; box-sizing: border-box; }
+.dt-answer-actions { display: flex; align-items: center; gap: 8px; }
 .dt-workbench-linked { display: flex; flex-direction: column; gap: 8px; }
 .dt-workbench-heading { margin: 0; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--dsw-alias-label-tertiary); }
 .dt-workbench-requests { display: flex; flex-direction: column; gap: 10px; }

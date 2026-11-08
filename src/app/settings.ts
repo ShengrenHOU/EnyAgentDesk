@@ -132,7 +132,7 @@ export class Settings {
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
     const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
-      : instance ? { enabled: instance.enabled, config: instance.config } : undefined
+      : instance ? instance.configError && id ? settings.sources[id] : { enabled: instance.enabled, config: instance.config } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
   }

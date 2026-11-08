@@ -59,7 +59,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   const pump = () => { engine.evaluateDue(); settle() }
   /** Simulate the worker's Session taking the delivered Trigger Inputs it has not yet read into a step. */
   const read = (ticketId: string) => engine.inputsRead(ticketId, repo.tickets.get(ticketId)!.inputs.flatMap(input =>
-    input.kind === 'trigger' && input.readAt === null ? [input.id] : []))
+    (input.kind === 'trigger' || input.kind === 'answer') && input.readAt === null ? [input.id] : []))
   const decide = (candidate: Candidate, outcome: Outcome) => engine.decide(candidate.triggers[0]!.id, { ...outcome, evalId: candidate.evalId })
   return { repo, engine, outbox, withdrawn, requests, assessor, executor, delivered, settle, pump, read, decide,
     setVersion: (value: string) => { version = value }, setPaused: (value: boolean) => { paused = value }, tick: (seconds: number) => { clock += seconds } }
@@ -70,6 +70,57 @@ function accepted(h: ReturnType<typeof harness>, id = '1', thread = 't1') {
   h.settle()
   return decision
 }
+
+describe('owner answers', () => {
+  it('saves the answer once, withdraws its question and waits for a read plus worker report', () => {
+    const h = harness(), ticketId = accepted(h).ticketId!
+    const asked = h.engine.report(ticketId, { state: 'blocked', summary: 'Need a choice', question: 'Which color?' })
+    const attention = asked.attention!
+    h.engine.reply({ purpose: 'attention', ticketId, question: attention.question, text: attention.question })
+    const receipt = h.engine.answerAttention(ticketId, attention.id, ' Blue ', member)
+    expect(h.repo.tickets.get(ticketId)?.attention).toBeUndefined()
+    expect(ticketStage(h.repo.tickets.get(ticketId)!)).toEqual({ stage: 'working', action: 'answer-pending' })
+    expect(h.withdrawn).toContain(key('attention-reply', attention.id))
+    expect(h.engine.answerAttention(ticketId, attention.id, 'Blue', member)).toEqual(receipt)
+    expect(() => h.engine.answerAttention(ticketId, attention.id, 'Red', member)).toThrow(new UserError('answerConflict'))
+    h.settle()
+    expect(h.delivered.filter(([, id]) => id === receipt.inputId)).toHaveLength(1)
+    h.engine.report(ticketId, { state: 'blocked', summary: 'Old turn', question: 'Which color?' })
+    expect(h.repo.tickets.get(ticketId)?.attention).toBeUndefined()
+    h.read(ticketId)
+    h.engine.report(ticketId, { state: 'waiting', summary: 'Applied blue; waiting on CI' })
+    expect(ticketStage(h.repo.tickets.get(ticketId)!)).toEqual({ stage: 'idle' })
+    expect(h.repo.tickets.get(ticketId)?.inputs.at(-1)).toMatchObject({ kind: 'answer', attentionId: attention.id,
+      question: attention.question, text: 'Blue', by: member, readAt: expect.any(String), reportedAt: expect.any(String) })
+    expect(h.engine.answerAttention(ticketId, attention.id, 'Blue', member)).toEqual(receipt)
+  })
+
+  it('rejects replaced questions, ended/revoked work and empty answers without losing the current question', () => {
+    const h = harness(), ticketId = accepted(h).ticketId!
+    const old = h.engine.report(ticketId, { state: 'blocked', summary: 'Need a choice', question: 'A?' }).attention!
+    h.tick(1)
+    const current = h.engine.report(ticketId, { state: 'blocked', summary: 'Changed question', question: 'B?' }).attention!
+    expect(() => h.engine.answerAttention(ticketId, old.id, 'yes', member)).toThrow(new UserError('staleAttention'))
+    expect(() => h.engine.answerAttention(ticketId, current.id, ' ', member)).toThrow(new UserError('invalidAnswer'))
+    h.setVersion('revoked')
+    expect(() => h.engine.answerAttention(ticketId, current.id, 'yes', member)).toThrow(new UserError('mandateRevoked'))
+    expect(h.repo.tickets.get(ticketId)?.attention).toEqual(current)
+    h.engine.stopTicket(ticketId)
+    expect(() => h.engine.answerAttention(ticketId, current.id, 'yes', member)).toThrow(new UserError('ticketEnded'))
+  })
+
+  it('keeps an unread answer pending when a concurrent stale ready report arrives', () => {
+    const h = harness(), ticketId = accepted(h).ticketId!
+    const question = h.engine.report(ticketId, { state: 'blocked', summary: 'Question', question: 'Approve?' }).attention!
+    h.engine.answerAttention(ticketId, question.id, 'yes', member)
+    h.engine.report(ticketId, { state: 'ready', summary: 'Previous turn completed' })
+    expect(h.repo.tickets.get(ticketId)?.ended).toBeUndefined()
+    expect(ticketStage(h.repo.tickets.get(ticketId)!)).toEqual({ stage: 'working', action: 'answer-pending' })
+    h.settle(); h.read(ticketId)
+    h.engine.report(ticketId, { state: 'ready', summary: 'Answer applied and verified' })
+    expect(h.repo.tickets.get(ticketId)?.ended?.outcome).toBe('completed')
+  })
+})
 
 describe('intake', () => {
   it('continues stopped responsibility only through an explicit owner action, preserving history without replaying inputs', () => {

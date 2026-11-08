@@ -36,7 +36,8 @@ const SHUTDOWN_STOP_MS = 10_000
 /** How long a worker that goes on after a passing failure waits for a worker slot, or for processing to resume, between looks. */
 const SLOT_WAIT_MS = 5000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
-const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
+const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context
+  : input?.kind === 'text' || input?.kind === 'answer'
 /**
  * Internal error thrown when a ticket's workspace prepare command fails during launch.
  * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
@@ -163,6 +164,8 @@ export const inputResource = (ticketId: string, inputId: string): string => `tic
  * Returns `undefined` for legacy `reopen` inputs, which are historical only because the schema 11 migration converted pending reopen inputs into text inputs.
  */
 export function inputMessage(input: TicketInput, trigger?: object): string | undefined {
+  if (input.kind === 'answer') return JSON.stringify({ owner_answer: { attention_id: input.attentionId,
+    question: input.question, text: input.text, by: input.by, at: input.at }, instruction: 'Continue this ticket using the owner answer. Preserve its existing scope and report the resulting progress.' })
   // Mark triggers arriving on context-only subscriptions so the worker knows they are not addressed to the ticket.
   if (input.kind === 'trigger') return JSON.stringify({ ...trigger ?? { trigger_id: input.triggerId, read: `trigger/${input.triggerId}` },
     ...input.context ? { context: true } : {} })
@@ -548,7 +551,7 @@ export class DshExecutor implements Executor {
       if (event.type !== 'user/message' || ticketId === undefined || event.data.source.kind !== 'dsh-superagent' || this.host.closing()) return
       const message = event.data
       void this.background(Promise.resolve().then(() => {
-        const read = this.host.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'trigger' && !input.readAt
+        const read = this.host.store.tickets.get(ticketId)?.inputs.filter(input => (input.kind === 'trigger' || input.kind === 'answer') && !input.readAt
           && this.host.sessions.promptedId(input.id) === message.id).map(input => input.id) ?? []
         if (read.length) this.host.engine.inputsRead(ticketId, read)
       }))

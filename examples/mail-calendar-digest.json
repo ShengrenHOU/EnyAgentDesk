@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "timeZone": "Asia/Shanghai",
+  "larkCli": "/path/to/lark-cli",
+  "larkConfigDir": "/path/to/existing-authorized-user-config",
+  "expectedUserId": "ou_owner",
+  "calendar": { "lookaheadHours": 24 },
+  "mail": { "lookbackHours": 24, "maxLookbackHours": 168, "overlapMinutes": 10, "pageSize": 20 },
+  "delivery": { "mode": "self-chat", "chatId": "oc_self", "userId": "ou_owner" },
+  "stateFile": "state/state.json",
+  "healthFile": "state/health.json",
+  "outputDir": "digests",
+  "logDir": "logs"
+}

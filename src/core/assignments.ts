@@ -61,7 +61,7 @@ export class Assignments extends EnginePart {
     ticket.undelivered = ticket.undelivered.filter(id => !inputIds.includes(id)); ticket.updatedAt = this.now()
     runningAssignment(ticket)!.deliveredAt = ticket.updatedAt
     for (const input of ticket.inputs) {
-      if (input.kind === 'trigger' && inputIds.includes(input.id)) { input.readAt ??= null; input.deliveredTo = assignmentId }
+      if ((input.kind === 'trigger' || input.kind === 'answer') && inputIds.includes(input.id)) { input.readAt ??= null; input.deliveredTo = assignmentId }
     }
     delete ticket.delivery
     this.repo.tickets.save(ticket)
@@ -70,7 +70,7 @@ export class Assignments extends EnginePart {
   read(ticketId: string, inputIds: string[]): void {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) return
-    for (const input of ticket.inputs) if (input.kind === 'trigger' && inputIds.includes(input.id)) input.readAt ||= this.now()
+    for (const input of ticket.inputs) if ((input.kind === 'trigger' || input.kind === 'answer') && inputIds.includes(input.id)) input.readAt ||= this.now()
     this.repo.tickets.save(ticket)
   }
   turnEnded(ticketId: string, assignmentId: string): void {
@@ -122,8 +122,10 @@ export class Assignments extends EnginePart {
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
     const at = this.now()
     const previous = ticket.attention
-    const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
-    const asked = report.question && report.question !== previous?.question ? ask(report.question) : previous
+    const ask = (question: string) => ({ id: key('attention', ticketId, question, at,
+      ticket.inputs.findLast(input => input.kind === 'answer')?.id ?? ''), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
+    const answeredBeforeRead = ticket.inputs.some(input => input.kind === 'answer' && input.question === report.question && !input.readAt)
+    const asked = report.question && !answeredBeforeRead && report.question !== previous?.question ? ask(report.question) : previous
     const attention = report.question === null || report.state === 'ready' ? undefined : asked
     if (attention) ticket.attention = attention
     else delete ticket.attention
@@ -131,6 +133,7 @@ export class Assignments extends EnginePart {
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
     assignment.report = { state: report.state, summary: report.summary, at,
       ...(report.deliverables ? { deliverables: report.deliverables } : {}) }
+    for (const input of ticket.inputs) if (input.kind === 'answer' && input.readAt && input.deliveredTo === assignment.id) input.reportedAt ??= at
     ticket.updatedAt = at
     if (report.answers && !ticket.answers?.includes(report.answers)) ticket.answers = [...ticket.answers ?? [], report.answers]
     if (report.answers) this.takeUp(ticketId, report.answers)
@@ -140,7 +143,7 @@ export class Assignments extends EnginePart {
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.
     const outcome = report.state === 'dropped' ? this.tickets.followsDone(ticket)?.outcome ?? 'dropped' : report.state === 'ready' ? ready : undefined
-    if (outcome) this.tickets.end(ticketId, 'executor', outcome, at)
+    if (outcome && !ticket.inputs.some(input => input.kind === 'answer' && !input.reportedAt)) this.tickets.end(ticketId, 'executor', outcome, at)
     return this.require(ticketId)
   }
   /** The ticket, while it is open and `assignmentId` runs it. */

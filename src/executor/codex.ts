@@ -473,7 +473,7 @@ export class CodexExecutor {
       await closing
       return
     }
-    const delivered = ticket.inputs.filter(input => input.kind === 'trigger' && input.deliveredTo === worker.assignmentId).map(input => input.id)
+    const delivered = ticket.inputs.filter(input => (input.kind === 'trigger' || input.kind === 'answer') && input.deliveredTo === worker.assignmentId).map(input => input.id)
     this.host.engine.inputsRead(ticketId, delivered)
     this.host.engine.turnEnded(ticketId, worker.assignmentId)
     const assignment = latestAssignment(ticket)

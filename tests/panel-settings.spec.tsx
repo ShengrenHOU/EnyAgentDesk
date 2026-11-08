@@ -5,10 +5,36 @@ import { createRoot } from 'react-dom/client'
 import { Fields } from '../src/client/settings-kit.tsx'
 import { expect, it, onTestFinished } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
+it('starts a newly selected settings group at the top of its content', async () => {
+  await mount()
+  await click(tab(zh['tab.settings']))
+  const page = document.querySelector<HTMLElement>('.dt-page')!
+  page.scrollTop = 300
+  await click(find(zh['settingsGroup.execution'], '.dt-settings-link'))
+  expect(page.scrollTop).toBe(0)
+  page.scrollTop = 200
+  await click(find(zh['settingsGroup.eval'], '.dt-settings-link'))
+  expect(page.scrollTop).toBe(0)
+})
+
+it('preserves a source deep link after the settings scroll reset', async () => {
+  const previous = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value(this: HTMLElement) {
+    if (this.id === 'dt-source-github') this.closest('.dt-page')!.scrollTop = 220
+  } })
+  onTestFinished(() => {
+    if (previous) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', previous)
+    else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+  })
+  at({ page: 'settings', query: { group: 'source', source: 'github' } })
+  await mount()
+  expect(document.querySelector('.dt-page')!.scrollTop).toBe(220)
+})
+
 it('keeps a person\'s own value where another save changed the same setting, and says so', async () => {
   await mount()
   await click(zh['tab.execution'])

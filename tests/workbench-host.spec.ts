@@ -17,6 +17,7 @@ let route: ConnectionFetchRoute
 let discussion: ConnectionFetchRoute
 let summary: ConnectionFetchRoute
 let update: ConnectionFetchRoute
+let answer: ConnectionFetchRoute
 let artifact: ConnectionFetchRoute
 let inspect = vi.fn<Context['sessionController']['inspect']>()
 let discussionTool: ToolDefinition
@@ -42,6 +43,7 @@ beforeEach(async () => {
     else if (value.path.endsWith('/summary')) summary = value
     else if (value.methods.includes('GET')) discussion = value
     else if (value.path.endsWith('/update')) update = value
+    else if (value.path.endsWith('/answer')) answer = value
     else route = value
     return async () => {}
   } } })
@@ -75,10 +77,65 @@ it('publishes an observed-source task through its private owner channel and reta
 const input = { sessionId: 'discussion', requestId: 'request-1', throughSeq: 0, instruction: 'Prepare a reading note' }
 const send = (body: unknown) => route.fetch(new Request('http://localhost/api/superagent-workbench/delegate', { method: 'POST', body: JSON.stringify(body) }))
 
+it('saves cross-source answers on the exact Ticket through the authenticated carrier, without inspecting a discussion', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('answer-1', 'Prepare the note'))
+  const attention = h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Waiting', question: 'Which scope?' }).attention!
+  const submit = (body: unknown) => answer.fetch(new Request('http://localhost/api/superagent-workbench/answer', { method: 'POST', body: JSON.stringify(body) }))
+  const body = { ticketId: ticket.id, attentionId: attention.id, instruction: 'Keep only the first section.' }
+  const response = await submit(body)
+  expect(response.status).toBe(200)
+  const receipt = await response.json()
+  expect(receipt.saved).toBe(true)
+  expect(await (await submit(body)).json()).toEqual(receipt)
+  expect(h.runtime.store.tickets.get(ticket.id)?.inputs.filter(input => input.kind === 'answer')).toEqual([
+    expect.objectContaining({ question: 'Which scope?', text: body.instruction, by: { source: 'workbench', id: 'owner' } }),
+  ])
+  expect(h.runtime.store.tickets.get(ticket.id)?.attention).toBeUndefined()
+  expect(inspect).not.toHaveBeenCalled()
+  await h.runtime.idle()
+  h.step(`worker-${ticket.id}`)
+  await h.runtime.idle()
+  expect(h.runtime.store.tickets.get(ticket.id)?.inputs.find(input => input.kind === 'answer')).toMatchObject({ readAt: expect.any(String) })
+  h.runtime.engine.report(ticket.id, { state: 'waiting', summary: 'Scope applied; waiting for evidence.' })
+  expect(h.runtime.store.tickets.get(ticket.id)?.inputs.find(input => input.kind === 'answer')).toMatchObject({ reportedAt: expect.any(String) })
+  expect((await submit({ ...body, instruction: 'Different' })).status).toBe(409)
+  expect((await submit({ ...body, ownerId: 'forged' })).status).toBe(400)
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
+    workbench: { allowed: [], admission: {} } } } })
+  expect((await submit(body)).status).toBe(409)
+})
+
+it('routes the main discussion answer by current question identity and refuses background-message authority', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('answer-2', 'Prepare the note'))
+  const attention = h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Waiting', question: 'Which scope?' }).attention!
+  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const args = { action: 'answer', ticket_id: ticket.id, attention_id: attention.id, owner_instruction_quote: 'Original owner discussion' }
+  expect(await discussionTool.execute(args, execution)).toMatchObject({ saved: true })
+  expect(h.runtime.store.tickets.get(ticket.id)?.attention).toBeUndefined()
+  const record = await inspect(SessionId('discussion'))
+  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+    data: createUserMessage({ source: { kind: 'dsh-superagent' }, content: [{ type: 'text', text: 'Report quoting Original owner discussion' }] }) }] })
+  await expect(discussionTool.execute(args, execution)).rejects.toThrow('not an original owner instruction')
+  expect(() => h.runtime.context({ kind: 'feishu', health: [] }).tickets.answerAttention(ticket.id, attention.id, 'fake'))
+    .toThrow('authenticated owner')
+})
+
 it('does not require a GitHub account when the native workbench is the only configured source', () => {
   expect(needsGithub(SettingsSchema.parse({ sources: { workbench: { config: { ownerId: 'owner' } } } }))).toBe(false)
   expect(needsGithub(SettingsSchema.parse({ sources: { github: { enabled: true } } }))).toBe(true)
   expect(needsGithub(SettingsSchema.parse({ sources: { github: { enabled: false, config: { repository: 'owner/repo' } } } }))).toBe(true)
+})
+
+it('reads all pending checks through the real management route and cancels only its selected receipt', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('checks-1', 'Follow the project'))
+  h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Owner choice', question: 'Proceed?' })
+  h.runtime.followups.schedule(ticket.id, { request_id: 'proof', at: new Date(Date.now() + 60_000).toISOString(), reason: 'Verify the result' })
+  expect(await h.api('GET', 'followups')).toMatchObject({ status: 200, body: [
+    expect.objectContaining({ ticketId: ticket.id, id: 'proof', blocked: 'attention', due: false }),
+  ] })
+  expect(await h.api('DELETE', `tickets/${ticket.id}/followup?request_id=proof`)).toMatchObject({ status: 200, body: { cancelled: true } })
+  expect(await h.api('GET', 'followups')).toMatchObject({ status: 200, body: [] })
 })
 
 it('hands off natural-language requests using original owner evidence and deduplicates tool retries', async () => {

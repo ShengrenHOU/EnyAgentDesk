@@ -4,6 +4,18 @@ import type { Api, ApiRequest, ApiResponse } from '../app/api.ts'
 import { USER_ERRORS, type UserErrorCode } from '../core/errors.ts'
 import type { TicketStage } from '../core/stage.ts'
 import type { SetupProblem } from '../setup.ts'
+import type { T } from './text.ts'
+
+/** Uses DSH's authenticated owner carrier; question identity makes an uncertain retry idempotent. */
+export async function answerAttention(t: T, ticketId: string, attentionId: string, instruction: string): Promise<void> {
+  const response = await fetch('/api/superagent-workbench/answer', { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticketId, attentionId, instruction }) })
+  const body: unknown = await response.json()
+  if (!response.ok && body && typeof body === 'object' && 'code' in body && isUserError(body.code)) throw new Error(t(`userError.${body.code}`))
+  if (!response.ok) throw new Error(body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+    ? body.error : `Answer was not saved (${response.status})`)
+  if (!body || typeof body !== 'object' || !('saved' in body) || body.saved !== true) throw new Error('Answer receipt is missing')
+}
 
 /** Host rejection identified by a structured user error code and interpolation values. */
 export interface UserFailure { code: UserErrorCode; values: Record<string, string> }
