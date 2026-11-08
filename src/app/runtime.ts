@@ -93,12 +93,15 @@ export class Runtime extends Service implements SourceHost {
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
-    super(ctx, 'orchestrator')
-    const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
     const release = lockSync(machine.stateDir, { stale: 30_000, onCompromised: compromised })
+    let adopted = false
+    using lockOnFailure = { [Symbol.dispose]() { if (!adopted) release() } }
+    super(ctx, 'orchestrator')
+    adopted = true
+    const runtime = this
     this.releaseLock = async () => { release() }
     let opened: Store | undefined
     try {

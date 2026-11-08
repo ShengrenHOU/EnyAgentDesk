@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
+import { lockSync } from 'proper-lockfile'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -1385,6 +1386,27 @@ it('refuses a second process on the same state directory before it opens the dat
   expect(() => new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
   expect(runtime.store.get(KV.store.schema)).toBe(10)
   runtime.store.set(KV.store.schema, SCHEMA_VERSION)
+})
+
+it('retries startup in the same service context after the earlier state lock is released', async () => {
+  const ctx = new Context()
+  for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
+  expect(() => new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
+  expect(ctx.get('orchestrator')).toBeUndefined()
+  await runtime.stop()
+  runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+  await runtime.ready
+  expect(ctx.get('orchestrator')).toBeDefined()
+})
+
+it('releases a newly acquired state lock when service registration is refused', () => {
+  const ctx = new Context()
+  ctx.reflect.provide('orchestrator', runtime)
+  const other = join(directory, 'other-state')
+  mkdirSync(other)
+  expect(() => new Runtime(ctx, testMachine({ stateDir: other }), vi.fn())).toThrow(/registered/)
+  const release = lockSync(other)
+  release()
 })
 
 it('applies a changed prompt size limit to the next save and request without a restart', async () => {
