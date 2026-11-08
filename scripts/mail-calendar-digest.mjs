@@ -688,12 +688,6 @@ const generationFailed = Boolean(calendarError || mailError || unreadError)
 if (!calendarError) {
   state.calendar = { lastWindowStart: calendar.start.toISOString(), lastWindowEnd: calendar.end.toISOString() }
 }
-if (!mailError) {
-  state.mail = {
-    since: runStartedAt,
-    seen: [...new Set([...seen, ...mail.map(message => message.id)])].slice(-1000),
-  }
-}
 state.version = 1
 state.lastRunAt = runStartedAt
 state.consecutiveFailures = generationFailed ? (Number(state.consecutiveFailures ?? 0) + 1) : 0
@@ -724,6 +718,10 @@ if (cliArgs.includes('--send')) {
 
 if (delivery.ok && !delivery.skipped) {
   state.delivery = { sentDay: localDay(now), messageId: delivery.messageId }
+  if (!mailError) state.mail = {
+    since: runStartedAt,
+    seen: [...new Set([...seen, ...mail.map(message => message.id)])].slice(-1000),
+  }
 }
 
 const deliveryFailed = !delivery.ok

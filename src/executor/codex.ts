@@ -356,6 +356,8 @@ export class CodexExecutor {
       await this.reconcile(ticket, worker)
       ticket = this.current(ticketId, assignment.id)
       if (!ticket || !ticket.undelivered.length) return
+      // A dedicated next turn gives answers an unambiguous read/report boundary; a current report may still be stale.
+      if (worker.turnId && ticket.inputs.some(input => input.kind === 'answer' && ticket!.undelivered.includes(input.id))) return
       if (this.host.paused() || ticket.paused || this.host.ticketPaused?.(ticketId)) throw new Later('Ticket is paused')
       if (!worker.turnId) this.slots.reserve(ticketId, 'wake')
       worker.launching = true
@@ -389,11 +391,23 @@ export class CodexExecutor {
     if (method !== 'item/tool/call') throw new Error('Approval or unsupported server request requires human handling')
     const call = ToolCall.parse(raw)
     const worker = this.workers.get(ticketId)
-    const ticket = worker && this.current(ticketId, worker.assignmentId)
+    let ticket = worker && this.current(ticketId, worker.assignmentId)
     if (!worker || !ticket || call.threadId !== worker.threadId || (worker.turnId && call.turnId !== worker.turnId)) throw new Error('Tool request does not own this ticket')
     if (call.tool === 'orchestrator_report' && z.object({ state: z.literal('ready') }).safeParse(call.arguments).success && this.host.store.get(KV.codex.stages(ticketId))?.pending) throw new Error('A pending stage handoff must finish before reporting ready')
     const tool = tools.find(tool => tool.name === call.tool)
     if (!tool) throw new Error('Tool is not available to this worker')
+    const pending = this.host.store.get(KV.codex.binding(ticketId))?.pending?.inputIds ?? []
+    const answers = ticket.inputs.filter(input => input.kind === 'answer' && !input.readAt
+      && (input.deliveredTo === worker.assignmentId || (worker.launching && !worker.turnId && pending.includes(input.id)))).map(input => input.id)
+    if (answers.length) {
+      const notDelivered = answers.filter(id => ticket!.undelivered.includes(id))
+      this.host.store.atomic(() => {
+        if (notDelivered.length) this.host.engine.inputsDelivered(ticketId, worker.assignmentId, notDelivered)
+        this.host.engine.inputsRead(ticketId, answers)
+      })
+      ticket = this.current(ticketId, worker.assignmentId)
+      if (!ticket) throw new Error('Ticket ended while recording its owner answer')
+    }
     try {
       if (call.tool === 'orchestrator_report' && z.object({ state: z.literal('ready') }).safeParse(call.arguments).success && this.host.store.get(KV.codex.stages(ticketId))) {
         const assignmentId = worker.assignmentId, deliveredAt = latestAssignment(ticket)?.deliveredAt
@@ -432,7 +446,13 @@ export class CodexExecutor {
     if (worker.completing || worker.completedTurnId === event.turn.id) return
     worker.completing = event.turn.id
     try { await this.completeTurn(ticketId, worker, event, worker.assignmentId); worker.completedTurnId = event.turn.id }
-    finally { if (worker.completing === event.turn.id) worker.completing = undefined }
+    finally {
+      if (worker.completing === event.turn.id) worker.completing = undefined
+      const ticket = this.current(ticketId, worker.assignmentId)
+      const assignment = ticket && runningAssignment(ticket)
+      if (ticket && assignment && event.turn.status === 'completed' && ticket.inputs.some(input => input.kind === 'answer'
+        && ticket.undelivered.includes(input.id))) this.deliver(ticket, assignment)
+    }
   }
   private async collectModelEvidence(ticketId: string, worker: Worker, turnId: string, assignmentId: string): Promise<void> {
     let stages = this.host.store.get(KV.codex.stages(ticketId))

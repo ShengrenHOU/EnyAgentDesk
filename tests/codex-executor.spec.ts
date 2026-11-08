@@ -34,6 +34,44 @@ async function fixture(completeImmediately = false, readOnly = false, beforeThre
   return { host, connections, codex }
 }
 describe('Codex executor integration with upstream Engine and Effects', () => {
+  it('consumes an owner answer when its Codex report arrives before turn completion', async () => {
+    const { host: h, connections } = await fixture()
+    const { ticket } = await h.acceptedLegacyTicket(feishu('1', 'Prepare a summary'))
+    const c = connections[0]!
+    h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Need scope', question: 'Which scope?' })
+    c.options.notification('turn/completed', { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } })
+    await vi.waitFor(() => expect(h.runtime.store.get(KV.codex.binding(ticket.id))?.turnId).toBeUndefined())
+    const attention = h.runtime.store.tickets.get(ticket.id)!.attention!
+    h.runtime.engine.answerAttention(ticket.id, attention.id, 'Summary only', { source: 'feishu', id: 'ou_alice' })
+    await h.runtime.idle()
+    const reportAt = new Date(Date.now() + 1000).toISOString()
+    vi.spyOn(Date.prototype, 'toISOString').mockReturnValue(reportAt)
+    const result = await c.options.request('item/tool/call', { threadId: 'codex-thread-1', turnId: 'turn-2',
+      callId: 'answer-ready', tool: 'orchestrator_report', arguments: { state: 'ready', summary: 'Summary verified' } })
+    expect(result).toMatchObject({ success: true })
+    expect(h.runtime.store.tickets.get(ticket.id)?.ended?.outcome).toBe('completed')
+    expect(h.runtime.store.tickets.get(ticket.id)?.inputs.at(-1)).toMatchObject({ kind: 'answer', readAt: expect.any(String), reportedAt: expect.any(String) })
+    await h.runtime.idle()
+    expect(c.call.mock.calls.some(([method]) => method === 'turn/interrupt')).toBe(false)
+  })
+
+  it('keeps an answer out of an active Codex turn so a stale report cannot consume it', async () => {
+    const { host: h, connections } = await fixture()
+    const { ticket } = await h.acceptedLegacyTicket(feishu('1', 'Prepare a summary'))
+    const c = connections[0]!
+    const attention = h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Need scope', question: 'Which scope?' }).attention!
+    h.runtime.engine.answerAttention(ticket.id, attention.id, 'Summary only', { source: 'feishu', id: 'ou_alice' })
+    await h.runtime.idle()
+    expect(c.call.mock.calls.some(([method]) => method === 'turn/steer')).toBe(false)
+    await c.options.request('item/tool/call', { threadId: 'codex-thread-1', turnId: 'turn-1', callId: 'old-ready',
+      tool: 'orchestrator_report', arguments: { state: 'ready', summary: 'Old turn result' } })
+    expect(h.runtime.store.tickets.get(ticket.id)?.ended).toBeUndefined()
+    c.options.notification('turn/completed', { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } })
+    await vi.waitFor(() => expect(c.call.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(2))
+    await c.options.request('item/tool/call', { threadId: 'codex-thread-1', turnId: 'turn-2', callId: 'new-ready',
+      tool: 'orchestrator_report', arguments: { state: 'ready', summary: 'Answer applied' } })
+    expect(h.runtime.store.tickets.get(ticket.id)?.ended?.outcome).toBe('completed')
+  })
   it('keeps a follow-up queued when paused while reconnecting its Codex thread', async () => {
     const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
     const { host: h, connections } = await fixture(false, false, async index => {

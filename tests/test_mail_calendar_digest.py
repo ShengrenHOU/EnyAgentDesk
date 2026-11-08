@@ -30,11 +30,16 @@ cp.execFile = (_command,args,options,callback) => {
     return {pid:0,kill(){}}
   }
   let value
+  if(args[0]==='im'&&process.env.DIGEST_TEST_SEND_FAILURE) {
+    setImmediate(()=>callback(new Error('fixture delivery failed'),'','fixture delivery failed'))
+    return {pid:0,kill(){}}
+  }
   if(args[0]==='auth') value={identities:{user:{status:'ready',openId:process.env.DIGEST_TEST_USER??'ou_owner'}}}
+  else if(args[0]==='im') value={data:{message_id:'om_fixture'}}
   else if(args[0]==='calendar') value={ok:true,identity:'user',data:[]}
   else if(args[0]==='mail'&&args[1]==='+messages') value={data:{messages:[{message_id:'fixture-message',body_plain_text:'Please confirm [material](https://example.invalid). <img src=x>'}]}}
   else if(args[0]==='mail') value={ok:true,identity:'user',data:process.env.DIGEST_TEST_BAD_MAIL?{}:{messages:[
-    {message_id:'fixture-message',date:'2026-11-08T00:30:00Z',from:'Fixture Person <fixture@example.com>',subject:'Fixture',labels:'UNREAD'}
+    {message_id:'fixture-message',date:'2026-11-08T00:30:00Z',from:'Fixture Person <fixture@example.com>',subject:'Fixture',labels:process.env.DIGEST_TEST_READ_MAIL?'':'UNREAD'}
   ],has_more:false,count:1}}
   else throw new Error('Unexpected external operation in digest fixture')
   setImmediate(()=>callback(null,JSON.stringify(value),''))
@@ -50,7 +55,7 @@ syncBuiltinESMExports()
                                 env={**os.environ, 'LARKSUITE_CLI_CONFIG_DIR': 'global-bot-profile',
                                      'DIGEST_TEST_LOG': str(self.trace), **(env or {})}, text=True, encoding='utf-8', capture_output=True)
         self.assertEqual(result.returncode == 0, success, result.stderr)
-        calls = [json.loads(line) for line in self.trace.read_text().splitlines()] if self.trace.exists() else []
+        calls = [json.loads(line) for line in self.trace.read_text(encoding='utf-8').splitlines()] if self.trace.exists() else []
         health = json.loads((self.root / 'state/health.json').read_text())
         return calls, health
 
@@ -85,6 +90,16 @@ syncBuiltinESMExports()
         self.assertEqual([call['args'][0] for call in calls], ['auth'])
         self.assertEqual(health['status'], 'error')
         self.assertFalse(health['delivery']['ok'])
+
+    def test_failed_delivery_keeps_read_mail_for_retry_and_success_is_not_sent_twice(self):
+        self.run_digest(success=False, send=True, env={'DIGEST_TEST_SEND_FAILURE': '1', 'DIGEST_TEST_READ_MAIL': '1'})
+        _calls, health = self.run_digest(send=True, env={'DIGEST_TEST_READ_MAIL': '1'})
+        self.assertEqual(health['sources']['mail']['newCount'], 1)
+        self.assertIn('Fixture Person', (self.root / 'digests/latest.md').read_text(encoding='utf-8'))
+        self.assertTrue(health['delivery']['ok'])
+        calls, health = self.run_digest(send=True, env={'DIGEST_TEST_READ_MAIL': '1'})
+        self.assertTrue(health['delivery']['skipped'])
+        self.assertEqual(len([call for call in calls if call['args'][0] == 'im']), 2)
 
     def test_missing_user_binding_does_not_fall_back_to_global_bot(self):
         del self.config['larkConfigDir']
