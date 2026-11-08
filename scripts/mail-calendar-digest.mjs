@@ -127,7 +127,7 @@ function invokeLark(args, timeoutMs = 60_000) {
   }
   const identity = args.indexOf('--as')
   if (identity >= 0 && args[identity + 1] !== 'user') throw new Error('The digest only supports the bound user identity')
-  const command = identity < 0 ? [...args, '--as', 'user'] : args
+  const command = identity < 0 && args[0] !== 'auth' ? [...args, '--as', 'user'] : args
   return new Promise((resolve, reject) => {
     let settled = false
     const finish = (action, value) => {

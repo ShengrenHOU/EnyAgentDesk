@@ -30,6 +30,7 @@ cp.execFile = (_command,args,options,callback) => {
     return {pid:0,kill(){}}
   }
   let value
+  if(args[0]==='auth'&&args.includes('--as')) throw new Error('auth status is identity-neutral and rejects --as')
   if(args[0]==='im'&&process.env.DIGEST_TEST_SEND_FAILURE) {
     setImmediate(()=>callback(new Error('fixture delivery failed'),'','fixture delivery failed'))
     return {pid:0,kill(){}}
@@ -67,7 +68,10 @@ syncBuiltinESMExports()
         self.assertTrue((self.root / 'digests/latest.md').is_file())
         for call in calls:
             self.assertEqual(call['configDir'], self.config['larkConfigDir'])
-            self.assertEqual(call['args'][call['args'].index('--as') + 1], 'user')
+            if call['args'][0] == 'auth':
+                self.assertNotIn('--as', call['args'])
+            else:
+                self.assertEqual(call['args'][call['args'].index('--as') + 1], 'user')
         self.assertEqual([call['args'][0] for call in calls], ['auth', 'calendar', 'mail', 'mail', 'mail'])
 
     def test_preserves_current_triage_deduplication_and_reports_partial_body_reads(self):
