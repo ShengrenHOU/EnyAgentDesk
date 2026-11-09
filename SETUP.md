@@ -28,7 +28,7 @@ grep -l -E 'id: dsh-superagent\b' "${DSH_HOME:-$HOME/.dsh}"/profiles/*/cordis.pa
 
 - **Prerequisites:** Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+, GitHub CLI 2.48+, and DSH within the `engines.dsh` range of `package.json`. tmux is only needed by the POSIX service script, not by the installer. A missing item becomes part of the plan, not a question.
 - **Model key:** the profile needs a model provider key in its environment, by default `DEEPSEEK_API_KEY`. Do not ask for the value; ask the operator to export it in the shell that starts the profile.
-- **Existing profile:** a profile with a `dsh-superagent` entry is an earlier installation. The installer refuses to overwrite it. Ask whether to continue that profile with `--apply-only`, or to choose a new profile name.
+- **Existing profile:** a profile with a `dsh-superagent` entry is an earlier installation. The installer refuses to overwrite it, and `--apply-only` needs that profile's install receipt. Ask whether to keep it and configure it manually as in `docs/006-deployment.md`, or to choose a new profile name.
 - **Operator login:** the `gh api user --jq .login` result, run as the operator, is the recommendation for the allowed GitHub list. It is not the agent account.
 
 ## 2. Questions
