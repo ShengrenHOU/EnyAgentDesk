@@ -278,8 +278,13 @@ export interface PolicyEffect {
 export type TicketEndBy = 'executor' | 'human'
 /** How a ticket ended: with its result, with its pull request merged or closed unmerged, with nothing to do, or stopped by a person. */
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
+/**
+ * What an agent proposes while it waits for a person: the action it recommends, why, the known risk, and a draft the
+ * person may send or submit. Advice is never authorization; the person still decides, and nothing is sent from here.
+ */
+export interface DecisionAdvice { summary: string; reason?: string; risk?: string; draft?: string }
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
-export interface Attention { id: string; question: string; triggerId?: string }
+export interface Attention { id: string; question: string; triggerId?: string; advice?: DecisionAdvice }
 export interface TicketFollowup { id: string; at: string; reason: string; createdAt: string }
 export type TicketPriority = 'low' | 'normal' | 'high' | 'urgent'
 /** The management fields a person changes on a ticket; a `null` deadline removes it. */

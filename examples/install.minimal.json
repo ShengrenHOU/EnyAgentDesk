@@ -1,0 +1,35 @@
+{
+  "$comment": "One installation, one file. Replace every <placeholder>; never put a secret here. INSTALL.md explains where each value comes from.",
+  "profile": "enyagentdesk",
+  "dshHome": "<absolute DSH_HOME, for example /home/you/.dsh>",
+  "port": 3082,
+  "stateDir": "<absolute private state directory, for example /home/you/.dsh/state/enyagentdesk>",
+  "git": {
+    "name": "EnyAgentDesk Agent",
+    "email": "<the agent account's noreply email>"
+  },
+  "github": {
+    "repository": "<owner/name of the repository the agent works on>",
+    "cli": "<absolute path to a gh wrapper signed in as the agent account>",
+    "agent": "<the agent account login>",
+    "allowed": ["<your own GitHub login>"]
+  },
+  "feishu": {
+    "cli": "<absolute path to a bot-only lark-cli wrapper>",
+    "chat": {
+      "id": "oc_<the chat id, for example from the chat settings>",
+      "name": "<chat name>",
+      "listen": "mentions"
+    },
+    "allowed": [
+      { "id": "ou_<your Feishu open id>", "name": "<your name>" }
+    ],
+    "directMessages": true
+  },
+  "executor": {
+    "directory": "<absolute directory for Ticket work, for example /home/you/enyagentdesk-work>",
+    "maxWorkers": 2,
+    "blockedCommands": []
+  },
+  "apiKeyEnv": "DEEPSEEK_API_KEY"
+}

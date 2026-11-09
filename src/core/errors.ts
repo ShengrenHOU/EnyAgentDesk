@@ -20,6 +20,8 @@ export const USER_ERRORS = {
   notFollowing: ['refused', 'This ticket does not follow that thread'],
   questionWithResult: ['refused', 'A question for a person cannot also be a ready result or an answer; report it separately'],
   askerWithoutQuestion: ['refused', 'The message that raised a question needs the question it raised'],
+  adviceWithoutQuestion: ['refused', 'A recommendation for a person needs the question it belongs to'],
+  invalidAdvice: ['refused', 'A recommendation needs a one-sentence summary of at most 600 characters'],
   notAsker: ['refused', 'A question must name the person\'s message that raised it, which reached this ticket'],
   notAnswerable: ['refused', 'An answer must name the person\'s question it answers, which reached this ticket'],
   ackEnded: ['refused', 'Ticket ended; do not acknowledge historical requests'],

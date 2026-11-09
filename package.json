@@ -5,7 +5,7 @@
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
   "license": "Apache-2.0",
-  "version": "0.5.18",
+  "version": "0.5.19",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
   "repository": {
@@ -51,9 +51,11 @@
     "prompts",
     "skills",
     "scripts/*.py",
-    "scripts/*.mjs",
+    "scripts/**/*.mjs",
     "scripts/*.ps1",
-    "scripts/dsh-superagent"
+    "scripts/dsh-superagent",
+    "examples/install.minimal.json",
+    "INSTALL.md"
   ],
   "dsh": {
     "bundle": {

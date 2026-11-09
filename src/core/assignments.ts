@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
-import type { Deliverable, ReportState, Ticket } from './model.ts'
+import type { Attention, DecisionAdvice, Deliverable, ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { automatic, type Tickets } from './tickets.ts'
@@ -14,6 +14,8 @@ export interface WorkerReport {
   deliverables?: Deliverable[]
   /** Open question for a person: a string asks it, `null` clears an open one, and `undefined` keeps the current one. */
   question?: string | null
+  /** The action the worker recommends, with its evidence, risk and draft; it requires the question it belongs to. */
+  advice?: DecisionAdvice
   /** The person's message whose request raised the question; routes the question to the channel where it was written. */
   askedBy?: string
   /** The person's question this report answers, which the worker thereby takes up; authorizes the main Session to send an answer reply. */
@@ -111,6 +113,8 @@ export class Assignments extends EnginePart {
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
     if (report.askedBy && !report.question) throw new UserError('askerWithoutQuestion')
+    if (report.advice && !report.question) throw new UserError('adviceWithoutQuestion')
+    if (report.advice && (!report.advice.summary.trim() || report.advice.summary.length > 600)) throw new UserError('invalidAdvice')
     const person = (id: string, channel: boolean) => {
       const trigger = this.repo.triggers.get(id)
       return !!trigger?.human && (!channel || !!trigger.channel) && this.reaches(ticket, trigger, false)
@@ -122,11 +126,14 @@ export class Assignments extends EnginePart {
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
     const at = this.now()
     const previous = ticket.attention
-    const ask = (question: string) => ({ id: key('attention', ticketId, question, at,
+    const ask = (question: string): Attention => ({ id: key('attention', ticketId, question, at,
       ticket.inputs.findLast(input => input.kind === 'answer')?.id ?? ''), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
     const answeredBeforeRead = ticket.inputs.some(input => input.kind === 'answer' && input.question === report.question && !input.readAt)
     const asked = report.question && !answeredBeforeRead && report.question !== previous?.question ? ask(report.question) : previous
-    const attention = report.question === null || report.state === 'ready' ? undefined : asked
+    // An advice-only report refreshes the recommendation without replacing the question, so the attention keeps its identity.
+    const advice = report.advice ?? asked?.advice
+    const attention = report.question === null || report.state === 'ready' ? undefined
+      : asked && advice ? { ...asked, advice } : asked
     if (attention) ticket.attention = attention
     else delete ticket.attention
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.

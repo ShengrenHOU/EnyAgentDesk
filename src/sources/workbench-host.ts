@@ -11,6 +11,7 @@ import { registerWorkbenchTool } from './workbench-tools.ts'
 import { AgentDelivery } from '../infra/delivery.ts'
 import { KV } from '../kv.ts'
 import { focusRequestKey, readFocus } from './workbench-focus.ts'
+import { deferDecision, forgetDecision, ignoreDecision, readQueue, restoreDecision } from './workbench-queue.ts'
 import { UserError } from '../core/index.ts'
 
 export const name = 'dsh-superagent-workbench'
@@ -101,6 +102,43 @@ export function apply(ctx: Context): void {
           requests: discussionTasks(source, sessionId), notices: discussionNotices(source, sessionId) }, { headers: { 'cache-control': 'no-store' } })
       } catch (error) {
         return Response.json({ error: error instanceof Error ? error.message : 'Discussion unavailable' }, { status: 409 })
+      }
+    },
+  }))
+  /** The owner's decision queue: pending Questions, plus this Source's own defer and ignore records. */
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: '/api/superagent-workbench/queue', methods: ['GET'], requestBody: 'buffered',
+    async fetch() {
+      const source = ctx.orchestrator.context(workbenchKind)
+      await source.ready
+      if (!source.config<WorkbenchConfig>('workbench')?.ownerId) return Response.json({ error: 'Native workbench is disabled' }, { status: 503 })
+      return Response.json(readQueue(source), { headers: { 'cache-control': 'no-store' } })
+    },
+  }))
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: '/api/superagent-workbench/queue/action', methods: ['POST'], requestBody: 'buffered',
+    async fetch(request) {
+      try {
+        const source = ctx.orchestrator.context(workbenchKind)
+        await source.ready
+        if (!source.config<WorkbenchConfig>('workbench')?.ownerId) return Response.json({ error: 'Native workbench is disabled' }, { status: 503 })
+        const body = await request.text()
+        if (Buffer.byteLength(body) > 16_384) return Response.json({ error: 'Queue action is too large' }, { status: 413 })
+        const input = z.object({ action: z.enum(['defer', 'restore', 'ignore', 'forget']),
+          ticketId: z.string().min(1).max(200), attentionId: z.string().min(1).max(200),
+          until: z.iso.datetime().optional(), reason: z.string().trim().min(1).max(500).optional() }).strict()
+          .parse(JSON.parse(body))
+        if (input.action === 'defer' && !input.until) return Response.json({ error: 'A deferral needs a time' }, { status: 400 })
+        if (input.action === 'ignore' && !input.reason) return Response.json({ error: 'A “no action needed” decision needs a reason' }, { status: 400 })
+        const result = input.action === 'defer' ? deferDecision(source, input.ticketId, input.attentionId, input.until!)
+          : input.action === 'restore' ? restoreDecision(source, input.ticketId, input.attentionId)
+            : input.action === 'ignore' ? ignoreDecision(source, input.ticketId, input.attentionId, input.reason!)
+              : forgetDecision(source, input.ticketId, input.attentionId)
+        return Response.json(result, { headers: { 'cache-control': 'no-store' } })
+      } catch (error) {
+        if (error instanceof z.ZodError || error instanceof SyntaxError) return Response.json({ error: 'Invalid queue action' }, { status: 400 })
+        return Response.json({ error: error instanceof Error ? error.message : 'Queue action was not saved',
+          ...error instanceof UserError ? { code: error.code } : {} }, { status: 409 })
       }
     },
   }))

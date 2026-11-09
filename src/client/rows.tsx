@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { usePoll, type DecisionRow, type ThreadFacts, type ThreadRow, type TicketRow } from './api.ts'
 import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
+import { useStoredFlag } from './prefs.ts'
 import { usePanel } from './provider.tsx'
 import { actorName, fullTime, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
 import { ActionLink, ConfirmButton, LabelValue, LoadState, SessionButton, StageMark, When } from './widgets.tsx'
@@ -11,9 +12,15 @@ import { ActionLink, ConfirmButton, LabelValue, LoadState, SessionButton, StageM
 export function PendingFollowups({ openTicket }: { openTicket(id: string): void }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET followups'), [])
-  return <details className="dt-followup-agenda" open><summary>{t('followupAgenda')} · {data?.length ?? '…'}</summary>
+  // A long agenda is quiet by default and remembers whether the owner opened it.
+  const [open, setOpen] = useStoredFlag('dsh-superagent/followup-agenda-open', false)
+  return <section className="dt-followup-agenda">
+    <button type="button" className="dt-followup-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
+      <Icon name={open ? 'chevron-down' : 'chevron-right'} size={14} />
+      <span>{t('followupAgenda')} · {data?.length ?? '…'}</span>
+    </button>
     {error && <LoadState loading={false} error={error} />}
-    {!data ? !error && <LoadState loading /> : data.length ? <ul className="dt-list">{data.map(item => <li key={`${item.ticketId}:${item.id}`}>
+    {open && (data ? data.length ? <ul className="dt-list">{data.map(item => <li key={`${item.ticketId}:${item.id}`}>
       <div className="dt-owner-task-head"><button className="dt-open" type="button" onClick={() => openTicket(item.ticketId)}>{item.title}</button>
         <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag></div>
       <p><time dateTime={item.at}>{fullTime(item.at, t('lang'))}</time> · {item.reason}</p>
@@ -23,8 +30,8 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
           at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
           await call('DELETE tickets/:id/followup', { id: item.ticketId, query: { request_id: item.id } }); await reload()
         }} />
-    </li>)}</ul> : <p className="dt-hint">{t('followupAgendaEmpty')}</p>}
-  </details>
+    </li>)}</ul> : <p className="dt-hint">{t('followupAgendaEmpty')}</p> : <LoadState loading />)}
+  </section>
 }
 
 export function TicketLine({ ticket, question, onChanged, context }: {

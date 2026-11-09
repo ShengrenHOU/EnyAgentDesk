@@ -386,8 +386,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/workbench.tsx` | Native Session-row delegation and linked task view, with retained request identity on uncertain submissions |
 | `src/client/owner-desk.tsx` | Owner work projected beside the native conversation from the existing overview |
 | `src/client/reply-form.tsx` | Shared required multiline reply form for the daily, conversation and Ticket views |
-| `src/client/personal-workbench.tsx` | Daily work index with a one-line supplement for one matter; detailed discussion opens the main Session instead of a second transcript |
-| `src/sources/workbench-focus.ts` | Model-written reading projection of the owner focus, while Tickets and Threads remain the source of business state |
+| `src/client/personal-workbench.tsx` | Today's decision queue: one row per pending Question with the agent's recommendation and draft, one-click accept, revise, defer or no action, folded corrections, and running work below; detailed discussion opens the main Session |
+| `src/sources/workbench-focus.ts` | Model-written reading projection of the owner focus, while Tickets and Threads remain the source of business state; the panel keeps it as a manually refreshed reference |
+| `src/sources/workbench-queue.ts` | The owner decision queue: a read model over pending Questions, plus this Source's own deferral and reversible “no action needed” records |
 | `src/app/github-migration.ts` | Atomic legacy repository identity upgrade, preserving ticket/session/receipt identities and checkpoint ownership |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
 | `src/sources/github-cache.ts` | Short-lived reuse of read-only GitHub check and review reads, keyed by repository, pull request and head |
@@ -403,6 +404,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/prefs.ts` | The browser-local display preferences that survive a reload, such as whether the owner desk and its follow-up agenda are open |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
@@ -451,7 +453,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workbench-host.spec.ts` | Native carrier registration, persisted history delegation into a real ticket, caller-field rejection and unavailable-source failures |
 | `tests/workbench-client.spec.tsx` | Discussion action, no implicit submission, uncertain-submit replay and navigation to linked work |
 | `tests/owner-desk.spec.tsx` | Owner desk rendering of the existing overview rows |
-| `tests/personal-workbench.spec.tsx` | Daily work index with a one-line matter supplement, and detailed discussion that opens the main Session |
+| `tests/personal-workbench.spec.tsx` | The decision queue's advice and one-click outcomes, folded corrections, silence when empty, and the running work and reference sections |
+| `tests/workbench-queue.spec.ts` | Pending Questions with advice, deferrals until due, reversible “no action needed”, and stale-question refusal |
 | `tests/session-workspace.spec.ts` | Main and worker Sessions keep their execution directories without creating sidebar Workspaces; legacy main registrations are detached |
 | `tests/workbench-focus.spec.ts` | Reading projection of the owner focus, including absent optional fields |
 | `tests/workbench-registration.spec.tsx` | Native workbench registration inside the client slot tree |

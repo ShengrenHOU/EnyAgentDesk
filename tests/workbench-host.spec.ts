@@ -18,6 +18,8 @@ let discussion: ConnectionFetchRoute
 let summary: ConnectionFetchRoute
 let update: ConnectionFetchRoute
 let answer: ConnectionFetchRoute
+let queue: ConnectionFetchRoute
+let queueAction: ConnectionFetchRoute
 let artifact: ConnectionFetchRoute
 let inspect = vi.fn<Context['sessionController']['inspect']>()
 let discussionTool: ToolDefinition
@@ -41,6 +43,8 @@ beforeEach(async () => {
     if (value.path.endsWith('/artifact')) artifact = value
     else if (value.path.endsWith('/discussion')) discussion = value
     else if (value.path.endsWith('/summary')) summary = value
+    else if (value.path.endsWith('/queue/action')) queueAction = value
+    else if (value.path.endsWith('/queue')) queue = value
     else if (value.methods.includes('GET')) discussion = value
     else if (value.path.endsWith('/update')) update = value
     else if (value.path.endsWith('/answer')) answer = value
@@ -104,6 +108,31 @@ it('saves cross-source answers on the exact Ticket through the authenticated car
   h.runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
     workbench: { allowed: [], admission: {} } } } })
   expect((await submit(body)).status).toBe(409)
+})
+
+it('reads the owner decision queue and applies defer, restore and “no action needed” through the authenticated carrier', async () => {
+  const { ticket } = await h.acceptedTicket(feishu('queue-route', 'Prepare the note'))
+  const advice = { summary: 'Send it', reason: 'The note is ready', risk: 'Recipients may be away', draft: 'Sending the note now.' }
+  const attention = h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Waiting', question: 'Send it now?', advice }).attention!
+  const read = async () => (await queue.fetch(new Request('http://localhost/api/superagent-workbench/queue'))).json()
+  expect(await read()).toMatchObject({ items: [{ ticketId: ticket.id, attentionId: attention.id, question: 'Send it now?', advice }],
+    deferred: [], ignored: [], counts: { open: 1, deferred: 0, ignored: 0 } })
+  const act = (body: unknown) => queueAction.fetch(new Request('http://localhost/api/superagent-workbench/queue/action',
+    { method: 'POST', body: JSON.stringify(body) }))
+  const until = new Date(Date.now() + 3_600_000).toISOString()
+  expect(await (await act({ action: 'defer', ticketId: ticket.id, attentionId: attention.id, until })).json()).toEqual({ saved: true, until })
+  // A deferral hides the row but does not answer the Question.
+  expect(h.runtime.store.tickets.get(ticket.id)?.attention?.id).toBe(attention.id)
+  expect(await read()).toMatchObject({ items: [], deferred: [{ attentionId: attention.id, until }], counts: { open: 0, deferred: 1 } })
+  expect((await act({ action: 'restore', ticketId: ticket.id, attentionId: attention.id })).status).toBe(200)
+  expect((await read()).deferred).toHaveLength(0)
+  expect((await act({ action: 'ignore', ticketId: ticket.id, attentionId: attention.id, reason: 'Answered in person' })).status).toBe(200)
+  expect(h.runtime.store.tickets.get(ticket.id)?.attention).toBeUndefined()
+  expect(await read()).toMatchObject({ items: [], ignored: [{ ticketId: ticket.id, reason: 'Answered in person' }] })
+  expect((await act({ action: 'defer', ticketId: ticket.id, attentionId: 'replaced', until })).status).toBe(409)
+  expect((await act({ action: 'ignore', ticketId: ticket.id, attentionId: attention.id })).status).toBe(400)
+  expect((await act({ action: 'forget', ticketId: ticket.id, attentionId: attention.id })).status).toBe(200)
+  expect((await read()).ignored).toHaveLength(0)
 })
 
 it('routes the main discussion answer by current question identity and refuses background-message authority', async () => {

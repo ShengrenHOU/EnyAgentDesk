@@ -86,6 +86,14 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         files: z.array(z.object({ title: z.string().trim().min(1).max(160), path: z.string().min(1).max(4096) }).strict()).max(10).optional()
           .describe('Task-local files for Sources supporting file delivery.'),
         human_action: z.string().trim().min(1).max(1000).nullish().describe('One concrete question for a person, also with state=progress; omit to keep the pending one, null to clear it.'),
+        recommendation: z.string().trim().min(1).max(600).optional()
+          .describe('With human_action: the action you recommend the person take, one sentence. Advice only; it never authorizes sending or execution.'),
+        recommendation_reason: z.string().trim().min(1).max(1200).optional()
+          .describe('With recommendation: the evidence you actually read and why this is the best option; state what is unknown instead of inventing a reason.'),
+        risk: z.string().trim().min(1).max(600).optional()
+          .describe('With recommendation: the known risk or uncertainty the person should weigh.'),
+        draft: z.string().trim().min(1).max(4000).optional()
+          .describe('With recommendation: a ready-to-review reply, message or answer the person may send or submit. Never send it yourself; the person decides.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github?.login ?? 'the configured GitHub account'} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
         pr_repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).optional().describe('Repository of pr_number. Required for multi-repository work without a GitHub origin.'),
@@ -115,8 +123,15 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           }
           const refused = pull && claimPull(github, ticketId, pull)
           if (refused) throw new Error(refused)
+          if ((args.recommendation || args.recommendation_reason || args.risk || args.draft) && !args.human_action) {
+            throw new Error('recommendation, recommendation_reason, risk and draft require human_action')
+          }
+          const advice = args.recommendation ? { summary: args.recommendation,
+            ...(args.recommendation_reason ? { reason: args.recommendation_reason } : {}),
+            ...(args.risk ? { risk: args.risk } : {}), ...(args.draft ? { draft: args.draft } : {}) } : undefined
           const report = { state: args.state, summary: args.summary, ...(args.deliverables || args.files ? { deliverables } : {}),
             ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+            ...(advice ? { advice } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)

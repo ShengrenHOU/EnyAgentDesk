@@ -3,6 +3,7 @@ lib/
 .artifacts/
 .env
 .env.*
+enyagentdesk.install.json
 coverage/
 __pycache__/
 *.log

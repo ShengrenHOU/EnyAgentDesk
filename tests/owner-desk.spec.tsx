@@ -8,21 +8,54 @@ import { translator, click, type, settle } from './fixtures/panel.tsx'
 import { server, ticketSummary, usePanelServer } from './fixtures/panel-server.ts'
 
 let root: Root
-usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = '' })
+usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = ''; localStorage.clear(); openTicket.mockClear() })
 const t = translator(zh)
+const openTicket = vi.fn()
 async function mount(sessionId = 'master') {
   const container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
   const send = vi.fn(async (_text: string) => {})
-  await act(async () => { root.render(<OwnerDesk sessionId={sessionId} t={t} send={send} openTicket={() => {}} />) })
+  await act(async () => { root.render(<OwnerDesk sessionId={sessionId} t={t} send={send} openTicket={openTicket} />) })
   await settle()
   return send
+}
+async function remount() {
+  await act(async () => { root.unmount() })
+  document.body.innerHTML = ''
+  await mount()
 }
 
 it('shows global work only on the main conversation and opens no task merely by viewing it', async () => {
   const send = await mount('worker-one')
   expect(document.querySelector('.dt-owner-desk')).toBeNull()
   expect(send).not.toHaveBeenCalled()
+})
+
+it('starts collapsed and remembers the owner opening it', async () => {
+  await mount()
+  expect(document.querySelector('.dt-owner-body')).toBeNull()
+  const toggle = document.querySelector<HTMLButtonElement>('.dt-owner-toggle')!
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  await click(toggle)
+  expect(document.querySelector('.dt-owner-body')).not.toBeNull()
+  expect(localStorage.getItem('dsh-superagent/owner-desk-open')).toBe('true')
+  await remount()
+  expect(document.querySelector('.dt-owner-body')).not.toBeNull()
+})
+
+it('collapses the followup agenda from its own handle without opening a ticket', async () => {
+  server.ticketDetails.t1!.followups = [{ id: 'f1', at: '2099-01-01T00:00:00Z', reason: '核对签收', createdAt: '2026-11-08T00:00:00Z' }]
+  await mount()
+  await click(document.querySelector<HTMLButtonElement>('.dt-owner-toggle')!)
+  const agenda = document.querySelector<HTMLButtonElement>('.dt-followup-toggle')!
+  expect(agenda.getAttribute('aria-expanded')).toBe('false')
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(0)
+  await click(agenda)
+  expect(agenda.getAttribute('aria-expanded')).toBe('true')
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(1)
+  await click(agenda)
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(0)
+  expect(openTicket).not.toHaveBeenCalled()
 })
 
 it('keeps the exact task and decision on a native owner reply and preserves failed input', async () => {

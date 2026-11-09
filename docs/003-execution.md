@@ -25,6 +25,8 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 `Engine.answerAttention` atomically saves an `answer` Input with the question ID, question text, owner identity and answer, clears that Attention and withdraws its unsent notification. The same question and answer return the original receipt; a different saved answer or replaced question is refused. A stopped/ended Ticket or revoked Mandate cannot take a new answer.
 
+An Attention may carry the worker's `advice`: a recommended action, its evidence, a known risk and a review-ready draft. Advice is descriptive only. It changes no Mandate, sends nothing, is never taken as the answer, and keeps the Question's identity when refreshed so an owner answers the same Question. The workbench reads it to lower the cost of deciding; a person still answers, defers or dismisses each Question explicitly.
+
 All native owner entrypoints use this command through DSH's authenticated owner carrier or the workbench tool. The main discussion quotes the latest original owner instruction and names the exact Ticket and Attention. Model reports, source evidence and injected messages cannot supply owner authority. Other Sources cannot invoke this owner command. Existing source-thread messages keep their normal intake rules.
 
 Saving, delivery, reading and a subsequent worker report are recorded separately. An old report cannot finish a Ticket while its answer is unread. The answer stays in the Ticket across restarts; processing still follows pause, concurrency and existing scope. A receipt does not claim execution or completion. A changed question leaves the draft intact and requires explicit retargeting before it can answer the new question.

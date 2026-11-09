@@ -10,13 +10,27 @@ import { translator, click, settle, type } from './fixtures/panel.tsx'
 import { server, ticketSummary, usePanelServer } from './fixtures/panel-server.ts'
 
 let root: Root
-usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = '' })
-async function mount(focus: object | null, requested: object | null = null, domains: object[] = []) {
+usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = ''; localStorage.clear() })
+interface QueueItem { id: string; ticketId: string; attentionId: string; title: string; question: string
+  advice?: { summary: string; reason?: string; risk?: string; draft?: string }; source?: string; at: string }
+interface Queue { items: QueueItem[]; deferred: (QueueItem & { until: string })[]
+  ignored: (QueueItem & { ignoredAt: string; reason: string })[]; counts: { open: number; deferred: number; ignored: number } }
+/** The fake host has no workbench routes; the queue is the fixture's pending Questions unless a test passes its own. */
+async function mount(focus: object | null = null, requested: object | null = null, domains: object[] = [],
+  queue?: Partial<Queue> & { down?: boolean }) {
   const original = globalThis.fetch
   const refresh = vi.fn()
+  const actions: Record<string, unknown>[] = []
+  const items = server.person.flatMap(ticket => ticket.attention ? [{ id: `q-${ticket.id}`, ticketId: ticket.id,
+    attentionId: ticket.attention.id, title: ticket.title, question: ticket.attention.question, source: 'feishu', at: ticket.updatedAt }] : [])
+  const view: Queue = { items, deferred: [], ignored: [], counts: { open: items.length, deferred: 0, ignored: 0 }, ...queue }
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     if (input.endsWith('/focus')) return Response.json({ focus, requested, domains })
     if (input.endsWith('/focus/refresh')) { refresh(); return Response.json({ queued: true }) }
+    if (input.endsWith('/queue')) return queue?.down
+      ? Response.json({ error: 'Native workbench is disabled' }, { status: 503 })
+      : Response.json(view)
+    if (input.endsWith('/queue/action')) { actions.push(JSON.parse(String(init?.body))); return Response.json({ saved: true }) }
     return original(input, init)
   }))
   const container = document.createElement('div'); document.body.append(container); root = createRoot(container)
@@ -29,11 +43,84 @@ async function mount(focus: object | null, requested: object | null = null, doma
   await act(async () => { root.render(<PanelProvider t={translator(zh)} openSession={openSession}><Workbench t={translator(zh)}
     send={send} openSession={openSession} openManagement={openManagement} openDomainSettings={openDomainSettings} openGithubSettings={openGithubSettings} openWorkList={openWorkList} /></PanelProvider>) })
   await settle()
-  return { send, openSession, refresh, openManagement, openDomainSettings, openGithubSettings, openWorkList }
+  return { send, openSession, refresh, actions, openManagement, openDomainSettings, openGithubSettings, openWorkList }
 }
 
+it('shows the agent recommendation and accepts its draft with one click', async () => {
+  const original = globalThis.fetch
+  const answers: Record<string, unknown>[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/answer')) { answers.push(JSON.parse(String(init?.body))); return Response.json({ saved: true }) }
+    return original(url, init)
+  }))
+  const advice = { summary: 'Apply blue', reason: 'The design review chose blue', risk: 'Contrast is unverified', draft: 'Blue is applied; please review.' }
+  await mount(null, null, [], { items: [{ id: 'q1', ticketId: 't1', attentionId: 'q1', title: '修复回归', question: '需要确认按钮颜色',
+    advice, source: 'feishu', at: '2026-09-23T00:00:00Z' }], counts: { open: 1, deferred: 0, ignored: 0 } })
+  expect(document.querySelector('.pw-decision')?.textContent).toContain(advice.summary)
+  expect(document.querySelector('.pw-decision')?.textContent).toContain(advice.reason)
+  expect(document.querySelector('.pw-decision')?.textContent).toContain(advice.risk)
+  expect(document.querySelector('.pw-draft')?.textContent).toBe(advice.draft)
+  await click(zh.queueAccept)
+  expect(answers).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: 'q1', instruction: advice.draft })])
+  expect(document.body.textContent).toContain(zh.queueAccepted)
+})
+
+it('defers one decision and records a reversible “no action needed” decision', async () => {
+  const { actions } = await mount()
+  await click(zh.queueDefer)
+  expect(actions[0]).toMatchObject({ action: 'defer', ticketId: 't1', attentionId: 'q1' })
+  const until = new Date(String(actions[0]!.until))
+  expect([until.getHours(), until.getMinutes()]).toEqual([9, 0])
+  await click(zh.queueIgnore)
+  const input = document.querySelector<HTMLInputElement>('.pw-ignore-form input')!
+  await type(input, '已当面答复')
+  await click(zh.queueIgnoreConfirm)
+  expect(actions[1]).toMatchObject({ action: 'ignore', ticketId: 't1', attentionId: 'q1', reason: '已当面答复' })
+})
+
+it('is silent when nothing needs a decision and drops a folded record only after the correction is sent', async () => {
+  server.person = []
+  const { actions, send } = await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 1 },
+    ignored: [{ id: 'i1', ticketId: 't1', attentionId: 'q0', title: '旧事项', question: '要处理吗？', at: '2026-11-08T00:00:00Z',
+      ignoredAt: '2026-11-08T00:00:00Z', reason: '已经处理' }] })
+  expect(document.querySelectorAll('.pw-decision')).toHaveLength(0)
+  expect(document.body.textContent).toContain(zh.queueEmpty)
+  expect(document.body.textContent).toContain(zh.queueSilence)
+  await click(zh.queueReclassify)
+  // Opening the correction must not erase the folded record; cancelling leaves it intact.
+  expect(actions).toHaveLength(0)
+  expect(document.querySelector('.pw-supplement textarea')).not.toBeNull()
+  await type(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!, '其实还要补一份说明')
+  await click(zh.workbenchSendUpdate)
+  expect(send).toHaveBeenCalledWith('master', expect.stringContaining('其实还要补一份说明'))
+  expect(actions).toEqual([{ action: 'forget', ticketId: 't1', attentionId: 'q0' }])
+})
+
+it('keeps a failed Ticket without a Question visible for recovery, retry or stop', async () => {
+  server.person = [ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, summary: 'LlmError: no adapter registered' },
+    { stage: 'person', action: 'failed' })]
+  await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
+  expect(document.body.textContent).toContain(zh.queueRecovery)
+  expect(document.body.textContent).toContain('截图工具')
+  expect(document.body.textContent).not.toContain(zh.queueEmpty)
+  const retry = [...document.querySelectorAll<HTMLButtonElement>('.pw-recovery button')].find(button => button.textContent === zh.retry)!
+  await click(retry)
+  await click(zh.confirm)
+  expect(server.requests).toContainEqual(expect.objectContaining({ method: 'POST', path: 'tickets/t4/retry' }))
+})
+
+it('renders the independent overview sections when the optional workbench queue is unavailable', async () => {
+  server.person = []
+  server.work = { working: [ticketSummary({ id: 'w1', title: '进行中的事项' })], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
+  await mount(null, null, [], { down: true })
+  expect(document.body.textContent).toContain('Native workbench is disabled')
+  expect(document.body.textContent).toContain(zh.homeProgress)
+  expect(document.body.textContent).toContain('进行中的事项')
+  expect(document.body.textContent).not.toContain(zh.queueSilence)
+})
+
 it('opens the existing GitHub source settings from the workbench', async () => {
-  const { openGithubSettings } = await mount(null)
+  const { openGithubSettings } = await mount()
   await click(zh.homeGithubSettings)
   expect(openGithubSettings).toHaveBeenCalledOnce()
 })
@@ -45,6 +132,7 @@ it('shows all checks beyond the four visible task cards and cancels only the sel
     followups: [{ id: 'first', at: '2099-01-01T00:00:00Z', reason: `核对结果 ${index}`, createdAt: '2026-11-08T00:00:00Z' },
       { id: 'second', at: '2099-01-02T00:00:00Z', reason: `核对反馈 ${index}`, createdAt: '2026-11-08T00:00:00Z' }] }
   await mount(null)
+  await click(document.querySelector<HTMLButtonElement>('.dt-followup-toggle')!)
   expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(24)
   expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain(zh['followupBlock.attention'])
   const first = [...document.querySelectorAll<HTMLButtonElement>('.dt-followup-agenda li button')].find(button => button.textContent === zh.homeCancelFollowup)!
@@ -55,7 +143,7 @@ it('shows all checks beyond the four visible task cards and cancels only the sel
 })
 
 it('keeps unavailable-evaluation recovery reachable from the daily problem details', async () => {
-  await mount(null)
+  await mount()
   const details = document.querySelector<HTMLDetailsElement>('details.pw-runtime-note')!
   expect(details).not.toBeNull()
   await act(async () => { details.querySelector('summary')!.click() })
@@ -73,7 +161,7 @@ it('shows independent follow-ups and cancels only the selected check', async () 
   server.ticketDetails[task.id]!.followup = checks[0]; server.ticketDetails[task.id]!.followups = checks
   server.person = []
   server.work = { working: [task], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
-  await mount(null)
+  await mount()
   expect(document.body.textContent).toContain('核对签收')
   expect(document.body.textContent).toContain('核对付款')
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('.pw-task button')].filter(button => button.textContent === zh.homeCancelFollowup)
@@ -86,14 +174,16 @@ it('shows independent follow-ups and cancels only the selected check', async () 
   expect(server.ticketDetails[task.id]!.followups?.map(item => item.id)).toEqual(['second'])
 })
 
-it('adds one line to the selected matter without leaving the workbench', async () => {
-  const { send, openSession } = await mount(null)
+it('adds one line to a running matter without leaving the workbench', async () => {
+  server.person = []
+  server.work = { working: [ticketSummary({ id: 't2', title: '另一项工作' })], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
+  const { send, openSession } = await mount()
   await click(zh.ownerDeskRevise)
   const input = document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
   expect(input.getAttribute('aria-label')).toBe(zh.workbenchReplyInstruction)
   await type(input, '先按 A 修，补充背景见上一条。')
   await click(zh.workbenchSendUpdate)
-  expect(send).toHaveBeenCalledWith('master', expect.stringMatching(/^请继续已有工单 t\d+。本人补充或修改要求如下。/))
+  expect(send).toHaveBeenCalledWith('master', expect.stringMatching(/^请继续已有工单 t2。本人补充或修改要求如下。/))
   expect(send.mock.calls[0]![1]).toContain('先按 A 修')
   expect(openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.homeSent)
@@ -107,8 +197,8 @@ it('saves an answer on its Ticket without sending prose to the main Session', as
     if (url.endsWith('/answer')) { answers.push(JSON.parse(String(init?.body))); return Response.json({ saved: true }) }
     return original(url, init)
   }))
-  const { send } = await mount(null)
-  await click(zh.workbenchAnswer)
+  const { send } = await mount()
+  await click(zh.queueRevise)
   await type(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!, '其余工作建立独立单')
   await click(zh.workbenchSendUpdate)
   expect(answers).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: expect.any(String), instruction: '其余工作建立独立单' })])
@@ -122,10 +212,10 @@ it('explains why discussion, answers and updates are unavailable without a main 
     { title: '复核说明', reason: '原说明已有交付', nextAction: '先讨论是否需要补充', ticketId: 't1', evidence: '原事项', stale: false },
   ] })
   expect(document.body.textContent).toContain(zh.masterNotReady)
-  const discuss = [...document.querySelectorAll<HTMLButtonElement>('.pw-focus button')]
+  const discuss = [...document.querySelectorAll<HTMLButtonElement>('.pw-reference button')]
     .find(button => button.textContent === zh.homeDiscuss)!
   expect(discuss.disabled).toBe(true)
-  await click(zh.workbenchAnswer)
+  await click(zh.queueRevise)
   const input = document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
   await type(input, '先按 A 修，补充背景见上一条。')
   const submit = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
@@ -157,7 +247,7 @@ it('distinguishes a source update from linked work without creating a ticket', a
   expect(send).not.toHaveBeenCalled()
 })
 
-it('filters by configured business domain and discusses an empty domain without claiming coverage', async () => {
+it('filters reference suggestions by business domain without hiding a pending decision', async () => {
   const { send, openSession, openDomainSettings } = await mount({ headline: 'Current work', generatedAt: new Date().toISOString(), items: [
     { title: '模型报告', reason: '已交付', nextAction: '读取报告', ticketId: 't1', evidence: '模型事项', stale: false, domainId: 'mle' },
   ] }, null, [
@@ -170,8 +260,10 @@ it('filters by configured business domain and discusses an empty domain without 
   const quant = [...document.querySelectorAll<HTMLButtonElement>('.pw-domain')].find(button => button.textContent?.includes('Quant'))!
   await click(quant)
   expect(quant.getAttribute('aria-pressed')).toBe('true')
-  expect(document.querySelector('.pw-focus')?.textContent).not.toContain('模型报告')
+  expect(document.querySelector('.pw-reference')?.textContent).not.toContain('模型报告')
   expect(document.body.textContent).toContain(zh.homeDomainEmpty)
+  // A pending decision is not a suggestion and stays visible under any domain filter.
+  expect(document.querySelectorAll('.pw-decision')).toHaveLength(1)
   await click(zh.homeDiscussDomain)
   expect(send).toHaveBeenCalledWith('master', expect.stringContaining('不启动业务执行'))
   expect(send.mock.calls[0]?.[1]).toContain('策略研究')
@@ -181,25 +273,26 @@ it('filters by configured business domain and discusses an empty domain without 
 })
 
 it('opens the original main conversation from the prominent daily entry', async () => {
-  const { openSession, send } = await mount(null)
+  const { openSession, send } = await mount()
   await click(zh.mainConversationEntry)
   expect(openSession).toHaveBeenCalledWith('master')
   expect(send).not.toHaveBeenCalled()
   expect(document.querySelector('.pw-domain-grid')?.textContent).toContain(zh.homeDomainPending)
 })
 
-it('shows required decisions before model suggestions without hiding them behind domain filters', async () => {
-  await mount(null)
-  const decisions = document.querySelector('.pw-decisions')!
-  const focus = document.querySelector('.pw-focus')!
-  expect(decisions.compareDocumentPosition(focus) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+it('shows required decisions before progress and reference suggestions', async () => {
+  await mount()
+  const decision = document.querySelector('.pw-decision')!
+  const progress = [...document.querySelectorAll('.pw-section-title')].find(item => item.querySelector('h2')?.textContent === zh.homeProgress)!
+  expect(decision.compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(document.querySelector('.pw-decisions')).toBeNull()
 })
 
 it('shows the real total beyond overview limits and links to full work and result history', async () => {
   server.person = []
   const working = Array.from({ length: 10 }, (_, index) => ticketSummary({ id: `work-${index}`, title: `事项 ${index}` }))
   server.work = { working, workingTotal: 11, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
-  const { openWorkList } = await mount(null)
+  const { openWorkList } = await mount()
   const heading = [...document.querySelectorAll('.pw-section-title')].find(item => item.querySelector('h2')?.textContent === zh.homeProgress)!
   expect(heading.querySelector('span')?.textContent).toBe('11')
   await click(zh.homeAllWork)
@@ -215,8 +308,8 @@ it('confirms ending only the selected task and retains its record and results', 
   server.tickets.open.push(other)
   server.work = { working: [server.tickets.open[0]!, other], workingTotal: 2, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
   server.ticketDetails.t1!.deliverables = [{ title: '已有成果', url: 'https://example.com/report' }]
-  const { send, openManagement } = await mount(null)
-  expect(document.body.textContent).toContain(zh.homeFocusHint)
+  const { send, openManagement } = await mount()
+  expect(document.body.textContent).toContain(zh.queueHint)
   const end = document.querySelector<HTMLButtonElement>('.pw-task .pw-actions button:nth-child(2)')!
   await click(end)
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain('修复回归')
@@ -245,11 +338,11 @@ it('keeps refresh retryable when an earlier reading request has not published a 
   expect(send).not.toHaveBeenCalled()
 })
 
-it.each([null, { headline: 'Earlier suggestion', generatedAt: new Date().toISOString(), items: [
-  { title: 'Old evidence', reason: 'Changed', nextAction: 'Reread it', ticketId: 't1', evidence: 'Work', stale: true },
-] }])('requests a reading projection once for missing or changed evidence without delegating work', async focus => {
-  const { send, refresh } = await mount(focus)
-  expect(refresh).toHaveBeenCalledTimes(1)
+it('never regenerates a reading projection by the calendar or by changed evidence', async () => {
+  const { send, refresh } = await mount({ headline: 'Earlier suggestion', generatedAt: new Date().toISOString(), items: [
+    { title: 'Old evidence', reason: 'Changed', nextAction: 'Reread it', ticketId: 't1', evidence: 'Work', stale: true },
+  ] })
+  expect(refresh).not.toHaveBeenCalled()
   expect(send).not.toHaveBeenCalled()
-  expect(document.body.textContent).toContain(zh.homeFocus)
+  expect(document.body.textContent).toContain(zh.queueReference)
 })

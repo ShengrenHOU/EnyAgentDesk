@@ -89,10 +89,11 @@ describe('Codex executor integration with upstream Engine and Effects', () => {
     expect(h.runtime.store.tickets.get(ticket.id)!.undelivered).toHaveLength(1)
   })
   it('holds an initial Codex turn when its ticket is paused during connection', async () => {
-    const ready = Promise.withResolvers<void>()
-    const { host: h, connections } = await fixture(false, false, () => ready.promise)
+    const entered = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>()
+    const { host: h, connections } = await fixture(false, false, async () => { entered.resolve(); await ready.promise })
     const accepted = h.acceptedLegacyTicket(feishu('1', 'Work after connection'))
-    await vi.waitFor(() => expect(connections[0]?.call).toHaveBeenCalledWith('thread/start', expect.anything()))
+    await entered.promise
+    expect(connections[0]!.call).toHaveBeenCalledWith('thread/start', expect.anything())
     const ticket = h.runtime.store.tickets.open()[0]!
     h.runtime.store.tickets.save({ ...ticket, paused: true })
     ready.resolve()

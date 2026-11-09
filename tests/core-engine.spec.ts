@@ -95,6 +95,25 @@ describe('owner answers', () => {
     expect(h.engine.answerAttention(ticketId, attention.id, 'Blue', member)).toEqual(receipt)
   })
 
+  it('keeps the recommendation beside the question without changing its identity or sending the draft', () => {
+    const h = harness(), ticketId = accepted(h).ticketId!
+    const advice = { summary: 'Apply blue', reason: 'The design review chose blue', risk: 'Contrast is unverified', draft: 'Blue is applied; please review.' }
+    const asked = h.engine.report(ticketId, { state: 'blocked', summary: 'Need a choice', question: 'Which color?', advice })
+    const attention = asked.attention!
+    expect(attention.advice).toEqual(advice)
+    // Advice is a reading of the same Question: refreshing it must not replace the Question a person is answering.
+    const refreshed = h.engine.report(ticketId, { state: 'blocked', summary: 'Still waiting', question: 'Which color?',
+      advice: { ...advice, summary: 'Apply blue with a darker border' } })
+    expect(refreshed.attention?.id).toBe(attention.id)
+    expect(refreshed.attention?.advice?.summary).toBe('Apply blue with a darker border')
+    expect(() => h.engine.report(ticketId, { state: 'blocked', summary: 'No question', advice })).toThrow(new UserError('adviceWithoutQuestion'))
+    expect(() => h.engine.report(ticketId, { state: 'blocked', summary: 'Empty advice', question: 'Which color?',
+      advice: { summary: '   ' } })).toThrow(new UserError('invalidAdvice'))
+    // Advice never sends anything on its own: the draft is only text the owner may answer with.
+    expect(h.repo.tickets.get(ticketId)?.attention?.advice?.draft).toBe(advice.draft)
+    expect(h.repo.tickets.get(ticketId)?.inputs.some(input => input.kind === 'answer')).toBe(false)
+  })
+
   it('rejects replaced questions, ended/revoked work and empty answers without losing the current question', () => {
     const h = harness(), ticketId = accepted(h).ticketId!
     const old = h.engine.report(ticketId, { state: 'blocked', summary: 'Need a choice', question: 'A?' }).attention!
