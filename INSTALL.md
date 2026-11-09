@@ -98,7 +98,7 @@ The command:
 5. saves the GitHub Source, the Feishu Source, the allowed lists and the executor settings through the local management API;
 6. runs the self-check and prints one pass or fail line per check.
 
-The panel URL contains a local login token. The installer writes it to `<stateDir>/panel-url.txt` with owner-only permissions instead of printing it into chat or logs.
+The panel URL contains a local login token. The installer writes it to `<stateDir>/panel-url.txt` with a restricted mode where the operating system supports one, instead of printing it into chat or logs.
 
 ## 4. Self-check
 
