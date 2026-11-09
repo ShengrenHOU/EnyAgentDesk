@@ -70,6 +70,19 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Install
 
+### One-command install (recommended)
+
+The agent-facing path is described in `INSTALL.md` at the repository root. It uses one config file, `enyagentdesk.install.json`, for the profile, both Sources, the allowed lists and the executor limits, then runs:
+
+```sh
+node scripts/install.mjs --config enyagentdesk.install.json
+node scripts/self-check.mjs --config enyagentdesk.install.json
+```
+
+The installer creates the profile, builds and links the bundle, writes the machine configuration, starts the process, and saves the GitHub and Feishu Sources through the local management API. It refuses a profile or state directory that belongs to another installation. Use this path for a new installation; the manual steps below stay for developers and for a profile that already exists.
+
+### Manual install
+
 Run this block once, on a machine that has no `superagent` profile yet:
 
 ```sh

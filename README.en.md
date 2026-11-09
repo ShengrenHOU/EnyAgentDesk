@@ -66,40 +66,34 @@ This is the recommended path. Open Codex, DSH, or another coding agent that can 
 ```text
 Install this project for me: https://github.com/ShengrenHOU/EnyAgentDesk
 
-Read SETUP.md and docs/006-deployment.md first, and follow them.
-When you need me to create an account, sign a CLI in, or enter a secret,
-stop and give me the exact commands. After it works, run the smallest
-verification, then ask what I want to hand over first and write the first rule.
+Read INSTALL.md first and follow it. The install uses one enyagentdesk.install.json
+and one command. When you need me to create an account, sign a CLI in, provide a
+model key or a Feishu chat, stop and give me the exact commands. After it works,
+run self-check, report every failed check with the next step, then ask what I want
+to hand over first.
 ```
 
-`SETUP.md` is written for the agent. It probes the environment, asks one question at a time, shows the full plan once, and only then installs.
+`INSTALL.md` is written for the agent. It probes the environment, asks only the questions it needs, prepares one config, previews the plan, then installs both Sources and runs the self-check. A single-Source profile is outside this flow.
 
 ### Manual install
 
-Requirements: Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+, tmux, and a configured model provider for DeepSeek Harness. The GitHub source needs `gh` 2.48+. The Feishu source needs `lark-cli` and a published Feishu app.
+Requirements: Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+, and a configured model provider for DeepSeek Harness. The GitHub source needs `gh` 2.48+ and an agent account with write access. The Feishu source needs `lark-cli`, a published Feishu app and a bot-only configuration. tmux is only needed by the POSIX service script.
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install --frozen-lockfile --ignore-scripts && pnpm build
+cp examples/install.minimal.json enyagentdesk.install.json
+# Fill enyagentdesk.install.json; INSTALL.md explains every field.
 
-# Create a separate profile from DSH's Web template, then link this bundle.
-dsh superagent --from-default-profile web --dump-config > /dev/null
-dsh plugin --profile superagent add "link:$PWD"
+node scripts/install.mjs --config enyagentdesk.install.json --dry-run
+node scripts/install.mjs --config enyagentdesk.install.json
+node scripts/self-check.mjs --config enyagentdesk.install.json
 ```
 
-Copy `examples/profile.cordis.patch.yml` to `~/.dsh/profiles/superagent/cordis.patch.yml`, replace the placeholders with your paths and port, and configure sources, allowed lists, and the executor in the panel.
+The installer creates the profile, builds and links the bundle, writes the machine configuration, starts the process, and saves GitHub, Feishu, the allowed lists and the executor settings through the local management API. It needs no internal package; everything comes from this repository and the public DSH, `gh` and `lark-cli`.
 
-```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
-```
+The original manual profile setup and service commands are in [docs/006-deployment.md](docs/006-deployment.md). Windows installation, the Codex path, the owner launcher, and recovery are covered in [Codex on Windows](docs/009-codex-windows.md).
 
-Open the URL in the log, choose **Main conversation** (`#main-conversation`) or **Personal workspace** (`#workbench`) for Today, Tickets, Source health and Settings.
-
-Windows installation, the Codex path, the owner launcher, and recovery are covered in [Codex on Windows](docs/009-codex-windows.md). `scripts/start-windows.ps1` is available for foreground troubleshooting.
-
-**Security note.** It acts with your accounts and listens on localhost by default. Do not expose the management port to the public internet. Start with a short allowed list and `observe` mode, inspect what it would do, and widen access only after that.
+**Security note.** It acts with your accounts and listens on localhost by default. Do not expose the management port to the public internet. Start with a short allowed list and `observe` mode, inspect what it would do, and widen access only after that. Workers run as your OS user, not in a sandbox; use a separate OS account if you need isolation. The full limits are in [INSTALL.md](INSTALL.md#6-limits).
 
 ## How it works
 

@@ -68,39 +68,32 @@ python scripts/configure-workbench.py --port 3082 --owner local-owner
 ```text
 帮我安装这个项目：https://github.com/ShengrenHOU/EnyAgentDesk
 
-先读 SETUP.md 和 docs/006-deployment.md，按里面的步骤装好。
-中间需要我创建账号、登录 CLI 或填密钥的，停下来告诉我具体命令。
-装好以后跑一遍最小验证，再问我平时想把哪些事交给它，帮我写第一条规则。
+先读 INSTALL.md，按里面的步骤装。安装用一份 enyagentdesk.install.json 和一条命令。
+中间需要我创建账号、登录 CLI、提供模型密钥或飞书群的，停下来告诉我具体命令，我自己执行。
+装好以后跑一遍 self-check，把失败项和下一步告诉我，再问我平时想把哪些事交给它。
 ```
 
-`SETUP.md` 是写给 Agent 看的。它会先探测环境，一次问一个问题，把完整计划给你确认，然后才动手。
+`INSTALL.md` 是写给 Agent 看的。它只问必要的问题，准备好一份配置，先用 `--dry-run` 给你看计划，再执行安装和自检。GitHub 和飞书两个来源都要接上；单个来源不在这个安装流程里。
 
 ### 手动安装
 
-要求：Node.js 22.19+ 或 24+、pnpm、git 2.32+、Python 3.8+、tmux（Linux/macOS），以及一个配置好模型服务的 DeepSeek Harness。GitHub 来源需要 `gh` 2.48+；飞书来源需要 `lark-cli` 和一个已发布的飞书应用。
+要求：Node.js 22.19+ 或 24+、pnpm、git 2.32+、Python 3.8+，以及一个配置好模型服务的 DeepSeek Harness。GitHub 来源需要 `gh` 2.48+ 和一个有仓库写权限的 Agent 账号；飞书来源需要 `lark-cli`、一个已发布的飞书应用和 bot-only 配置。
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install --frozen-lockfile --ignore-scripts && pnpm build
+cp examples/install.minimal.json enyagentdesk.install.json
+# 填写 enyagentdesk.install.json；完整字段见 INSTALL.md
 
-# 从 DSH 的 Web 模板创建一个独立 profile，再把当前目录作为 bundle 装进去
-dsh superagent --from-default-profile web --dump-config > /dev/null
-dsh plugin --profile superagent add "link:$PWD"
+node scripts/install.mjs --config enyagentdesk.install.json --dry-run
+node scripts/install.mjs --config enyagentdesk.install.json
+node scripts/self-check.mjs --config enyagentdesk.install.json
 ```
 
-然后把 `examples/profile.cordis.patch.yml` 复制到 `~/.dsh/profiles/superagent/cordis.patch.yml`，把里面的占位符换成你的实际路径和端口，并在设置里配好来源、允许名单和执行器。
+安装器负责建 profile、装 bundle、写机器配置、启动服务，并通过本机管理 API 保存 GitHub、飞书、允许名单和执行器设置。安装和运行都不需要内部包；只从本仓库和公开的 DSH、`gh`、`lark-cli` 获取。
 
-```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
-```
+已有 profile 的原始安装、手工配置和启动方式见 [docs/006-deployment.md](docs/006-deployment.md)。Windows 的 Codex 路径、前台启动器和恢复步骤见 [Codex on Windows](docs/009-codex-windows.md)。
 
-启动后打开日志里打印的地址，选择侧边栏的 **主对话**（`#main-conversation`）；**个人工作台**（`#workbench`）提供今天、工单、来源健康和设置。
-
-Windows 的安装、Codex 路径、启动器和恢复步骤见 [Codex on Windows](docs/009-codex-windows.md)。仓库里也有 `scripts/start-windows.ps1` 可以在前台排查问题。
-
-**安全提醒**：它用你的账号在工作，默认只监听本机。不要把管理端口暴露到公网。第一次先把允许名单设小，主动接单设为 `observe`，看过它想做什么之后再放开。
+**安全提醒**：它用你的账号在工作，默认只监听本机。不要把管理端口暴露到公网。第一次先把允许名单设小，主动接单设为 `observe`，看过它想做什么之后再放开。Worker 以你的操作系统用户运行，不是沙箱；需要隔离时用单独的系统账号。完整限制见 [INSTALL.md](INSTALL.md#6-limits)。
 
 ## 它是怎么工作的
 

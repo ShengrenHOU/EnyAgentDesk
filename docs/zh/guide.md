@@ -44,47 +44,28 @@ Windows 上还有几条额外的注意点，见 [Codex on Windows](../009-codex-
 ```text
 帮我安装这个项目：https://github.com/ShengrenHOU/EnyAgentDesk
 
-先读 SETUP.md 和 docs/006-deployment.md，按里面的步骤装。
-中间需要我创建账号、登录 CLI、填密钥的，停下来把命令给我，我自己执行。
-装好以后做一次最小验证，再问我平时想把哪些事交给它，帮我写第一条规则。
+先读 INSTALL.md，按里面的步骤装。安装用一份 enyagentdesk.install.json 和一条命令。
+中间需要我创建账号、登录 CLI、提供模型密钥或飞书群的，停下来把命令给我，我自己执行。
+装好以后跑 self-check，把失败项和下一步告诉我，再问我平时想把哪些事交给它。
 ```
 
-它会先探测环境，再一个问题一个问题地问你。所有问题答完，它会给你一份完整计划，确认后才开始安装。
+它会先探测环境，再一个问题一个问题地问你。所有问题答完，它会给你一份完整计划，确认后才开始安装。GitHub 和飞书两个来源都会接上；单个来源不在这个安装流程里。
 
 ### 2.2 手动安装
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk
-pnpm install --frozen-lockfile --ignore-scripts && pnpm build
+cp examples/install.minimal.json enyagentdesk.install.json
+# 填写 enyagentdesk.install.json；每个字段的含义见 INSTALL.md
 
-dsh superagent --from-default-profile web --dump-config > /dev/null
-dsh plugin --profile superagent add "link:$PWD"
+node scripts/install.mjs --config enyagentdesk.install.json --dry-run
+node scripts/install.mjs --config enyagentdesk.install.json
+node scripts/self-check.mjs --config enyagentdesk.install.json
 ```
 
-然后把 `examples/profile.cordis.patch.yml` 复制到 `~/.dsh/profiles/superagent/cordis.patch.yml`，替换里面的占位符。至少要有：
+安装器负责建 profile、装 bundle、写机器配置、启动服务，并通过本机管理 API 保存 GitHub、飞书、允许名单和执行器设置。配置里不存任何密钥；GitHub、飞书和模型密钥都留在你自己的 CLI 或环境变量里。
 
-- `stateDir`：状态目录的绝对路径。数据库、锁、执行目录、Agent 的 git 配置都在这里。升级前备份。
-- 端口：面板监听的本机端口。
-- 如果你用飞书，打开 `dsh-superagent-feishu` 那一项。
-
-启动：
-
-```sh
-scripts/dsh-superagent start
-scripts/dsh-superagent status
-```
-
-`status` 的返回码：
-
-| 返回码 | 含义 |
-| --- | --- |
-| 0 | 正常运行 |
-| 1 | 没运行、重复运行、不响应，或运行时报错。可以尝试重启 |
-| 2 | 运行中，但某个来源或策略同步出错。重启通常没用，需要修配置 |
-| 3 | 运行中，但还在等安装配置完成 |
-
-启动后打开日志里的地址，选择侧边栏的 **主对话**（`#main-conversation`）；**个人工作台**（`#workbench`）提供今天、工单、来源健康和设置。
+已有 profile 的手工安装、配置和启动方式见 [006 Deployment](../006-deployment.md)。安装范围与限制见 [INSTALL.md](../../INSTALL.md#6-limits)。
 
 ### 2.3 Windows
 
