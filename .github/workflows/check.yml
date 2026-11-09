@@ -28,6 +28,7 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm check
       - run: python3 tests/test_workbench_setup.py
+      - run: python3 tests/test_install.py
   windows:
     runs-on: windows-latest
     timeout-minutes: 20
@@ -47,3 +48,4 @@ jobs:
       - run: pnpm check:native
       - run: python tests/test_owner_launcher.py
       - run: python tests/test_workbench_setup.py
+      - run: python tests/test_install.py
