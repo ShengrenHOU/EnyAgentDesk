@@ -44,6 +44,8 @@ These need the person's hands. Never ask for a secret in the chat.
 
    Add the bot to the chat, then collect the chat id (`oc_…`) and the operator's Feishu open id (`ou_…`). The panel shows them once the bot is configured; `lark-cli` can also list chats.
 
+**Windows.** Use PowerShell and `.cmd` wrappers instead of the POSIX snippets. Set the key with `$env:DEEPSEEK_API_KEY = '...'`; write `gh-agent.cmd` with `@echo off`, `set GH_CONFIG_DIR=%USERPROFILE%\.config\gh-agent`, `gh %*`; write `lark-bot.cmd` with `set LARKSUITE_CLI_CONFIG_DIR=%USERPROFILE%\.lark-cli-enyagentdesk` and `lark-cli %*`; point the config at those absolute `.cmd` paths. Node, pnpm, git, Python, DSH and the installer run the same way. `docs/009-codex-windows.md` covers the Codex executor and the owner launcher.
+
 ## 2. One config file
 
 Copy the example and replace every placeholder. This file is the single source for the installation; it holds no secret.
