@@ -5,6 +5,8 @@ import { githubThread } from './github-trigger.ts'
 
 export const scopedRepository = (ctx: SourceContext): string | undefined =>
   ctx.deployment.githubRepositories?.length ? ctx.deployment.repository.toLowerCase() : undefined
+/** KV key prefix of one monitored repository's Source state; multi-repository deployments scope every key by repository. */
+export const repositoryStatePrefix = (repository: string): string => `github-repository:${repository.toLowerCase()}:`
 export const githubThreadKey = (ctx: SourceContext, number: number): string =>
   scopedRepository(ctx) ? githubThread(ctx.deployment.repository, number) : `github:${number}`
 export const githubThreadId = (ctx: SourceContext, number: number): string => githubThreadKey(ctx, number).slice(7)
@@ -17,7 +19,7 @@ export function githubObject(thread: string): { repository?: string; number: num
 export function repositoryContext(ctx: SourceContext, repository: string): SourceContext {
   const commands = ctx.commands.forRepository(repository)
   const name = repository.toLowerCase()
-  const prefix = `github-repository:${name}:`
+  const prefix = repositoryStatePrefix(repository)
   return { ...ctx, deployment: commands.deployment, commands,
     receive: trigger => {
       const legacy = typeof trigger.meta.legacyId === 'string' ? ctx.triggers.get(trigger.meta.legacyId) : undefined

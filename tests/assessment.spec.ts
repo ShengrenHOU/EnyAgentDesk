@@ -2,6 +2,7 @@
 import { expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssessmentSchema, EvalReadSchema, MasterAssessor, type AssessorHost } from '../src/app/assessment.ts'
+import type { RelatedLines } from '../src/app/cards.ts'
 import { mainAdmissionPolicy } from '../src/app/context.ts'
 import { Engine, MemoryRepositories, type Executor, type Policy, type Trigger } from '../src/core/index.ts'
 import type { Commands } from '../src/infra/commands.ts'
@@ -13,7 +14,7 @@ import { SourceRegistry } from '../src/sources/registry.ts'
 
 /** Assessor fixture backed by in-memory repositories and fake GitHub Issue and file reads. */
 function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.from({ length: 5 }, (_, i) => `comment ${i}`),
-  threadContext?: AssessorHost['threadContext']) {
+  threadContext?: AssessorHost['threadContext'], related: AssessorHost['relatedLines'] = () => undefined) {
   const comments = bodies.map((body, i) => ({ id: i, html_url: `https://github.com/acme/widgets/issues/1#c${i}`,
     user: { login: 'bob' }, created_at: '2026-09-09T00:00:00Z', body }))
   const gate = { issue: undefined as Promise<void> | undefined }
@@ -39,7 +40,8 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const host: AssessorHost = {
     get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
-    effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
+    effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateState: async () => 'ready', candidateCard: async candidate => ({ eval_id: candidate.evalId }),
+    relatedLines: related,
   }
   const assessor = new MasterAssessor(host)
   const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: () => ({ admissible: true, strength, basis: { via: 'followup' } }),
@@ -62,6 +64,25 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
 const issue = (n: number): Trigger => ({ id: `issue-${n}`, source: 'github', threads: [{ source: 'github', id: String(n) }], actor: { source: 'github', id: 'bob' }, human: true,
   at: new Date(Date.UTC(2026, 8, 9, 0, 0, n)).toISOString(), text: `issue ${n}`, url: `https://github.com/acme/widgets/issues/${n}`, meta: { number: n } })
 const signal = new AbortController().signal
+
+it('retains observed direction on trigger, shown, deleted and preview messages without inferring a sender', async () => {
+  const messages = Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, from: '', at: '2026-11-01T00:00:00Z', text: `message ${i}`,
+    ...i !== 29 ? { direction: i % 2 ? 'outgoing' : 'incoming' } : {}, ...i === 5 ? { deleted: true as const } : {} }))
+  const context = { messageId: 'm15', read: async () => ({ messages, body: {} }), images: () => [],
+    image: async () => { throw new Error('No images') } }
+  const s = setup('inferred', undefined, () => context)
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  const result = await s.assessor.context('issue-1', signal) as { thread: { messages: Record<string, unknown>[] } }
+  const byId = new Map(result.thread.messages.map(message => [message.id, message]))
+  for (const id of ['m0', 'm5', 'm8', 'm15', 'm16']) {
+    const original = messages.find(message => message.id === id)!
+    expect(byId.get(id)).toMatchObject({ from: '', direction: original.direction })
+  }
+  expect(byId.get('m29')).not.toHaveProperty('direction')
+  expect(byId.get('m5')).toMatchObject({ deleted: true })
+  expect(byId.get('m8')).toHaveProperty('preview')
+  expect(byId.get('m15')).toMatchObject({ trigger: true })
+})
 
 it('keeps nothing for an Eval once it is decided, as for one that timed out', async () => {
   const s = setup()
@@ -180,4 +201,40 @@ it('lets the main Session read on from the cursor its loaded window ends with, a
   s2.engine.receive(long); s2.engine.receive({ ...issue(3), threads: issue(1).threads }); s2.engine.evaluateDue()
   const other = await s2.assessor.context('issue-3', signal) as { batch: Record<string, unknown>[] }
   expect(other.batch).toEqual([expect.objectContaining({ trigger_id: 'long', chars: long.text.length, read: 'trigger/long' })])
+})
+
+it('gives the assessment the lines recalled from its trigger as evidence, and omits them when nothing recalls', async () => {
+  const related: RelatedLines = { note: 'Evidence only, never a membership verdict', items: [{ line_id: 'line-1', title: 'Issue goal',
+    status: 'open', updated_at: '2026-09-09T00:00:00Z', matched: ['issue'], recent_tickets: [],
+    read: { tool: 'orchestrator_line', action: 'view', line_id: 'line-1' } }] }
+  const s = setup('inferred', undefined, undefined, () => related)
+  s.engine.receive(issue(1)); s.engine.evaluateDue()
+  expect(await s.assessor.context('issue-1', signal)).toMatchObject({ related_lines: related })
+  const none = setup()
+  none.engine.receive(issue(1)); none.engine.evaluateDue()
+  expect(await none.assessor.context('issue-1', signal)).not.toHaveProperty('related_lines')
+})
+
+it.each(['consumed', 'blocked', 'ready'] as const)('checks %s admission before rebuilding a candidate card', async state => {
+  let handler!: (payload: { triggerId: string }, evalId: string) => Promise<void>
+  const card = vi.fn(async () => ({ trigger_id: 't' })), deliver = vi.fn(async (_id: string, _text: string) => {}), delivered = vi.fn()
+  new MasterAssessor({ engine: { candidate: () => ({ evalId: 'e' }), candidateDelivered: delivered },
+    effects: { handle: (_kind: string, fn: typeof handler) => { handler = fn } },
+    candidateState: async () => state, candidateCard: card, deliver } as unknown as AssessorHost)
+  if (state === 'blocked') await expect(handler({ triggerId: 't' }, 'e')).rejects.toThrow('unread input')
+  else await handler({ triggerId: 't' }, 'e')
+  expect(card).toHaveBeenCalledTimes(state === 'ready' ? 1 : 0)
+  expect(deliver).toHaveBeenCalledTimes(state === 'ready' ? 1 : 0)
+  expect(delivered).toHaveBeenCalledTimes(state === 'blocked' ? 0 : 1)
+  if (state === 'ready') expect(JSON.parse(deliver.mock.calls[0]![1]!)).toMatchObject({ eval_id: 'e' })
+})
+
+it('rechecks the active evaluation after a delayed card lookup', async () => {
+  let handler!: (payload: { triggerId: string }, evalId: string) => Promise<void>, current = 'e'
+  const deliver = vi.fn(async (_id: string, _text: string) => {}), delivered = vi.fn()
+  new MasterAssessor({ engine: { candidate: () => ({ evalId: current }), candidateDelivered: delivered },
+    effects: { handle: (_kind: string, fn: typeof handler) => { handler = fn } }, candidateState: async () => 'ready',
+    candidateCard: async () => { current = 'new'; return { trigger_id: 't' } }, deliver } as unknown as AssessorHost)
+  await handler({ triggerId: 't' }, 'e')
+  expect(deliver).not.toHaveBeenCalled(); expect(delivered).not.toHaveBeenCalled()
 })

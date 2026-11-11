@@ -8,29 +8,62 @@ import { usePanel } from './provider.tsx'
 import { actorName, fullTime, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
 import { ActionLink, ConfirmButton, LabelValue, LoadState, SessionButton, StageMark, When } from './widgets.tsx'
 
-/** Read-only global projection; cancellation uses the Ticket's existing command and receipt. */
+/** Read-only global projection of pending Ticket checks and the automations they were moved to; cancellation uses existing receipts. */
 export function PendingFollowups({ openTicket }: { openTicket(id: string): void }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET followups'), [])
+  const automations = usePoll(() => call('GET followups/automations'), [])
   // A long agenda is quiet by default and remembers whether the owner opened it.
   const [open, setOpen] = useStoredFlag('dsh-superagent/followup-agenda-open', false)
+  const [notice, setNotice] = useState('')
+  const migrated = automations.data?.items ?? []
+  const available = automations.data?.available ?? false
+  const count = data && automations.data ? data.length + migrated.length : '…'
+  const automationLabel = (status: 'scheduled' | 'ended' | 'unknown') => t(status === 'scheduled'
+    ? 'followupAutomationScheduled' : status === 'ended' ? 'followupAutomationEnded' : 'followupAutomationUnknown')
+  const changed = async () => { await Promise.all([reload(), automations.reload()]) }
   return <section className="dt-followup-agenda">
     <button type="button" className="dt-followup-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
       <Icon name={open ? 'chevron-down' : 'chevron-right'} size={14} />
-      <span>{t('followupAgenda')} · {data?.length ?? '…'}</span>
+      <span>{t('followupAgenda')} · {count}</span>
     </button>
     {error && <LoadState loading={false} error={error} />}
-    {open && (data ? data.length ? <ul className="dt-list">{data.map(item => <li key={`${item.ticketId}:${item.id}`}>
-      <div className="dt-owner-task-head"><button className="dt-open" type="button" onClick={() => openTicket(item.ticketId)}>{item.title}</button>
-        <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag></div>
-      <p><time dateTime={item.at}>{fullTime(item.at, t('lang'))}</time> · {item.reason}</p>
-      {item.blocked && <p className="dt-error">{t(`followupBlock.${item.blocked}`)}</p>}
-      <ConfirmButton variant="ghost" icon="close" label={t('homeCancelFollowup')}
-        title={t('homeCancelFollowupTitle')} message={t('homeCancelFollowupConfirm', { title: item.title,
-          at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
-          await call('DELETE tickets/:id/followup', { id: item.ticketId, query: { request_id: item.id } }); await reload()
-        }} />
-    </li>)}</ul> : <p className="dt-hint">{t('followupAgendaEmpty')}</p> : <LoadState loading />)}
+    {automations.error && <LoadState loading={false} error={automations.error} />}
+    {notice && <p className="dt-hint" role="status">{notice}</p>}
+    {open && (data && automations.data ? count ? <ul className="dt-list">
+      {data.map(item => <li key={`${item.ticketId}:${item.id}`}>
+        <div className="dt-owner-task-head"><button className="dt-open" type="button" onClick={() => openTicket(item.ticketId)}>{item.title}</button>
+          <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag></div>
+        <p><time dateTime={item.at}>{fullTime(item.at, t('lang'))}</time> · {item.reason}</p>
+        {item.last && <p className="dt-hint">{t('followupLastResult')}{item.last.summary} · <time dateTime={item.last.at}>{fullTime(item.last.at, t('lang'))}</time></p>}
+        {item.blocked && <p className="dt-error">{t(`followupBlock.${item.blocked}`)}</p>}
+        <div className="dt-ticket-actions">
+          <ConfirmButton variant="ghost" icon="close" label={t('homeCancelFollowup')}
+            title={t('homeCancelFollowupTitle')} message={t('homeCancelFollowupConfirm', { title: item.title,
+              at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
+              await call('DELETE tickets/:id/followup', { id: item.ticketId, query: { request_id: item.id } }); await changed()
+            }} />
+          {available && !item.due && <ConfirmButton variant="outline" icon="refresh" label={t('followupMigrate')}
+            title={t('followupMigrateTitle')} message={t('followupMigrateConfirm', { title: item.title,
+              at: fullTime(item.at, t('lang')) })} onConfirm={async () => {
+              await call('POST tickets/:id/followup/migrate', { id: item.ticketId, body: { request_id: item.id } })
+              setNotice(t('followupMigrated')); await changed()
+            }} />}
+        </div>
+      </li>)}
+      {migrated.length > 0 && <li className="dt-hint"><strong>{t('followupAutomations')}</strong></li>}
+      {migrated.map(item => <li key={`automation:${item.ticketId}:${item.requestId}`}>
+        <div className="dt-owner-task-head"><span>{item.title}</span>
+          <Tag tone="info">{automationLabel(item.status)}</Tag></div>
+        <p><time dateTime={item.scheduledAt}>{fullTime(item.scheduledAt, t('lang'))}</time> · {item.ticketTitle}</p>
+        <ConfirmButton variant="ghost" icon="close" label={t('homeCancelFollowup')}
+          title={t('homeCancelFollowupTitle')} message={t('homeCancelFollowupConfirm', { title: item.title,
+            at: fullTime(item.scheduledAt, t('lang')), reason: item.ticketTitle })} onConfirm={async () => {
+            await call('DELETE tickets/:id/followup/automation', { id: item.ticketId, query: { request_id: item.requestId } })
+            setNotice(t('followupAutomationCancelled')); await changed()
+          }} />
+      </li>)}
+    </ul> : <p className="dt-hint">{t('followupAgendaEmpty')}</p> : <LoadState loading />)}
   </section>
 }
 

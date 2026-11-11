@@ -23,23 +23,32 @@ import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { ExecutorRouter } from '../executor/router.ts'
 import { reportExcerpt, ticketCard } from './cards.ts'
+import { AutomaticTriage } from './automatic-triage.ts'
+import { automaticTriageTools } from './tools/automatic-triage.ts'
+import { ProductionTriage } from './production-triage.ts'
+import { productionTriageTools } from './tools/production-triage.ts'
+import { ShadowTriage } from './triage.ts'
+import { TriageHandoffs } from './triage-handoffs.ts'
+import { triageHandoffTools } from './tools/triage-handoffs.ts'
+import { triageTools } from './tools/triage.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { migrateGithubIdentity } from './github-migration.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
-import { Effects } from './effects.ts'
+import { Effects, Later } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
+import { relatedLines } from './cards.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
-import { Followups } from './followups.ts'
+import { Followups, type SchedulePort } from './followups.ts'
 import { followupTools } from './tools/followup.ts'
 import { managementTools } from './tools/management.ts'
 import { routingTools, type ExecutorTransfer } from './tools/routing.ts'
@@ -73,6 +82,10 @@ export class Runtime extends Service implements SourceHost {
   readonly settings: Settings
   readonly executor: DshExecutor | ExecutorRouter
   readonly assessor: MasterAssessor
+  readonly automaticTriage: AutomaticTriage
+  readonly productionTriage: ProductionTriage
+  readonly triage: ShadowTriage
+  readonly triageHandoffs: TriageHandoffs
   readonly outbox: Outbox
   readonly engine: Engine
   readonly followups: Followups
@@ -81,6 +94,8 @@ export class Runtime extends Service implements SourceHost {
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
   readonly masterId: string
+  /** When this instance started, reported as the running artifact's activation time. */
+  readonly startedAt = new Date().toISOString()
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
@@ -123,7 +138,9 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      this.triage = new ShadowTriage({ store, evidence: trigger => sources.imEvidence(trigger),
+        context: trigger => sources.imContext(trigger, commands), paused: () => store.settings().paused })
+      const links: LinkHost = { store, lines: store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, masterId, context: ctx,
@@ -132,7 +149,12 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? [...executorTools(this.toolHost, ticket), ...followupTools(this.followups, ticket.id), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request(), ticket.id)] : [...mainTools(this.toolHost, agent), ...followupTools(this.followups), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request()), ...machine.codex ? routingTools((id, request) => this.transferExecutor(id, request)) : []] })
+        assessmentsPaused: () => this.paused(),
+        assessmentCurrent: notice => {
+          if (notice.kind === 'im_production_judgment') return this.productionTriage?.noticeCurrent(notice.id, notice.generation!) ?? false
+          return store.threads.active().some(thread => thread.evaluating?.id === notice.id)
+        },
+        tools: (agent, ticket) => ticket ? [...executorTools(this.toolHost, ticket), ...followupTools(this.followups, ticket.id), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request(), ticket.id)] : [...mainTools(this.toolHost, agent), ...(machine.triageHandoff ? automaticTriageTools(this.automaticTriage) : []), ...(machine.triageProduction ? productionTriageTools(this.productionTriage) : []), ...(machine.triageShadow ? triageTools(this.triage) : []), ...(machine.triageHandoff ? triageHandoffTools(this.triageHandoffs) : []), ...followupTools(this.followups), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request()), ...machine.codex ? routingTools((id, request) => this.transferExecutor(id, request)) : []] })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
@@ -148,12 +170,14 @@ export class Runtime extends Service implements SourceHost {
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         // A candidate must wake a main Session that has no turn running: a steer is only taken at a
         // running turn's next step, so a quiet coordinator would never decide and the Eval would expire.
-        // The candidate's deadline starts when this delivery reaches the Session.
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'queue'), candidateCard: candidate => candidateCard(links, candidate) })
+        // The deadline starts after durable consumption, before unrelated unread input can delay acknowledgement.
+        deliver: async (id, text) => { await sessions.assessment(id, text, () => { if (this.paused()) throw new Later('Assessments are paused'); if (!store.threads.active().some(thread => `candidate:${thread.evaluating?.id}` === id)) throw new Error('Assessment no longer current') }) },
+        candidateState: id => sessions.candidateState(id), candidateCard: candidate => candidateCard(links, candidate),
+        relatedLines: text => relatedLines(store, text) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
-      const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
+      const engine = this.engine = new Engine({ repo: store, externalAssessments: () => this.productionTriage?.activeCount() ?? 0, deferEvaluation: trigger => this.automaticTriage?.defer(trigger) ?? false, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
@@ -165,20 +189,41 @@ export class Runtime extends Service implements SourceHost {
           if (followup) sessions.relay(followup.id, followup.text)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended) this.followups?.cancel(ended.id)
+          if (ended) {
+            this.followups?.cancel(ended.id)
+            void this.followups?.cancelAutomations(ended.id).catch(error => {
+              ctx.logger.warn('dsh-superagent could not remove migrated automations for %s: %s', ended.id, String(error))
+            })
+          }
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
           }
         } })
       const followups = this.followups = new Followups({ store, engine, paused: () => this.paused(),
+        masterId, schedule: () => ctx.get('schedule') as SchedulePort | undefined,
         authorized: ticket => policy().revalidate(ticket.mandate) })
+      this.triageHandoffs = new TriageHandoffs({ store, engine, evidence: trigger => sources.imEvidence(trigger),
+        policyVersion: () => policy().version, enabled: () => !!machine.triageHandoff })
+      this.productionTriage = new ProductionTriage({ store, engine, handoffs: this.triageHandoffs, effects,
+        header: trigger => sources.imHeader(trigger),
+        evidence: trigger => sources.imEvidence(trigger), context: trigger => sources.imContext(trigger, commands),
+        enabled: () => !!machine.triageProduction, automaticEnabled: () => !!machine.triageAutomatic, paused: () => this.paused(), policy: () => policy().version,
+        prompt: () => String(prompts.current().revision),
+        timeoutMs: () => policy().evalTimeoutMs, prune: () => sessions.pruneAssessments(),
+        deliver: (id, text, authorize) => sessions.assessment(id, text, authorize) })
+      this.automaticTriage = new AutomaticTriage({ store, engine, handoffs: this.triageHandoffs, production: this.productionTriage,
+        evidence: trigger => sources.imEvidence(trigger), enabled: () => !!machine.triageAutomatic,
+        historical: () => !!machine.triageHistorical, paused: () => this.paused(), policy: () => policy().version, prompt: () => String(prompts.current().revision) })
       // Bind tickets created by an earlier version to the executor that owned them before any work is dispatched.
       if (this.executor instanceof ExecutorRouter) this.executor.migrateLegacyBindings()
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
-      const evaluateDue = () => { engine.evaluateDue(); followups.runDue(); evals.set(evalsHealth(store)) }
-      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
+      const evaluateDue = () => {
+        this.productionTriage.maintain(); this.automaticTriage.maintain(); sessions.pruneAssessments(); engine.evaluateDue(); followups.runDue(); evals.set(evalsHealth(store))
+        void followups.maintain().catch(error => ctx.logger.warn('dsh-superagent could not reconcile automations: %s', String(error)))
+      }
+      const passes = this.passes = new Passes({ engine: { receive: trigger => this.automaticTriage.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
@@ -195,7 +240,11 @@ export class Runtime extends Service implements SourceHost {
       throw error
     }
   }
-  get health(): Readonly<Record<string, Health>> { return this.board.all }
+  get health(): Readonly<Record<string, Health>> {
+    const { held, owners } = this.store.triageHandoffStatus()
+    return { ...this.board.all, ...(held ? { triageHandoff: { state: 'error' as const,
+      detail: `${held} IM evidence held awaiting context and production judgment (not processed). Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
+  }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
   context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
@@ -288,8 +337,8 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, machine, masterId, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, get health() { return runtime.health }, machine, masterId, startedAt: this.startedAt, ready, sourceLinks,
       get deployment() { return setup.deployment }, followups: this.followups, transferExecutor: (id, request) => this.transferExecutor(id, request),
       continueStopped: (id, instruction) => this.continueStopped(id, instruction),
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },

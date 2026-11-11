@@ -20,6 +20,7 @@ import { feishuChannel, feishuTriggerId } from '../src/sources/feishu-trigger.ts
 import { githubLink } from '../src/sources/github-channel.ts'
 import { githubChannel } from '../src/sources/github-trigger.ts'
 import { followupOwners, type ChannelRef } from '../src/core/index.ts'
+import { queueDefer } from '../src/sources/workbench-queue.ts'
 
 let directory: string
 let store: Store
@@ -373,4 +374,33 @@ it('reads each ticket a page\'s follow-ups reached once, and nothing for a messa
   const records = { tickets: { get: vi.fn() }, threads: { get: vi.fn() }, triggers: store.triggers }
   expect(followupOwners(store.triggers.get('f3')!, records)).toEqual([])
   expect([records.tickets.get, records.threads.get].map(read => read.mock.calls.length)).toEqual([0, 0])
+})
+
+it('takes a deferred Question out of the immediate owner queue and returns the same Question once when due', () => {
+  const host = views()
+  live('now'); live('later'); live('stalled')
+  store.tickets.save({ ...store.tickets.get('now')!, attention: { id: 'q1', question: 'Now?' } })
+  store.tickets.save({ ...store.tickets.get('later')!, attention: { id: 'q2', question: 'Later?' } })
+  // A failed delivery has no Question and stays visible even while other Questions are deferred.
+  store.tickets.save({ ...store.tickets.get('stalled')!, delivery: { error: 'delivery failed', at } })
+  const until = new Date(Date.now() + 3_600_000).toISOString()
+  store.set(queueDefer('later', 'q2'), { ticketId: 'later', attentionId: 'q2', at, until })
+
+  const immediate = overview(host, {}, 'v', { running: 0, queued: 0 })
+  expect(immediate.person.map(ticket => ticket.id).sort()).toEqual(['now', 'stalled'])
+  expect(immediate.personDeferred).toMatchObject([{ id: 'later', attention: { id: 'q2' }, until }])
+
+  // The due Question returns once, to the same immediate list both entries read.
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.parse(until) + 1 })
+  try {
+    const due = overview(host, {}, 'v', { running: 0, queued: 0 })
+    expect(due.person.map(ticket => ticket.id).sort()).toEqual(['later', 'now', 'stalled'])
+    expect(due.personDeferred).toBeUndefined()
+  } finally { vi.useRealTimers() }
+
+  // A replaced Question does not inherit the old Question's deferral.
+  store.tickets.save({ ...store.tickets.get('later')!, attention: { id: 'q3', question: 'New?' } })
+  const replaced = overview(host, {}, 'v', { running: 0, queued: 0 })
+  expect(replaced.person.map(ticket => ticket.id)).toContain('later')
+  expect(replaced.personDeferred).toBeUndefined()
 })

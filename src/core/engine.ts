@@ -10,12 +10,17 @@ import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
+import { TriageHandoffs, type HeldInput } from './triage-handoffs.ts'
 
 export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
 export type { Outcome } from './evals.ts'
 export type { ReceiveResult } from './intake.ts'
 export type { Reply, ReplyRequest } from './replies.ts'
+
+const MAX_ACTIVE_EVALS = 4
+// Deliberately leave one slot idle when only one lane has work, so the other can enter immediately.
+const MAX_ACTIVE_EVALS_PER_LANE = MAX_ACTIVE_EVALS - 1
 
 /**
  * Single transactional entry point for mutating Triggers, Threads, Decisions, Tickets, and Assignments.
@@ -29,6 +34,7 @@ export class Engine {
   private readonly assignments: Assignments
   private readonly evals: Evals
   private readonly intake: Intake
+  private readonly handoffs: TriageHandoffs
   constructor(private readonly options: EngineOptions) {
     this.repo = options.repo
     this.replies = new Replies(options)
@@ -36,6 +42,18 @@ export class Engine {
     this.assignments = new Assignments(options, this.tickets, this.replies)
     this.evals = new Evals(options, this.tickets)
     this.intake = new Intake(options, this.tickets)
+    this.handoffs = new TriageHandoffs(options)
+  }
+
+  usesRepositories(repo: Repositories): boolean { return this.repo === repo }
+
+  /** Explicit operator control plane; not included in Source, worker or ordinary main role interfaces. */
+  previewHandoff(ids: string[]) { return this.repo.atomic(() => this.handoffs.preview(ids)) }
+  holdForTriage(ids: string[], owner: string, generation: number) {
+    return this.repo.atomic(() => this.handoffs.hold(ids, owner, generation))
+  }
+  releaseFromTriage(inputs: HeldInput[], owner: string, generation: number): void {
+    this.repo.atomic(() => { this.handoffs.release(inputs, owner, generation) })
   }
 
   // Sources
@@ -69,7 +87,7 @@ export class Engine {
 
   /**
    * Requeues overdue Evals up to `REQUEUES` times before recording `unavailable` (undelivered Evals never expire), starts the
-   * Evals of Threads whose queued Triggers wait, and resumes ended tickets a person's message reached while processing was
+   * Evals of Threads whose queued Triggers wait, within four undecided Evals and three per gate-strength lane, and resumes ended tickets a person's message reached while processing was
    * paused. While processing is paused, nothing expires: each Eval in progress notes when the pause began, and its deadline
    * moves forward by the pause's length once processing resumes. Each Eval and each ticket update takes one transaction.
    */
@@ -80,9 +98,24 @@ export class Engine {
     for (const ticket of this.repo.tickets.active()) {
       if (!liveTicket(ticket) && ticket.undelivered.length) this.repo.atomic(() => { this.tickets.wake(ticket.id) })
     }
-    for (const thread of this.repo.threads.active()) {
-      if (thread.pending.length && !thread.evaluating) this.repo.atomic(() => { this.evals.start(thread.key, policy) })
-    }
+    // Count undecided Evals, including candidates still waiting for delivery. Neither lane can consume the other's
+    // reserved slot. Existing excess Evals (for example after an upgrade) drain normally, without cancellation.
+    const active = this.repo.threads.active()
+    const running = active.flatMap(thread => thread.evaluating ? [thread.evaluating] : [])
+    const external = Math.max(0, this.options.externalAssessments?.() ?? 0)
+    let total = running.length + external
+    const lanes = { explicit: running.filter(evaluation => evaluation.strength === 'explicit').length,
+      inferred: running.filter(evaluation => evaluation.strength === 'inferred').length + external }
+    // Legacy queues have no local queue timestamp. Their creation time is a stable conservative fallback.
+    const waiting = active.filter(thread => thread.pending.length && !thread.evaluating)
+      .sort((a, b) => (a.evalQueuedAt ?? a.createdAt).localeCompare(b.evalQueuedAt ?? b.createdAt) || a.key.localeCompare(b.key))
+    for (const thread of waiting) this.repo.atomic(() => {
+      this.evals.start(thread.key, policy, strength => {
+        if (total >= MAX_ACTIVE_EVALS || lanes[strength] >= MAX_ACTIVE_EVALS_PER_LANE) return false
+        total++; lanes[strength]++
+        return true
+      })
+    })
   }
 
   // The main Session
@@ -271,11 +304,14 @@ export class Engine {
    * cleared (`null` or a `ready` report), and a replaced attention question whose reply has not been sent yet is withdrawn
    * from the outbox. A `blocked` or `failed` report holds back automated inputs until a human message arrives. A `dropped`
    * report ends the ticket, and a `ready` report ends it: `completed` without followed Threads, else with the `followsDone`
-   * outcome once `followsDone` holds.
-   * @throws UserError for an unknown or ended ticket, an ended assignment, a question that comes with a ready result or an
-   * answer, or a question or answer that names a message that is not a person's or did not reach the ticket.
+   * outcome once `followsDone` holds. `expectedAssignmentId` refuses a worker call that started in an assignment a retry or
+   * hand-over has since replaced; the Executor's own lifecycle reports omit it.
+   * @throws UserError for an unknown or ended ticket, an ended or replaced assignment, a question that comes with a ready
+   * result or an answer, or a question or answer that names a message that is not a person's or did not reach the ticket.
    */
-  report(ticketId: string, report: WorkerReport): Ticket { return this.repo.atomic(() => this.assignments.report(ticketId, report)) }
+  report(ticketId: string, report: WorkerReport, expectedAssignmentId?: string): Ticket {
+    return this.repo.atomic(() => this.assignments.report(ticketId, report, expectedAssignmentId))
+  }
   /**
    * Handles an assignment that was running when the host stopped: restarts it with a recovery note unless its latest report is
    * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its

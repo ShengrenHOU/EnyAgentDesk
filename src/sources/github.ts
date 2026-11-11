@@ -318,7 +318,7 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
     await ctx.receive(branchCiTrigger(branch, head.sha, revision, summary, url, scopedRepository(ctx)))
     ctx.threads.describe(`github:${scopedRepository(ctx) ? scopedRepository(ctx) + ':' : ''}ci:${branch}`, { label: `CI on ${branch}`, facts: { ci: ciFact(counts) } })
   }
-  ctx.state.set(KV.github.branchCi, { branch, failures: now, revision })
+  ctx.state.set(KV.github.branchCi, { branch, head: head.sha, observedAt: new Date().toISOString(), failures: now, revision })
 }
 /**
  * One polling round: notifications, then observed repository streams, then the PRs of open tickets with their CI, then

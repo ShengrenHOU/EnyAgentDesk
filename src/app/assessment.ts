@@ -11,10 +11,11 @@ import type { Deployment } from '../deployment.ts'
 import { admissionContext } from '../sources/admission-context.ts'
 import { readRepositoryPath } from '../sources/github-read.ts'
 import type { TriggerContext } from '../sources/kind.ts'
-import { relatedTickets } from './cards.ts'
+import { relatedLines, relatedTickets, type RelatedLines } from './cards.ts'
 import { textPage } from './context.ts'
 import { AcknowledgementSchema } from './tools/tool.ts'
 import type { Effects } from './effects.ts'
+import { Later } from './effects.ts'
 
 /** Schema for a short lowercase kebab-case English ticket worktree name (1–4 words, at most 32 characters). */
 export const WorktreeNameSchema = z.string().max(32).regex(/^[a-z]+(?:-[a-z0-9]+){0,3}$/, 'Use 1–4 short English words in lowercase kebab-case, at most 32 characters').describe('Meaningful short English ticket name, e.g. fix-plan-color. Translate Chinese titles into English; no Chinese, pinyin or generic ticket names. 1–4 lowercase words in kebab-case, at most 32 characters.')
@@ -61,9 +62,13 @@ export interface AssessorHost {
   paused(): boolean
   /** Thread context reader for `trigger`'s Source, or `undefined` when the Source has none. */
   threadContext(trigger: Trigger): TriggerContext | undefined
-  /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
+  /** Delivers a candidate card once per request ID, resolving after the main Session consumes it. */
   deliver(requestId: string, text: string): Promise<void>
+  /** Whether the notice was consumed, can be admitted now, or must wait while the main Session has unread input. */
+  candidateState(requestId: string): Promise<'consumed' | 'ready' | 'blocked'>
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
+  /** Lines recalled from a message's words, as bounded evidence for the assessment's membership judgement. */
+  relatedLines(text: string): RelatedLines | undefined
 }
 
 /** Schema for bounded context or repository read requests during an active evaluation (`orchestrator_eval_read`). */
@@ -95,11 +100,19 @@ export class MasterAssessor implements Assessor {
   private readonly controller = new AbortController()
   /** Registers the handler that relays each Eval's candidate card, which a link lookup may delay for seconds. */
   constructor(private readonly host: AssessorHost) {
-    // Start the evaluation deadline only after the main Session receives the candidate card, so a busy Session does not consume evaluation time.
+    // Start the evaluation deadline only after the main Session consumes the candidate card.
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
       const candidate = this.host.engine.candidate(triggerId)
       if (candidate?.evalId !== evalId) return
-      await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
+      const requestId = `candidate:${evalId}`
+      const state = await this.host.candidateState(requestId)
+      // A consumed notice starts its deadline at once, without rebuilding a card the main Session already read.
+      if (state === 'consumed') { this.host.engine.candidateDelivered(evalId); return }
+      // Hold the durable effect outside the inbox instead of repeating link lookups on every backpressure retry.
+      if (state === 'blocked') throw new Later('The main Session has unread input')
+      const card = await this.host.candidateCard(candidate)
+      if (this.host.engine.candidate(triggerId)?.evalId !== evalId) return
+      await this.host.deliver(requestId, JSON.stringify({ kind: 'candidate', ...card, eval_id: evalId }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
   }
@@ -201,7 +214,8 @@ export class MasterAssessor implements Assessor {
       const shown = new Map(context.window.entries.map(entry => [entry.message.id, entry]))
       const at = context.messages.findIndex(message => message.id === source?.messageId)
       const messages = context.messages.map((message, index) => {
-        const author = { id: message.id, from: message.from, ...message.bot ? { bot: true } : {} }
+        const author = { id: message.id, from: message.from, ...message.bot ? { bot: true } : {},
+          ...message.direction !== undefined ? { direction: message.direction } : {} }
         if (message.deleted) return { ...author, deleted: true }
         if (!shown.has(message.id)) return { ...author, preview: message.text.replace(/\s+/g, ' ').slice(0, STUB_CHARS) }
         // The trigger's own text is already included once at the top level.
@@ -214,6 +228,7 @@ export class MasterAssessor implements Assessor {
     })() : { error: error ?? 'Call orchestrator_eval to load initial context', complete: false }
     const settings = this.host.settings()
     const others = candidate.triggers.filter(item => item.id !== trigger.id)
+    const lines = this.host.relatedLines(trigger.text)
     return { trigger_id: trigger.id, strength: candidate.strength, mode: settings.eval.mode,
       source: { kind: trigger.source, actor: trigger.actor.id, thread: threadKey(trigger.threads[0]!), ...(trigger.url
         ? { url: trigger.url } : {}) },
@@ -223,7 +238,7 @@ export class MasterAssessor implements Assessor {
         return { trigger_id: item.id, actor: item.actor.id, at: item.at, ...text, ...'chars' in text ? { read: `trigger/${item.id}` } : {} }
       }) } : {},
       // The rules are in the main Session's Policy section, which names the version the candidate's Eval was built from.
-      ...relatedTickets(candidate.tickets), policy_version: candidate.policyVersion,
+      ...relatedTickets(candidate.tickets), ...(lines ? { related_lines: lines } : {}), policy_version: candidate.policyVersion,
       thread }
   }
   /**

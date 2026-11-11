@@ -3,11 +3,14 @@ import { reasonText, ticketStage, type Decision, type Thread } from '../../core/
 import type { Health } from '../../sources/host.ts'
 import type { SetupProblem } from '../../setup.ts'
 import { anyoneAllowed } from '../../policy.ts'
+import { deferredUntil } from '../../sources/workbench-queue.ts'
 import type { Store } from '../store.ts'
 import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
 import { sourceHealth, type HealthMap } from './sources.ts'
 import { ticketRow, type ExecutorLoad } from './tickets.ts'
 import { preview } from './text.ts'
+import { TriageMatters } from '../triage-matters.ts'
+import { productionOverview } from '../production-triage.ts'
 import { compareTickets } from '../management.ts'
 
 /** Threads whose latest decision since `since` is an undismissed `unavailable` eval and that are neither evaluating nor queued. */
@@ -40,7 +43,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const { store, sources } = host
   const view = snapshot(host)
   const settings = store.settings()
-  const now = new Date().toISOString(), since = dayAgo()
+  const nowMs = Date.now(), now = new Date(nowMs).toISOString(), since = dayAgo()
   const evaluating = store.threads.active().filter(thread => thread.evaluating)
   const instances = sources.instances()
   const running = instances.filter(instance => instance.enabled && instance.installed).map(instance => sourceHealth(sources, instance, health))
@@ -68,6 +71,14 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
       attempts: item.attempts, error: item.error } })),
   ]
   const open = store.tickets.open().sort(compareTickets)
+  // Every "needs you now" count and list reads the same deferral: a deferred Question stays a Ticket waiting on its person,
+  // but leaves the immediate queue until its time and is listed separately with when it returns.
+  const person: ReturnType<typeof ticketRow>[] = [], personDeferred: (ReturnType<typeof ticketRow> & { until: string })[] = []
+  for (const ticket of open.filter(item => ticketStage(item).stage === 'person')) {
+    const until = deferredUntil(store, ticket, nowMs)
+    if (until) personDeferred.push({ ...ticketRow(view, ticket), until })
+    else person.push(ticketRow(view, ticket))
+  }
   const working = open.filter(ticket => !ticket.paused && ticketStage(ticket).stage === 'working')
   const waiting = open.filter(ticket => ticket.paused || ticketStage(ticket).stage === 'idle')
   const delivered = store.tickets.list().filter(ticket => ticket.ended?.by === 'executor'
@@ -76,8 +87,11 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const received = stats.reduce((sum, item) => sum + item.received, 0), filtered = stats.reduce((sum, item) => sum + item.filtered, 0)
   const judgement = store.read.flow(since)
   return {
+    triageMatters: new TriageMatters(store, trigger => sources.imEvidence(trigger)).overview(),
+    productionTriage: productionOverview(store, trigger => sources.imEvidence(trigger)),
     problems,
-    person: open.filter(ticket => ticketStage(ticket).stage === 'person').map(ticket => ticketRow(view, ticket)),
+    person,
+    ...(personDeferred.length ? { personDeferred } : {}),
     ...open.length || delivered.length ? { work: {
       working: working.slice(0, 10).map(ticket => ticketRow(view, ticket)), workingTotal: working.length,
       waiting: waiting.slice(0, 10).map(ticket => ticketRow(view, ticket)), waitingTotal: waiting.length,

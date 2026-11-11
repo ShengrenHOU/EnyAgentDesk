@@ -75,11 +75,13 @@ const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.s
  * Poll an endpoint while mounted, backing off when the document is hidden.
  * Preserves the last successful value across dependency changes and errors, skips state updates when the response is unchanged,
  * and drops stale responses when `deps` or `intervalMs` changes start a new subscription.
+ * `updatedAt` is the time of the last successful response, carried on a later failure so a view can say how old the data is.
  */
 export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], intervalMs = 5000) {
-  const [state, setState] = useState<{ data?: T; error?: Error }>({})
+  const [state, setState] = useState<{ data?: T; error?: Error; updatedAt?: number }>({})
   const loader = useRef(load)
   loader.current = load
+  const lastOk = useRef<number>()
   const refresh = useRef<() => Promise<void>>(async () => {})
   useEffect(() => {
     let active = true
@@ -90,9 +92,14 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
       clearTimeout(timer)
       try {
         const value = await loader.current()
-        if (active) startTransition(() => setState(previous => same(previous.data, value) ? previous.error ? { data: previous.data as T } : previous : { data: value }))
+        lastOk.current = Date.now()
+        if (active) startTransition(() => setState(previous => same(previous.data, value)
+          ? previous.error ? { data: previous.data as T, updatedAt: lastOk.current } : previous
+          : { data: value, updatedAt: lastOk.current }))
       } catch (failure) {
-        if (active) setState(previous => ({ ...previous, error: failure instanceof Error ? failure : new Error(String(failure)) }))
+        // Keep the last successful time on the failure so the view can label stale data instead of presenting it as current.
+        if (active) setState(previous => ({ ...previous, error: failure instanceof Error ? failure : new Error(String(failure)),
+          updatedAt: lastOk.current }))
       } finally {
         if (active) timer = setTimeout(run, document.hidden ? intervalMs * HIDDEN_FACTOR : intervalMs)
       }
@@ -106,7 +113,7 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, intervalMs])
   const reload = useCallback(() => refresh.current(), [])
-  return { data: state.data, error: state.error, reload }
+  return { data: state.data, error: state.error, updatedAt: state.updatedAt, reload }
 }
 
 export const DECISION_FILTERS = ['work', 'stop', 'ignore', 'unavailable', 'all'] as const
@@ -136,6 +143,8 @@ export type SourceView = SettingsView['sources'][number]
 export type SourceStatusRow = ApiResponse<'GET sources'>[number]
 export type TicketRow = ApiResponse<'GET tickets'>['items'][number]
 export type TicketPageView = ApiResponse<'GET tickets/:id'>
+export type LineRow = ApiResponse<'GET lines'>['open'][number]
+export type LinePageView = ApiResponse<'GET lines/:id'>
 export type ThreadRow = ApiResponse<'GET threads'>['items'][number]
 export type ThreadPageView = ApiResponse<'GET threads/:key'>
 export type TriggerRow = ThreadPageView['timeline'][number]

@@ -73,6 +73,17 @@ it('opens the Thread of an unjudged Eval at its Trigger from the problem list', 
   expect(document.querySelector('.dt-highlight')?.textContent).toContain('message e3')
 })
 
+it('shows the running package build and warns when its source moved past it', async () => {
+  await mount()
+  const badge = () => document.querySelector('.dt-head .dt-tag')
+  expect(badge()?.textContent).toContain('运行版本 0.5.19')
+  expect(badge()?.getAttribute('title')).toContain('构建 abc123def456')
+  server.runtime = { ...server.runtime, behind: { branch: 'main', head: 'fff999000111' } }
+  await remount()
+  expect(badge()?.textContent).toContain('落后于 main')
+  expect(badge()?.getAttribute('title')).toContain('fff999000111')
+})
+
 it('follows the last day\'s counts to the status of each stage', async () => {
   await mount()
   // Arrived Triggers include filtered ones, which have no Thread, so no list has that count to link to.

@@ -12,6 +12,10 @@ export interface EngineOptions {
   assessor: Assessor
   executor: Executor
   outbox: Outbox
+  /** Other bounded main-session assessments consume the shared inferred lane. */
+  externalAssessments?: () => number
+  /** Leaves eligible evidence pending for a bounded application-owned migration, without a Decision. */
+  deferEvaluation?: (trigger: Trigger) => boolean
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
   now?: () => string
   emit?: (event: DomainEvent) => void
@@ -24,6 +28,9 @@ export interface EngineOptions {
 export abstract class EnginePart {
   protected readonly repo: Repositories
   constructor(protected readonly options: EngineOptions) { this.repo = options.repo }
+  protected assertNotHeld(...ids: string[]): void {
+    if (ids.some(id => this.repo.triggers.disposition(id)?.triage)) throw new UserError('triageHeld')
+  }
   protected now(): string { return this.options.now?.() ?? new Date().toISOString() }
   protected policy(): Policy { return this.options.policy() }
   /** The tickets whose worker decides a person's follow-up: see `followupOwners`. */
@@ -55,8 +62,10 @@ export abstract class EnginePart {
   }
   /** Queue a Trigger on its primary Thread for the next Eval, unless it waits there already or an Eval holds it. */
   protected queueForEval(trigger: Trigger): boolean {
+    if (this.repo.triggers.disposition(trigger.id)?.triage) return false
     const primary = this.thread(trigger.threads[0]!)
     if (primary.pending.includes(trigger.id) || primary.evaluating?.triggerIds.includes(trigger.id)) return false
+    if (!primary.pending.length) primary.evalQueuedAt = this.now()
     primary.pending.push(trigger.id)
     this.repo.threads.save(primary)
     return true

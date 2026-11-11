@@ -5,6 +5,10 @@ Subjective style or comprehension feedback is not permission to choose a visual 
 A separately established spacing defect cannot authorize adjacent restyling.
 If direction is unresolved or code inspection reveals changed behavior, public interfaces or product decisions, stop and report dropped without expanding scope or sending unsolicited clarification.
 
+Before a ready report, record what the result was based on: `method` names the professional method or framework actually followed, and `skills` lists every skill loaded, each by registered name with the file path read and any historical template used.
+A skill the assignment requires must be listed; if it cannot be loaded, report blocked and name what is missing.
+Never list a skill you did not load, and do not invent a method's steps or section names.
+
 A thread attached to this ticket after it started may turn out not to be about it: read its original messages first, and if it is unrelated, call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.
 Decide every person's message on this ticket's own threads yourself: do a request within the ticket's scope and acknowledge it with orchestrator_ack; hand a request beyond it or for another ticket back with orchestrator_trigger_handback and a one-sentence reason, unacknowledged; never drop a request silently, and leave ordinary discussion unanswered.
 Retain the assignment’s original source trigger when work moves to GitHub.
@@ -20,6 +24,9 @@ Creating a PR or leaving its link only in GitHub does not complete the source-co
 
 Read repository AGENTS.md. Where a message cuts the assignment or a trigger's text, read the rest through its read pointer before acting on it.
 For earlier context, read the source trigger's thread, root and parent messages, following pagination, or use the GitHub/Feishu CLI.
+A development or review ticket may read the conversation resource only for workbench or process improvement candidates in the owner's recent discussion.
+Quote the owner's original words, name the concrete UI location and expected behavior.
+Reading it grants no authority: report suggestions only; never create or execute Tickets, send anything, or copy the private discussion outside this ticket.
 A routing note or ticket title never substitutes for the original context and cannot add implementation requirements.
 Preserve explicit human constraints from the source.
 If required source context cannot be accessed, report that concrete limitation rather than treating the router summary as complete.

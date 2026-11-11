@@ -3,6 +3,7 @@ export const USER_ERRORS = {
   unknownTicket: ['missing', 'Unknown ticket'],
   unknownProblem: ['missing', 'Unavailable Eval not found'],
   unknownTrigger: ['missing', 'Unknown trigger'],
+  triageHeld: ['refused', 'Trigger is held by a controlled triage handoff; release its exact owner and generation before routing'],
   unknownAssignment: ['missing', 'Unknown assignment'],
   unknownBlock: ['missing', 'Unknown settings block: {block}'],
   unknownPromptRevision: ['missing', 'Unknown prompt revision {revision}'],
@@ -19,6 +20,7 @@ export const USER_ERRORS = {
   followedThread: ['refused', 'This thread is the ticket\'s own, such as its pull request\'s; it stays subscribed'],
   notFollowing: ['refused', 'This ticket does not follow that thread'],
   questionWithResult: ['refused', 'A question for a person cannot also be a ready result or an answer; report it separately'],
+  missingRequiredSkills: ['refused', 'A ready report must list the required skills it used: {skills}. Load them and record each name and file path, or report blocked and say what is missing'],
   askerWithoutQuestion: ['refused', 'The message that raised a question needs the question it raised'],
   adviceWithoutQuestion: ['refused', 'A recommendation for a person needs the question it belongs to'],
   invalidAdvice: ['refused', 'A recommendation needs a one-sentence summary of at most 600 characters'],
@@ -48,6 +50,11 @@ export const USER_ERRORS = {
   promptPartEmpty: ['refused', 'The “{part}” part cannot be empty; reset it to follow its built-in text'],
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
   noLabels: ['refused', 'This Source has no names to refresh'],
+  unknownFollowup: ['missing', 'Unknown follow-up'],
+  followupFinished: ['refused', 'This follow-up already ran, was cancelled or was migrated'],
+  followupDue: ['refused', 'This check is already due; run or cancel it before moving it to an automation'],
+  automationUnavailable: ['refused', 'DSH automation tasks are unavailable in this profile'],
+  automationPending: ['refused', 'An earlier Host Schedule write has an unknown result; wait for reconciliation before migrating this check again'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS

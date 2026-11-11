@@ -38,6 +38,7 @@ export class Tickets extends EnginePart {
   create(id: string, decisionId: string, mandate: Mandate, evaluation: Pick<Evaluation, 'triggerIds' | 'primary'>,
     outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, at: string): void {
     const { triggerIds } = evaluation
+    this.assertNotHeld(...triggerIds)
     // Fall back to the last trigger for Evals recorded before `primary` existed.
     const primary = this.repo.triggers.get(evaluation.primary ?? triggerIds.at(-1)!)
     const origin = { triggerId: primary?.id ?? triggerIds[0]!, triggerIds }
@@ -148,6 +149,7 @@ export class Tickets extends EnginePart {
    * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.
    */
   attachable(ticketId: string, triggerId: string): Trigger {
+    this.assertNotHeld(triggerId)
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
@@ -163,6 +165,7 @@ export class Tickets extends EnginePart {
    * message as its ticket's takes it as a new Input, which wakes an ended ticket as any attached message does.
    */
   attach(ticketId: string, trigger: Trigger, note?: string): void {
+    this.assertNotHeld(trigger.id)
     for (const ref of trigger.threads) this.subscribe(ticketId, ref)
     // A person's sending it to Eval, which routed it here, is over, and so is the ticket's reading it for context only.
     const current: TriggerDisposition = this.repo.triggers.disposition(trigger.id) ?? { fanout: [], at: this.now() }
@@ -337,6 +340,7 @@ export class Tickets extends EnginePart {
    * failed once no person is waited for: a Policy change alone does not launch it again.
    */
   addInput(ticket: Ticket, input: TicketInput): void {
+    if (input.kind === 'trigger') this.assertNotHeld(input.triggerId)
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
     // Hold back automated inputs while the worker is waiting on a person.

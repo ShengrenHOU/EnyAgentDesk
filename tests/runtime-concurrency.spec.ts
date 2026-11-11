@@ -81,6 +81,7 @@ it('evaluates a message that arrives on a thread while an earlier candidate\'s c
   await h.runtime.idle()
   expect(h.runtime.store.threads.get(threadB)).toMatchObject({ evaluating: { triggerIds: [b2.id] }, pending: [] })
   // A slow link lookup holds only its own candidate's card.
+  await h.consumeMain()
   expect(h.candidates()).toEqual([b1.id, a1.id, b2.id])
 })
 
@@ -135,6 +136,7 @@ it('runs prepare commands in the background, side by side, while accepts, intake
   const later = feishu('3', '@bot 修三')
   expect(h.runtime.receive(later)).toBe('stored')
   await h.runtime.pump()
+  await h.consumeMain()
   expect(h.candidates()).toEqual([...first, later].map(trigger => trigger.id))
   prepare.resolve()
   await h.runtime.idle()
@@ -736,6 +738,7 @@ describe('what a worker read', () => {
       expect(ticket().undelivered).toEqual([])
       await h.runTool(one.sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Nothing to do' })
     })
+    await h.consumeMain()
     expect(h.candidates()).toContain(thanks.id)
   })
   it('counts a delivered message as read only once its step took it into the Session, not when a cut-off step claimed it', async () => {
@@ -830,6 +833,7 @@ describe('what a worker read', () => {
     h.runtime.engine.threadClosed({ source: 'github', id: '7' }, 'merged', new Date().toISOString())
     await h.runtime.pump(); await h.runtime.idle()
     expect(ticket().ended).toMatchObject({ outcome: 'merged' })
+    await h.consumeMain()
     expect(h.candidates()).toContain(thanks.id)
   })
 })

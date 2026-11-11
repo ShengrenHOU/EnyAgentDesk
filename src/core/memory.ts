@@ -35,6 +35,9 @@ export class MemoryRepositories implements Repositories {
     active: () => this.threads.list().filter(thread => thread.pending.length > 0 || thread.evaluating !== undefined),
   }
   readonly tickets = {
+    referencingTriggers: (ids: string[]): string[] => ids.filter(id => [...this.ticketRows.values()].some(ticket =>
+      ticket.origin.triggerId === id || ticket.origin.triggerIds.includes(id) || ticket.attention?.triggerId === id || ticket.answers?.includes(id)
+      || ticket.inputs.some(input => 'triggerId' in input && input.triggerId === id))),
     get: (id: string) => clone(this.ticketRows.get(id)),
     save: (ticket: Ticket) => { this.ticketRows.set(ticket.id, clone(ticket)) },
     /** Newest first, matching the SQLite Store's order. */

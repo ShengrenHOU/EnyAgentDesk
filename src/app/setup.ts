@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { feishuConfigDir, SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, proxyVariables, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -75,7 +75,7 @@ export class Setup {
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
-    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe(settings))
+    const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.botProbe(settings))
       : resolveDeployment(machine, settings.sources.github?.config, this.probe(settings), undefined, needsGithub(settings))
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
@@ -87,6 +87,12 @@ export class Setup {
   private probe(settings: Settings) {
     const { context, machine, lifetime } = this.host
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime, proxyVariables(settings.executor.proxy))
+  }
+  private botProbe(settings: Settings) {
+    const { context, machine, lifetime } = this.host
+    const configDir = feishuConfigDir(settings.sources.feishu?.config)
+    return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime, { ...proxyVariables(settings.executor.proxy),
+      ...(configDir ? { LARKSUITE_CLI_CONFIG_DIR: configDir } : {}) })
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
@@ -103,7 +109,7 @@ export class Setup {
         context.logger.warn('dsh-superagent leaves GitHub out: %s', error.message)
         return resolveDeployment(machine, settings.sources.github?.config, probe, undefined, false)
       })
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
+    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, this.botProbe(settings)).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
       context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)

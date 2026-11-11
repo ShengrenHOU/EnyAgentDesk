@@ -29,9 +29,9 @@ export function feishu(id: string, text: string, overrides: Record<string, unkno
     mentions: [{ id: 'ou_bot' }], ...overrides }, 'ou_bot', 'cli_bot')!
 }
 
-type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
+type RegisteredTool = { name: string; execute: (args: unknown, execution: { signal: AbortSignal; callId?: string }) => Promise<unknown> }
 type FakeAgent = {
-  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }
+  id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[]; remove: (id: string) => boolean }
   cancel: Mock; inject: Mock<(message: UserMessage) => void>; steer: Mock<(message: UserMessage) => void>; followup: Mock<(message: UserMessage) => void>
 }
 /** A text message, as DSH's job tools and subagents send their notices. */
@@ -164,7 +164,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
-  const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
+  const turns = new Map<string, () => void>(), steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
@@ -196,9 +196,10 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
         for (const message of [...inbox.nextStep.filter(item => !taken.has(item.id)), ...queued]) {
           taken.add(message.id)
           ctx.emit('agent/inbox/claimed', { agent, message, turn } as never)
-          if (!cut) ctx.emit('session/event', session as never, { type: 'user/message', data: message } as never)
+          if (!cut) ctx.emit('session/event', session as never, { type: 'user/message', time: Date.now(), data: message } as never)
         }
       }
+      turns.set(sessionId, () => { take(true) })
       steps.set(sessionId, () => { take(false) })
       claims.set(sessionId, () => { take(false, true) })
       const deliver = (mode: 'queue' | 'steer') => vi.fn((message: UserMessage) => {
@@ -254,9 +255,19 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     list: () => [...workspaces.values()],
     delete: async (id: string) => { workspaces.delete(id) },
   }
+  const schedules = new Map<string, { id: string; sessionId: string; title: string; prompt: string; scheduledAt: string; status: 'active' | 'inactive' }>()
+  const schedule = {
+    create: vi.fn(async (sessionId: string, request: { title: string; prompt: string; at: string }) => {
+      const id = `schedule-${schedules.size + 1}`
+      schedules.set(id, { id, sessionId, title: request.title, prompt: request.prompt, scheduledAt: request.at, status: 'active' })
+      return { id, sessionId, title: request.title, prompt: request.prompt, scheduledAt: request.at }
+    }),
+    delete: vi.fn(async ({ id }: { sessionId: string; id: string }) => schedules.delete(id) ? { deleted: true } : { deleted: false, code: 'schedule_not_found' }),
+    catalog: vi.fn(async () => [...schedules.values()]),
+  }
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionPersistence: persistence, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer,
-    jobs: jobs.service, subagents: subagents.service }
+    jobs: jobs.service, subagents: subagents.service, schedule }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
@@ -279,10 +290,11 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId)
     .map(call => JSON.parse(call.text) as Record<string, unknown>)
   const candidates = () => relays(runtime.masterId).filter(item => item.kind === 'candidate').map(item => item.trigger_id)
-  const runTool = async (sessionId: string, name: string, args: unknown) => {
+  let toolCalls = 0
+  const runTool = async (sessionId: string, name: string, args: unknown, callId = `fixture-call-${++toolCalls}`) => {
     const tool = tools.get(sessionId)?.get(name)
     if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
-    return await tool.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+    return await tool.execute(args, { signal: new AbortController().signal, callId }) as Record<string, unknown>
   }
   /** Route one decision with the main Session's orchestrator_route, answering its result; a refused one throws its reason. */
   async function route(item: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -321,7 +333,23 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, acceptedLegacyTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim, workspaces, workspaceRegistry }
+  /** Explicitly simulate the coordinator reading its pending inbox, then admit the next waiting assessment. */
+  const consumeMain = async () => {
+    const agent = agents.get(runtime.masterId)!
+    for (let count = agent.inbox.nextTurn.length + agent.inbox.nextStep.length; count > 0; count--) turns.get(runtime.masterId)!()
+    agent.inbox.nextTurn.length = 0; agent.inbox.nextStep.length = 0
+    runtime.store.db.prepare("UPDATE effect SET due = 0 WHERE kind IN ('assessment', 'triageAssessment')").run()
+    await runtime.effects.idle('assessment')
+  }
+  /** The main Session's model reads every notice waiting in `sessionId`'s inbox into its history, as its next step would. */
+  const consume = (sessionId: string = runtime.masterId) => {
+    const agent = agents.get(sessionId)!
+    for (const message of [...agent.inbox.nextTurn, ...agent.inbox.nextStep]) {
+      agent.inbox.remove(message.id)
+      ctx.emit('session/event', (agent as unknown as { session: unknown }).session as never, { type: 'user/message', time: Date.now(), data: message } as never)
+    }
+  }
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, consumeMain, runTool, route, acceptedTicket, acceptedLegacyTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+    jobs, subagents, step, claim, consume, workspaces, workspaceRegistry }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

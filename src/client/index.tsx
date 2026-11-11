@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -19,6 +20,7 @@ import type { T } from './text.ts'
 import { WorkbenchAction } from './workbench.tsx'
 import { OwnerDesk } from './owner-desk.tsx'
 import { Workbench } from './personal-workbench.tsx'
+import { TurnQuickReply } from './quick-reply.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import { remember, settingsRoute } from './route.ts'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
@@ -103,6 +105,16 @@ export function apply(ctx: ClientContext): void {
       return conversation.send(text)
     } }),
   }, (props: { sessionId: string; t: T; send(text: string): Promise<void> }) => <OwnerDesk {...props} openTicket={showTicket} />))
+  // One-line reply under the newest main-conversation Turn, reaching the same Session the composer below would.
+  ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+    name: 'conversation.chat.turnTail', id: 'superagent-quick-reply', order: 30, locale: NS,
+    inject: (sessionId: string) => ({ send: (text: string) => {
+      const conversation = ctx.sessions.scope(sessionId as SessionId)?.get('conversation')
+      if (!conversation) throw new Error('Conversation is unavailable')
+      return conversation.send(text)
+    } }),
+  }, (props: { sessionId: string; t: T; turn: { turn: number }; send(text: string): Promise<void> }) =>
+    <TurnQuickReply sessionId={props.sessionId} t={props.t} turn={props.turn.turn} send={props.send} />))
   ctx.slots.inject('sidebar.workspaces.session.row.action', () => ctx.slots.register({
     name: 'sidebar.workspaces.session.row.action', id: 'superagent-workbench', order: 150, locale: NS,
   }, (props: { sessionId: string; t: T }) => <WorkbenchAction sessionId={props.sessionId} t={props.t} openTicket={id => {

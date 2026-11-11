@@ -38,6 +38,17 @@ describe('account-isolated operations', () => {
       expect(output).not.toContain('GH_TOKEN=')
     } finally { delete process.env.GH_TOKEN }
   })
+  it('uses the bot directory for channel calls without changing the user environment', async () => {
+    const base = testDeployment()
+    const configured = testDeployment({ feishu: { ...base.feishu!, configDir: '/bot-profile' } })
+    const commands = new Commands(() => configured, { LARKSUITE_CLI_CONFIG_DIR: '/user-profile' }, new AbortController().signal)
+    const scoped = new Commands(() => configured, {}, new AbortController().signal)
+    const select = vi.spyOn(commands, 'withEnvironment').mockReturnValue(scoped)
+    const run = vi.spyOn(scoped, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await commands.lark(['im', '+chat-list'])
+    expect(select).toHaveBeenCalledWith({ LARKSUITE_CLI_CONFIG_DIR: '/bot-profile' })
+    expect(run).toHaveBeenCalledWith(configured.feishu!.cli, ['im', '+chat-list', '--as', 'bot', '--format', 'json'], undefined)
+  })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
   })

@@ -1,7 +1,13 @@
 import { expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { z } from 'zod'
-import { registerHttp } from '../src/app/http.ts'
+import { registerHttp, sourceHead } from '../src/app/http.ts'
+import { attach, close, open } from '../src/app/lines.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
+import { Store } from '../src/app/store.ts'
+import type { Ticket } from '../src/core/index.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -13,12 +19,35 @@ type Headers = Record<string, string | undefined>
 it('reports the actual executor model source and server prepare shell', async () => {
   for (const codex of [undefined, { command: 'native-codex', model: 'codex-test-model' }]) {
     const call = serve({ machine: testMachine({ codex }), configured: () => false, masterId: 'master', health: {},
-      executor: { activeCount: () => 0 }, store: { settings: () => SettingsSchema.parse({}), tickets: { open: () => [] } } })
+      executor: { activeCount: () => 0 }, store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } } })
     expect(await call('GET', 'state')).toMatchObject({ status: 200, body: { setup: { machine: {
       executor: { kind: codex ? 'codex' : 'dsh', model: codex?.model ?? null },
       prepareShell: process.platform === 'win32' ? 'powershell' : 'sh',
     } } } })
   }
+})
+it('reports the running package build and its activation time', async () => {
+  const call = serve({
+    store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } },
+    machine: { promptMaxChars: { get: () => 100_000 }, admissionContextMaxPages: { get: () => 10 },
+      admissionContextTimeoutMs: { get: () => 15_000 } },
+    executor: { activeCount: () => 0 }, startedAt: '2026-11-09T01:00:00.000Z', health: {}, configured: () => false,
+  })
+  expect(await call('GET', 'state')).toMatchObject({ status: 200, body: { runtime: { startedAt: '2026-11-09T01:00:00.000Z',
+    packageVersion: expect.any(String) } } })
+})
+it('reads the default-branch checkpoint under the monitored repository scope', () => {
+  const stored = new Map<string, unknown>([
+    ['github-repository:acme/widgets:github-branch-ci', { branch: 'main', head: 'abc', observedAt: '2026-11-09T00:05:00.000Z' }],
+    ['github-branch-ci', { branch: 'legacy', head: 'old', observedAt: '2026-11-09T00:05:00.000Z' }],
+  ])
+  const host = (deployment: object) => ({ configured: () => true, deployment,
+    store: { get: (key: string) => stored.get(key) } }) as unknown as HttpHost
+  // A multi-repository deployment scopes every checkpoint by repository; a single-repository one keeps the plain key.
+  expect(sourceHead(host({ repository: 'acme/widgets', githubRepositories: ['acme/widgets'] })))
+    .toEqual({ repository: 'acme/widgets', branch: 'main', head: 'abc', observedAt: '2026-11-09T00:05:00.000Z' })
+  expect(sourceHead(host({ repository: 'acme/widgets' })))
+    .toEqual({ repository: 'acme/widgets', branch: 'legacy', head: 'old', observedAt: '2026-11-09T00:05:00.000Z' })
 })
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
@@ -66,7 +95,7 @@ it('answers each kind of failure with its own status', async () => {
 it('decodes path parameters and parses each route\'s query', async () => {
   const seen: unknown[] = []
   const call = serve({
-    store: { settings: () => SettingsSchema.parse({}),
+    store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}),
       read: { decisions: (filter: unknown, offset: number, limit: number) => { seen.push({ filter, offset, limit }); return { items: [], more: false } } } },
     links: () => () => ({ url: '', label: { zh: '', en: '' } }),
     engine: { unsubscribe: (key: string) => { seen.push(key); return true } },
@@ -106,4 +135,44 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+it('serves the work lines and one line detail', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lines-http-'))
+  const store = new Store(join(directory, 'state.sqlite'))
+  try {
+    const at = '2026-11-09T00:00:00.000Z'
+    const ticket: Ticket = { id: 't1', title: '申昊战略入股：盘点', decisionId: 'd1',
+      mandate: { strength: 'explicit', policyVersion: 'p1', basis: { via: 'addressed', addressed: 'direct' },
+        actor: { source: 'workbench', id: 'owner' }, scope: '申昊战略入股' },
+      channels: [], assignments: [], inputs: [], undelivered: [], createdAt: at, updatedAt: at,
+      origin: { triggerId: 'tr1', triggerIds: ['tr1'] } }
+    store.tickets.save(ticket)
+    const { line } = open(store, { title: '申昊战略入股', evidence: '同一交易', at })
+    attach(store, { lineId: line.id, ticketId: ticket.id, evidence: '盘点阶段', at })
+    const call = serve({ store })
+    expect(await call('GET', 'lines')).toMatchObject({ status: 200, body: { open: [{ id: line.id, title: '申昊战略入股',
+      ticketCount: 1 }] } })
+    expect(await call('GET', `lines/${line.id}`)).toMatchObject({ status: 200, body: {
+      tickets: [{ title: '申昊战略入股：盘点' }], judgements: [{ action: 'opened' }, { action: 'attached' }] } })
+    const to = open(store, { title: '独立的产品项目', evidence: '另一个具体目标', at }).line
+    const path = `lines/${line.id}/membership`
+    const change = { ticketId: ticket.id, targetLineId: to.id, evidence: '更正最初归属' }
+    expect(await call('POST', path, { ...change, evidence: '' })).toMatchObject({ status: 400 })
+    expect(await call('POST', path, change, { origin: 'https://example.com' })).toMatchObject({ status: 403 })
+    expect(await call('POST', path, change)).toMatchObject({ status: 200, body: { changed: true } })
+    expect(await call('POST', path, change)).toMatchObject({ status: 200, body: { changed: false } })
+    expect(await call('GET', `lines/${to.id}`)).toMatchObject({ status: 200, body: {
+      tickets: [{ id: ticket.id }], latestJudgement: { by: 'owner', fromLine: { id: line.id }, toLine: { id: to.id } } } })
+    expect(await call('POST', path, { ...change, targetLineId: null })).toMatchObject({ status: 409 })
+    expect(await call('POST', `lines/${to.id}/membership`, { ...change, targetLineId: null }))
+      .toMatchObject({ status: 200, body: { changed: true } })
+    close(store, { lineId: to.id, evidence: '结束空主线' })
+    attach(store, { lineId: line.id, ticketId: ticket.id, evidence: '回归原目标' })
+    expect(await call('POST', path, change)).toMatchObject({ status: 409 })
+    expect(store.tickets.get(ticket.id)).toEqual(ticket)
+  } finally {
+    store.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

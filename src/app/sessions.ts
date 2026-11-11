@@ -1,7 +1,7 @@
 /** Lifecycle, prompt/tool/skill decoration, message delivery, and budget retry tracking for orchestrator and worker DSH sessions. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { MessageId } from '@deepseek-ai/dsh-llm'
+import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname, resolve } from 'node:path'
@@ -10,7 +10,7 @@ import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from '../infra/delivery.ts'
-import type { Effects } from './effects.ts'
+import { Later, type Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
@@ -20,6 +20,8 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+
+export interface AssessmentNotice { kind: 'candidate' | 'im_production_judgment'; id: string; generation?: number }
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -32,6 +34,8 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  assessmentsPaused?(): boolean
+  assessmentCurrent?(notice: AssessmentNotice): boolean
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -114,6 +118,15 @@ export class Sessions {
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
+    ctx.on('agent/pre-step', async (payload, next) => {
+      const decision = await next()
+      if (payload.agent.id !== this.host.masterId || decision.kind !== 'enter') return decision
+      const messages = decision.messages.filter(message => {
+        const notice = this.assessmentNotice(message)
+        return !notice || (!this.host.assessmentsPaused?.() && this.host.assessmentCurrent?.(notice) !== false)
+      })
+      return decision.messages.length && !messages.length ? { kind: 'reject' } : { ...decision, messages }
+    })
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
@@ -191,6 +204,53 @@ export class Sessions {
     if ('error' in result) throw result.error
     await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
   }
+  /** Parse only this producer's exact generated ID and explicit assessment metadata, never user text. */
+  private assessmentNotice(message: UserMessage): AssessmentNotice | undefined {
+    if (message.source.kind !== 'dsh-superagent' || message.source.form !== 'relay') return undefined
+    try {
+      const value = JSON.parse(message.content.filter(block => block.type === 'text').map(block => block.text).join('')) as Record<string, unknown>
+      if (value.kind === 'candidate' && typeof value.eval_id === 'string' && message.id === this.promptedId(`candidate:${value.eval_id}`)) return { kind: 'candidate', id: value.eval_id }
+      if (value.kind === 'im_production_judgment' && typeof value.id === 'string' && Number.isSafeInteger(value.generation)
+        && message.id === this.promptedId(`production-triage:${value.id}:${String(value.generation)}`)) return { kind: 'im_production_judgment', id: value.id, generation: value.generation as number }
+    } catch { /* Malformed or unrelated content is not ours to remove. */ }
+    return undefined
+  }
+  /** Cancels only obsolete generated assessment inbox entries; history, owner input and reports are untouched. */
+  pruneAssessments(): void {
+    const agent = this.ctx.agents.get(this.host.masterId as SessionId)
+    if (!agent || !this.host.assessmentCurrent) return
+    for (const message of [...agent.inbox.nextTurn, ...agent.inbox.nextStep]) {
+      const notice = this.assessmentNotice(message)
+      if (notice && !this.host.assessmentCurrent(notice)) agent.inbox.remove(message.id)
+    }
+  }
+  /** Cheap pre-card check; final admission still uses the shared assessment transport below. */
+  async candidateState(requestId: string): Promise<'consumed' | 'ready' | 'blocked'> {
+    const result = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+    if ('error' in result) throw result.error
+    const agent = result.agent
+    if (await this.agentDelivery.consumedAt(agent, key(requestId)) !== undefined) return 'consumed'
+    this.pruneAssessments()
+    return this.agentDelivery.unread(agent).length ? 'blocked' : 'ready'
+  }
+  /** Shared legacy/production admission. A consumed request is acknowledged even with unrelated unread input. */
+  async assessment(requestId: string, text: string, authorize: () => void): Promise<string> {
+    const result = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+    if ('error' in result) throw result.error
+    const agent = result.agent
+    const consumed = await this.agentDelivery.consumedAt(agent, key(requestId))
+    if (consumed !== undefined) return new Date(consumed).toISOString()
+    this.pruneAssessments()
+    await this.agentDelivery.send(agent, key(requestId), text, 'queue', this.host.lifetime, () => {
+      authorize()
+      // No await separates this check from inbox insertion in AgentDelivery.send. Concurrent assessments and
+      // owner/report arrivals during history loading therefore cannot both pass an empty-inbox check.
+      if (this.agentDelivery.unread(agent).some(message => message.id !== this.promptedId(requestId))) throw new Later('Main Session has unread input')
+    })
+    const accepted = await this.agentDelivery.consumedAt(agent, key(requestId))
+    if (accepted === undefined) throw new Later('Assessment queued but not durably consumed')
+    return new Date(accepted).toISOString()
+  }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
   /** Enqueues a steering relay to the main Session; relays are durable and retried by `Effects` until delivered, at most once per `requestId`. */
@@ -238,7 +298,7 @@ export class Sessions {
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
           return image ? [text, { type: 'image' as const, attachment: image }] : [text]
         } },
-        execute: (args, execution) => execute(schema.parse(args), execution.signal) }))
+        execute: (args, execution) => execute(schema.parse(args), execution.signal, execution.callId) }))
     }
   }
   /** Returns `sessionId`'s active model-budget retry state (`{ model_retry }`) for status listings, or `{}` when not waiting on one. */
@@ -262,6 +322,7 @@ export class Sessions {
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
+    if (master) this.pruneAssessments()
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())

@@ -8,7 +8,7 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
-import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
+import type { DroppedReply, HistoryView, LinePageView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
@@ -86,11 +86,15 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
   work?: ApiResponse<'GET overview'>['work']
+  /** The Questions whose deferral keeps them out of the immediate queue, with the time they return. */
+  personDeferred?: ApiResponse<'GET overview'>['personDeferred']
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
+  automations: ApiResponse<'GET followups/automations'>
+  lines: ApiResponse<'GET lines'>; lineDetails: Record<string, LinePageView>
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
@@ -102,6 +106,8 @@ export interface PanelServer {
   setup: SetupView
   /** The main Session id `GET state` reports; tests can clear it to simulate a host without a ready main Session. */
   masterId: string
+  /** The running package build `GET state` reports, which tests can mark as behind its source. */
+  runtime: StateView['runtime']
   health: Record<string, Health>
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
@@ -162,8 +168,9 @@ function sourceStatuses(): SourceStatusRow[] {
   })
 }
 const stateView = (): StateView => ({
+  triageHandoff: { held: 0, owners: [], contextComplete: false, state: 'empty' },
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: server.masterId, paused: server.settings.paused,
+  masterId: server.masterId, paused: server.settings.paused, runtime: server.runtime,
   // The panel does not read health; the service script does.
   health: {},
 })
@@ -183,7 +190,7 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
 const overviewView = (): ApiResponse<'GET overview'> => {
   const { problem, feishuProblem } = server.setup
   const setup = problem ?? feishuProblem
-  return {
+  return { triageMatters: { groups: [], total: 0, oldestAt: null, nextBefore: null, unresolved: { total: 0, oldestAt: null } }, productionTriage: { limited: false, groups: [], total: 0, nextBefore: null, unresolved: { groups: 0, messages: 0, queued: 0, preparing: 0, awaiting: 0, blocked: 0, unknown: 0, suggested_action: 0, oldestAt: null } },
     problems: [...setup ? [{ kind: 'setup' as const, ...setup }] : [],
       ...KINDS.some(kind => server.settings.sources[kind.kind]?.enabled !== false) ? [] : [{ kind: 'no-source' as const }],
       ...feishuProblem || server.settings.sources.feishu?.enabled === false ? [] : [{ kind: 'source-error' as const, source: { id: 'feishu',
@@ -199,7 +206,7 @@ const overviewView = (): ApiResponse<'GET overview'> => {
         .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail })),
       ...Object.values(server.settings.policy.sources).some(part => part.allowed.length) ? [] : [{ kind: 'no-allowed' as const }],
       ...server.failing.map(outgoing => ({ kind: 'outgoing' as const, outgoing }))],
-    person: server.person, ...server.work ? { work: server.work } : {},
+    person: server.person, ...server.personDeferred ? { personDeferred: server.personDeferred } : {}, ...server.work ? { work: server.work } : {},
     executor: { running: 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers, idle: 1 },
     flow: { received: 12, filtered: 2, triggers: 10, judged: 5, accepted: 1, evaluating: 0,
       dropped: server.dropped.filter(item => item.dropped.at >= dayAgo()).length },
@@ -253,6 +260,8 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [], masterId: 'master',
+    runtime: { packageVersion: '0.5.19', commit: 'abc123def456', repository: 'acme/widgets', builtAt: '2026-11-09T00:00:00.000Z',
+      startedAt: '2026-11-09T01:00:00.000Z' },
     setup: { machine: MACHINE, problem: null, feishuProblem: null, githubProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -262,12 +271,15 @@ function initial(): PanelServer {
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
     tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
+    automations: { available: true, items: [] },
+    lines: { open: [], closed: [], closedTotal: 0, generatedAt: '2026-11-09T00:00:00.000Z' }, lineDetails: {},
     threads: [threadSummary()], threadPages: threadPage,
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },
       { stage: 'person', action: 'answer' }),
       ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, sessionId: 'worker-t4',
         summary: 'LlmError: no adapter registered for provider "provider-a"',
         note: { text: 'LlmError: no adapter registered for provider "provider-a"', error: true } }, { stage: 'person', action: 'failed' })],
+    personDeferred: [],
     search: { items: [], threads: [] },
     history: { current: 3, policyVersion: 'abcdef1234567890', items: [
       { revision: 4, savedAt: '2026-09-23T00:00:00Z', source: 'panel', policyVersion: '9876543210fedcba', policyChanged: true, notified: [],
@@ -298,11 +310,14 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
+  'GET triage-matters': { query: ['before', 'limit', 'active'], answer: () => overviewView().triageMatters },
+  'GET production-triage': { query: ['before', 'limit'], answer: () => overviewView().productionTriage },
   'GET followups': { answer: () => Object.values(server.ticketDetails).filter(ticket => ticket.state === 'open')
     .flatMap(ticket => (ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => ({ ...item,
       ticketId: ticket.id, title: ticket.title, due: Date.parse(item.at) <= Date.now(),
       blocked: ticket.taskPaused ? 'ticketPaused' as const : ticket.attention ? 'attention' as const : undefined })))
     .sort((a, b) => a.at.localeCompare(b.at)) },
+  'GET followups/automations': { answer: () => server.automations },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
@@ -337,6 +352,9 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET tickets': { query: ['state', 'offset', 'limit'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
     : 'open']) },
   'GET tickets/:id': { answer: ({ params }) => server.ticketDetails[params.id] ?? refuse(404, 'Ticket not found') },
+  'GET lines': { answer: () => server.lines },
+  'GET lines/:id': { answer: ({ params }) => server.lineDetails[params.id] ?? refuse(404, 'Line not found') },
+  'POST lines/:id/membership': { body: true, answer: () => ({ changed: true }) },
   'PUT tickets/:id/management': { body: true, answer: ({ params, body }) => {
     const ticket = server.ticketDetails[params.id]
     if (!ticket) return refuse(404, 'Ticket not found')
@@ -385,6 +403,33 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     }
     return { cancelled: true, receipt: { requestId: followup.id, ticketId: params.id, at: followup.at, reason: followup.reason,
       createdAt: followup.createdAt, status: 'cancelled', finishedAt: new Date().toISOString() } }
+  } },
+  'POST tickets/:id/followup/migrate': { body: true, answer: ({ params, body }) => {
+    const ticket = server.ticketDetails[params.id] ?? ticketOf(params.id)
+    if (!ticket) return refuse(404, 'Ticket not found')
+    const pending = ticket.followups ?? (ticket.followup ? [ticket.followup] : [])
+    const followup = pending.find(item => item.id === body.request_id)
+    if (!followup) return refuse(400, 'This follow-up already ran, was cancelled or was migrated', { code: 'followupFinished' })
+    const automation = { id: `auto-${followup.id}`, sessionId: 'master', title: `自动化检查：${ticket.title}`,
+      scheduledAt: followup.at, ticketId: params.id, ticketTitle: ticket.title, requestId: followup.id, status: 'scheduled' as const }
+    server.automations.items.push(automation)
+    const shown = [ticket, ...server.tickets.open, ...server.person,
+      ...server.work?.working ?? [], ...server.work?.waiting ?? [], ...server.work?.delivered ?? []]
+    for (const row of shown.filter(row => row.id === params.id)) {
+      const remaining = (row.followups ?? (row.followup ? [row.followup] : [])).filter(item => item.id !== followup.id)
+      if (remaining.length) { row.followups = remaining; row.followup = remaining[0] } else { delete row.followups; delete row.followup }
+    }
+    return { requestId: followup.id, ticketId: params.id, at: followup.at, reason: followup.reason, createdAt: followup.createdAt,
+      status: 'migrated', finishedAt: new Date().toISOString(),
+      automation: { id: automation.id, sessionId: automation.sessionId, title: automation.title, scheduledAt: automation.scheduledAt } }
+  } },
+  'DELETE tickets/:id/followup/automation': { query: ['request_id'], answer: ({ params, query }) => {
+    const index = server.automations.items.findIndex(item => item.ticketId === params.id && item.requestId === query.request_id)
+    if (index < 0) return refuse(404, 'Unknown follow-up', { code: 'unknownFollowup' })
+    const [automation] = server.automations.items.splice(index, 1)
+    return { cancelled: true, receipt: { requestId: automation!.requestId, ticketId: automation!.ticketId, at: automation!.scheduledAt,
+      reason: automation!.title, createdAt: automation!.scheduledAt, status: 'cancelled', finishedAt: new Date().toISOString(),
+      automation: { id: automation!.id, sessionId: automation!.sessionId, title: automation!.title, scheduledAt: automation!.scheduledAt } } }
   } },
   'POST tickets/:id/continue': { body: true, answer: ({ params }) => ({ continued: true, ticketId: params.id, executor: 'dsh' }) },
   'POST tickets/:id/retry': { answer: ({ params }) => {

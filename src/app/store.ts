@@ -28,6 +28,7 @@ export interface SettingsVersion {
  * Older databases missing a column get it added on open and populated by SQLite from stored JSON rows.
  */
 const SETS: Record<string, Record<string, string>> = {
+  disposition: { held: "TEXT AS (CASE WHEN value ->> '$.triage.phase' IS NULL THEN value ->> '$.triage.owner' END)" },
   ticket: {
     open: "INTEGER AS (CASE WHEN value -> '$.ended' IS NULL THEN 1 END)",
     // Only the latest assignment can be pending or running because the Engine closes one before adding the next.
@@ -53,7 +54,7 @@ export class Store implements Repositories {
   /**
    * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (11), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION`, or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -86,7 +87,7 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          if (version !== undefined && version < 11) migrateTo11(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -231,6 +232,19 @@ export class Store implements Repositories {
     }),
   }
   readonly tickets = {
+    referencingTriggers: (ids: string[]): string[] => {
+      // Conservative, explicit budget until a dedicated reference index is justified by production migration.
+      const count = Number(this.db.prepare('SELECT COUNT(*) AS n FROM (SELECT 1 FROM ticket LIMIT 5001)').get()!.n)
+      if (count > 5000) throw new Error('Ticket reference preview budget exceeded (5000); no evidence adopted')
+      return this.db.prepare(`SELECT DISTINCT selected.value AS id
+      FROM json_each(?) selected JOIN ticket t WHERE t.value ->> '$.origin.triggerId' = selected.value
+      OR EXISTS (SELECT 1 FROM json_each(t.value, '$.origin.triggerIds') origin WHERE origin.value = selected.value)
+      OR EXISTS (SELECT 1 FROM json_each(t.value, '$.inputs') input
+        WHERE input.value ->> '$.triggerId' = selected.value)
+      OR t.value ->> '$.attention.triggerId' = selected.value
+      OR EXISTS (SELECT 1 FROM json_each(t.value, '$.answers') answer WHERE answer.value = selected.value)`)
+      .all(JSON.stringify(ids)).map(row => String(row.id))
+    },
     get: (id: string): Ticket | undefined => { const row = this.db.prepare('SELECT value FROM ticket WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Ticket : undefined },
     save: (ticket: Ticket): void => { this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)) },
     /** Newest first. */
@@ -244,6 +258,13 @@ export class Store implements Repositories {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
     save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
+  }
+  /** Indexed ownership count and bounded owner references; no source content is exposed. */
+  triageHandoffStatus() {
+    const held = Number(this.db.prepare('SELECT COUNT(*) AS n FROM disposition WHERE held IS NOT NULL').get()!.n)
+    const owners = this.db.prepare('SELECT DISTINCT held AS owner FROM disposition WHERE held IS NOT NULL ORDER BY held LIMIT 20')
+      .all().map(row => String(row.owner))
+    return { held, owners, contextComplete: false as const, state: held ? 'held_awaiting_judgment' as const : 'empty' as const }
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>

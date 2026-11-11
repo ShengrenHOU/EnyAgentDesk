@@ -1,4 +1,6 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
+import type { TriageMatters } from './triage-matters.ts'
+import type { productionOverview } from './production-triage.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
@@ -11,6 +13,7 @@ import type { TicketListView } from './views/tickets.ts'
 import type { ExecutorTransfer } from './tools/routing.ts'
 import type { FollowupRequest, FollowupReceipt, Followups } from './followups.ts'
 import type { ManagementPatch, updateTicketManagement } from './management.ts'
+import type { LineDetail, LinesView } from './lines.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -22,8 +25,13 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET state': { response: StateView }
+  'GET production-triage': { query?: { before?: number; limit?: number }; response: ReturnType<typeof productionOverview> }
+  'GET triage-matters': { query?: { before?: number; limit?: number; active?: boolean }; response: ReturnType<TriageMatters['overview']> }
   'GET overview': { response: OverviewView }
   'GET followups': { response: ReturnType<Followups['pending']> }
+  'GET followups/automations': { response: Awaited<ReturnType<Followups['automations']>> }
+  'POST tickets/:id/followup/migrate': { body: { request_id: string }; response: Awaited<ReturnType<Followups['migrate']>> }
+  'DELETE tickets/:id/followup/automation': { query: { request_id: string }; response: Awaited<ReturnType<Followups['cancelAutomation']>> }
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }
@@ -36,6 +44,9 @@ export interface Api {
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
+  'GET lines': { response: LinesView }
+  'GET lines/:id': { response: LineDetail }
+  'POST lines/:id/membership': { body: { ticketId: string; targetLineId: string | null; evidence: string }; response: { changed: boolean } }
   'PUT tickets/:id/management': { body: ManagementPatch; response: ReturnType<typeof updateTicketManagement> }
   'POST tickets/:id/executor': { body: ExecutorTransfer; response: { changed: boolean; executor: 'codex' | 'dsh' } }
   'POST tickets/:id/followup': { body: FollowupRequest; response: FollowupReceipt }

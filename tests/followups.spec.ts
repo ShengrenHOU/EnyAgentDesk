@@ -1,5 +1,6 @@
 /** Follow-up routing: human messages on subscribed threads go directly to the ticket worker and notify the main session without starting an Eval. */
 import { afterEach, expect, it, vi } from 'vitest'
+import { ticketFollowups } from '../src/core/index.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { repliedTo } from '../src/app/links.ts'
 import { inputMessage } from '../src/executor/dsh.ts'
@@ -49,6 +50,8 @@ it('leaves a delivered follow-up to its ticket\'s worker: the main Session may s
   h = await startRuntime()
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const other = await h.acceptedTicket(feishu('3', '@bot 另一件事'))
+  // The main Session reads the accepted candidate before another request needs its card.
+  h.consume()
   const settle = async (id: string, text: string, sender?: string) => {
     const message = followup(id, text, sender ? { sender_id: sender } : {})
     h!.runtime.receive(message); await h!.runtime.idle()
@@ -58,6 +61,8 @@ it('leaves a delivered follow-up to its ticket\'s worker: the main Session may s
   const decides = /its worker decides whether it belongs there/
   // A guest's follow-up stays inferred, so its stop does not stop the work; the main Session cannot route or requeue it.
   const guest = await settle('4', '别做了', 'ou_guest')
+  // The guest's notice to the main Session is read before the requeued request needs a card.
+  h.consume()
   expect(await h!.route({ kind: 'stop', ticket_id: ticket.id, trigger_id: guest })).toMatchObject({ decision: 'ignore' })
   await expect(h!.route({ kind: 'accept', trigger_id: guest, title: 'More', worktree_name: 'more', acknowledgement: 'ok' }))
     .rejects.toThrow(decides)
@@ -65,6 +70,7 @@ it('leaves a delivered follow-up to its ticket\'s worker: the main Session may s
   // A person may still send it to Eval from the panel.
   expect(await h.api('POST', `triggers/${encodeURIComponent(guest)}/requeue`)).toMatchObject({ status: 200, body: { queued: true } })
   await h.runtime.pump(); await h.runtime.idle()
+  await h.consumeMain()
   expect(h.candidates()).toContain(guest)
   // Alice's follow-ups carry her authority once the worker hands them back: one goes to the other ticket, one becomes new work.
   const attach = await settle('5', '这个其实是另一件事的')
@@ -138,12 +144,14 @@ it('relays a message a worker handed back as a candidate with the worker\'s reas
   const message = followup('2', '另外把导出按钮也加上')
   h.runtime.receive(message)
   await h.runtime.idle()
+  h.consume()
   expect(await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: message.id, reason: 'It asks for an export button.' }))
     .toEqual({ trigger_id: message.id, queued: true })
   await h.runtime.pump(); await h.runtime.idle()
   // The candidate tells the main Session; no requeue notice comes before it.
   const injected = h.agents.get(h.runtime.masterId)!.inject.mock.calls.map(([notice]) => JSON.stringify(notice))
   expect(injected.filter(notice => notice.includes('trigger_requeued'))).toEqual([])
+  await h.consumeMain()
   expect(h.relays(h.runtime.masterId).find(item => item.kind === 'candidate'
     && item.trigger_id === message.id)).toMatchObject({ strength: 'explicit',
     handed_back: [{ trigger_id: message.id, ticket_id: ticket.id, reason: 'It asks for an export button.' }] })
@@ -253,8 +261,10 @@ it('shows a candidate\'s message as its workers would read it, with the message 
   const long = `另外，${'导出按钮的文案也需要改。'.repeat(60)}`
   const reply = followup('2', long, { parent_id: 'om_1' })
   h.runtime.receive(reply); await h.runtime.idle()
+  h.consume()
   await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: reply.id, reason: 'Another change.' })
   await h.runtime.pump(); await h.runtime.idle()
+  await h.consumeMain()
   const card = h.relays(h.runtime.masterId).find(item => item.kind === 'candidate' && item.trigger_id === reply.id)!
   expect(card).toMatchObject({ from: 'ou_alice', text: long.slice(0, 600) + '…', chars: long.length, read: `trigger/${reply.id}`,
     replies_to: { trigger_id: ticket.origin.triggerId, preview: '@bot 修一下回归' } })
@@ -300,4 +310,20 @@ it('tells a worker it may hand back a message beyond its ticket or for another o
   const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   expect((h.tools.get(sessionId)!.get('orchestrator_trigger_handback') as unknown as { description: string }).description)
     .toContain('beyond this ticket or for another one')
+})
+
+it('moves a Ticket check to the host automation through the management API and lists it', async () => {
+  h = await startRuntime()
+  const { ticket } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const at = new Date(Date.now() + 3_600_000).toISOString()
+  expect((await h.api('POST', `tickets/${ticket.id}/followup`, { request_id: 'mechanical', at, reason: '只读核对发布状态' })).status).toBe(200)
+  const migrated = await h.api('POST', `tickets/${ticket.id}/followup/migrate`, { request_id: 'mechanical' })
+  expect(migrated.status).toBe(200)
+  expect(migrated.body).toMatchObject({ status: 'migrated', automation: { sessionId: h.runtime.masterId, scheduledAt: at } })
+  expect(ticketFollowups(h.runtime.store.tickets.get(ticket.id)!)).toEqual([])
+  const list = await h.api('GET', 'followups/automations')
+  expect(list.body).toMatchObject({ available: true,
+    items: [expect.objectContaining({ ticketId: ticket.id, requestId: 'mechanical', ticketTitle: ticket.title, status: 'scheduled' })] })
+  // A second migrate is the retained receipt, not a second task.
+  expect((await h.api('POST', `tickets/${ticket.id}/followup/migrate`, { request_id: 'mechanical' })).body).toEqual(migrated.body)
 })

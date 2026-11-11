@@ -78,13 +78,16 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
   const { t } = usePanel()
   const [open, setOpen] = useState(false)
   const confirm = useAction(onConfirm)
+  // Once the action is sent, closing the dialog would only hide work that still runs. Keep every exit path open until it settles.
+  const close = () => { if (!confirm.busy) setOpen(false) }
   return <>
     <Button variant={variant} size="sm" icon={icon && <Icon name={icon} size={14} />} onClick={() => setOpen(true)}>{label}</Button>
-    <Modal open={open} onClose={() => setOpen(false)} title={title} closeLabel={t('close')} description={message}
+    <Modal open={open} onClose={close} title={title} closeLabel={t('close')} description={message}
       footer={<>
-        <Button variant="ghost" onClick={() => setOpen(false)}>{t('cancel')}</Button>
+        <Button variant="ghost" disabled={confirm.busy} onClick={close}>{t('cancel')}</Button>
         <Button variant="primary" disabled={confirm.busy}
-          onClick={() => { void confirm.run().then(done => { if (done) setOpen(false) }) }}>{t('confirm')}</Button>
+          onClick={() => { void confirm.run().then(done => { if (done) setOpen(false) }) }}>
+          {t(confirm.busy ? 'confirming' : 'confirm')}</Button>
       </>} />
   </>
 }

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { KV } from '../src/kv.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let host: Host
@@ -40,6 +43,36 @@ it('holds a DSH launch paused while workspace preparation was in flight', async 
   prepare.resolve()
   const { sessionId } = await accepted
   expect(host.deliveries.mock.calls.filter(([m]) => m.sessionId === sessionId)).toHaveLength(0)
+})
+
+it('does not launch a worker from a non-empty workspace left by failed preparation', async () => {
+  const prepare = Promise.withResolvers<void>()
+  host.hooks.prepare = prepare.promise
+  const settings = host.runtime.store.settings()
+  host.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, prepare: 'echo prepare' } })
+  const accepted = host.acceptedTicket(feishu('1', 'Prepare before working'))
+  await vi.waitFor(() => expect(host.subprocess.spawn.mock.calls.some(([spec]) => spec.argv.at(-1) === 'echo prepare')).toBe(true))
+  const ticket = host.runtime.store.tickets.open()[0]!
+  await mkdir(ticket.execution!.directory, { recursive: true })
+  expect(host.runtime.store.get(KV.dsh.preparing(ticket.id))).toBe(ticket.execution!.directory)
+  await writeFile(join(ticket.execution!.directory, 'partial.txt'), 'unfinished preparation')
+  prepare.reject(new Error('prepare failed after writing files'))
+  const { sessionId } = await accepted
+  expect(host.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)).toMatchObject({ report: { state: 'failed' } })
+  host.hooks.prepare = undefined
+  await host.runtime.engine.retryTicket(ticket.id)
+  await host.runtime.idle()
+  expect(host.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)).toMatchObject({ report: { state: 'failed' } })
+  expect(host.deliveries.mock.calls.filter(([m]) => m.sessionId === sessionId)).toHaveLength(0)
+  expect(await readFile(join(ticket.execution!.directory, 'partial.txt'), 'utf8')).toBe('unfinished preparation')
+  expect(host.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.at(-1) === 'echo prepare')).toHaveLength(1)
+  // An operator can preserve the failed attempt elsewhere and explicitly retry a fresh workspace.
+  await rename(ticket.execution!.directory, ticket.execution!.directory + '.partial')
+  await host.runtime.engine.retryTicket(ticket.id)
+  await host.runtime.idle()
+  expect(host.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' })
+  expect(host.runtime.store.get(KV.dsh.preparing(ticket.id))).toBeUndefined()
+  expect(host.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.at(-1) === 'echo prepare')).toHaveLength(2)
 })
 
 it('a DSH-only profile launches urgent work ahead of older normal work', async () => {

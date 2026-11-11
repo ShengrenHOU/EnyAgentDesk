@@ -49,6 +49,14 @@ Source plugins register their background loops through `SourceHost.runSource`. R
 
 All Engine methods are synchronous. Each command changes its aggregates in one transaction. `evaluateDue` uses a separate transaction for each Eval or Ticket it changes. Ports enqueue external work inside the transaction; adapters perform it after commit. Invalid requests throw `UserError`.
 
+### Eval admission backpressure
+
+`Engine.evaluateDue` admits at most four undecided Evals, including both undelivered candidates and delivered candidates awaiting a Decision. Each gate-strength lane (`explicit` and `inferred`) may hold at most three, reserving one slot for the other lane even when that slot is idle. The gate, not `human`, source identity or message text, determines the lane. This bounds admission to the existing assessor; the assessment effect's separate delivery concurrency is not a bound on undecided work. Direct synchronous `decide` calls still finish immediately and do not consume an in-flight slot.
+
+Waiting evidence remains in `Thread.pending` without an Eval, candidate effect or running timeout. Within each lane, Threads are considered by persisted `evalQueuedAt` (local enqueue time, not source event time), with Thread key as a deterministic tie-breaker. New evidence on a waiting Thread preserves its age. Expiry and reassessment join the tail, so retries cannot continuously overtake waiting Threads. Legacy Threads without that optional field use `createdAt`, a stable conservative fallback. Pause and SQLite restart preserve these fields. Rejected or worker-owned pending evidence is still cleaned through the existing gate/ownership paths even when admission is full.
+
+This is Thread-level FIFO fairness, not per-IM/source quotas, semantic batching, relevance filtering, or a fresh-ordinary-message fast lane. A large finite ordinary backlog still takes time to drain. An explicit message arriving on a Thread already being evaluated waits for that Eval; reserved capacity does not preempt the per-Thread Eval or its evidence. Existing excess in-flight Evals after an upgrade drain normally; they are not cancelled or fabricated as completed. Already-delivered floods and historical `unavailable` Decisions are not repaired automatically. The timeout still starts at candidate delivery, not model acknowledgement. Trigger identity, subscriptions, authorization and Ticket creation semantics are unchanged. See the IM triage modules in the source index below.
+
 The Engine exposes one entry point and delegates to five internal parts. It owns each command's transaction. Commands spanning parts, such as `attach`, `evaluateDue` and `policyChanged`, call the parts in sequence.
 
 Each part extends `EnginePart` (`src/core/part.ts`), which provides options and shared reads. Dependencies between the parts flow in one direction:
@@ -71,7 +79,7 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 | Sources | `bindThread(ticketId, thread, own)` | Makes an open Ticket follow one of the Source's Threads, such as a pull request's, `own` when the Ticket opened it; a closed Thread bound again is open again. The Threads' closes, not a `ready` Report, end the Ticket |
 | Sources | `threadClosed(thread, outcome, at)` | A Thread closed: each open Ticket that follows it records the close, and ends once it is done with the Threads it follows (`followsDone`): no Thread it opened is open, or, when it opened none, every Thread it follows closed. It ends `merged` or `closed` as the latest of those closes did, unless work resumed after the close has not reported `ready`, or its Executor took up, by acknowledging or answering it, a person's follow-up it decides after its latest Report other than `progress`, or the end of its last turn; a `dropped` Report then ends it as the close did |
 | Main Session | `candidate(triggerId)` | The Eval that holds a Trigger, as its assessor sees it |
-| Main Session | `candidateDelivered(evalId)` | The Eval's candidate reached the main Session: its deadline counts from now |
+| Main Session | `candidateDelivered(evalId)` | The main Session consumed the Eval's candidate from its inbox: its deadline counts from now |
 | Main Session | `decide(triggerId, outcome)` | Records an Eval Decision, or a direct Decision for an explicit request. Accept creates the Ticket, Mandate, Assignment, Subscriptions and acknowledgement atomically. An inferred candidate ignored from its card records `ignoredFromCard` before the supplied reason. While `followupOwners` still owns a human follow-up, only stop is allowed |
 | Main Session | `attach(ticketId, triggerId, note?)` | Routes a Trigger to a Ticket it points at, whose Executor then decides it as a follow-up, and ends the Eval that holds it, whose other Triggers wait for a fresh Eval; an ended Ticket resumes under its Mandate at once unless processing is paused. A follow-up an Executor still decides is refused, as is one routed back to the Ticket that handed it back |
 | Main Session | `requestStatus(ticketId)` | Asks a waiting Executor Session for its status, and answers whether it asked |
@@ -96,7 +104,7 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 | Executor | `handback(ticketId, triggerId, reason)` | Records that the Ticket hands back a Trigger that reached it, with the reason its candidate carries, and queues it for a fresh Eval once no other Ticket decides it, if this Ticket did; it answers whether it queued it. A Ticket hands back each Trigger once and keeps its Subscription |
 | Executor | `assignmentInterrupted(ticketId, assignmentId)` | An Assignment was running when the host stopped: one interrupted mid-work, or one that received an Input after its latest Report, starts again with a recovery note and the Inputs delivered to it that its Executor Session did not take, as a retry does; one that had reported since keeps its Session. The DshExecutor reports each at start (`resume`), oldest Ticket first, and queues again a launch that waits |
 | Executor | `assignExecutor(ticketId, executor, handoff?)` | Records the Executor that owns a Ticket's work and the handoff that moved it there: its startup binding, a transfer between executors, or a continuation of stopped work |
-| Passes | `evaluateDue()` | Unless processing is paused: starts the Evals of the Threads whose queued Triggers wait, one per Thread with the Triggers queued meanwhile as one batch; queues the Triggers of an Eval past its deadline again, twice in a row, and records it `unavailable` the third time; and resumes the ended Tickets a person's message reached during a pause, if their Mandates still hold. An Eval whose candidate has not reached the main Session does not expire. While processing is paused, no Eval expires, and once it resumes each deadline moves later by the pause's length |
+| Passes | `evaluateDue()` | Unless processing is paused: starts the Evals of the Threads whose queued Triggers wait, one per Thread with the Triggers queued meanwhile as one batch; queues the Triggers of an Eval past its deadline again, twice in a row, and records it `unavailable` the third time; and resumes the ended Tickets a person's message reached during a pause, if their Mandates still hold. An Eval whose candidate is still unread in the main Session inbox does not expire. While processing is paused, no Eval expires, and once it resumes each deadline moves later by the pause's length |
 | Settings | `policyChanged(from, to, effects)` | Tells each live Ticket the change bears on how (`policyEffects` in `src/policy.ts`: a rule it was accepted under changed or no longer applies, its requester may no longer start work, or proactive work is no longer accepted), and restarts the Evals in progress under the new version |
 
 The Engine keeps batching, authorization, fan-out, resume and attention lifecycle rules private. Several shared predicates make these rules consistent:
@@ -167,6 +175,12 @@ Its interfaces are grouped by purpose:
 
 `afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
 
+### Lines
+
+`src/app/lines.ts` owns work lines: a long-lived owner goal that groups Tickets across stages and Sessions. It stores one `line:<id>` KV record per line, with the line's title, status, ordered Ticket ids and the judgements that put each Ticket there, continued it, or closed or reopened the line. The coordinator uses context to decide whether goals are the same; titles never establish identity or automatically merge lines. Creation retries reuse the native DSH call identity (scoped to the main Session), or the already accepted Ticket identity in routing. Existing line ids stay readable without migration. `reassign` owns membership correction: a move updates both line records in one transaction; a detach removes only the link. Corrections keep the actor, reason and source/destination names and ids, refuse stale links and closed destinations, and never write Tickets or change execution/authority. The owner HTTP route and main Session's `detach`/`move` actions call this same command.
+
+The module is a plain application service over the Store's KV records and Ticket reads; it holds no Engine state, grants no authority and routes nothing. `src/app/tools/main.ts` is its only writer: `orchestrator_line` searches lines and unlinked Tickets, opens, attaches, continues, closes and reopens them; `orchestrator_route` accept can create or join a line in the same transaction as the new Ticket. `continue` records the judgement and calls `Engine.attach` in one transaction, so a refused follow-up leaves no evidence claiming it was continued. `summary`, `detail`, `linesView`, `unlinkedTickets` and `search` are the read model used by the `GET lines` and `GET lines/:id` management routes, the Today panel's line view, and the main Session's `lines` and `line/<id>` resources; `unlinkedTickets` reports the open Tickets on no line, whole count and at most ten Items, and `linesView` keeps ten closed lines while `closedTotal` reports the whole number. A line closes only when none of its Tickets is open, and a closed line is reopened only by an explicit judgement with evidence, never by a message.
+
 ### Effects
 
 `Effects` (`src/app/effects.ts`) is the durable side-effect queue. A command calls `enqueue(kind, key, payload)` inside its transaction; execution begins only after commit.
@@ -177,7 +191,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
-| `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
+| `assessment` | MasterAssessor | Queues at most one unread candidate notice in the main Session, holding remaining assessments durably outside its inbox; after consumption starts the Eval deadline. Stale candidate notices are pruned without removing owner messages or worker reports | 4, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
@@ -219,6 +233,56 @@ Transient provider and network failures get three retries. Launches use effect b
 Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestrator_eval_read` and `orchestrator_eval_decide`. They provide bounded Thread context through `SourceRegistry.threadContext`, repository context, and decision submission. A kind without a context reader supplies only the Trigger and batch.
 
 `assessmentOutcome` converts the model's answer for `Engine.decide`. Evals checks inferred acceptance against the current Policy again.
+
+### Shadow IM triage (stage B of issue 99)
+
+`SourceKind.imEvidence` optionally exposes native provider/account/conversation/message/version identity and partial-content status. `SourceRegistry` resolves it only for an enabled, currently listened source. The activity adapter supports WeChat and Feishu messages, not document events. Other IM plugins use the same capability; the application does not parse platform metadata. Source Thread identity and subscriptions stay unchanged.
+
+`ShadowTriage` is an explicit replay consumer, accessed by the main Session's `orchestrator_triage_shadow_claim/read/context/submit` tools. Tools are registered only with the operator profile flag `triageShadow: true` (default false); normal sessions pay no added tool-context cost. It is not automatically scheduled and does not replace, suppress or acknowledge old Evals. A request selects up to 200 stored Trigger IDs. The service groups them by source/provider/account/conversation, in event-time/ID order, with at most 32 messages, 32,000 characters and a 15-minute span per batch. Individual text is bounded to 8,000 characters and truncation remains partial. At most four live shadow leases exist; excess IDs are returned as deferred, never marked consumed. These are replay bounds, not production debounce or fairness promises. Native root references remain evidence within a conversation; they do not create subscriptions or force a semantic merge.
+
+Batch membership and one shadow coverage pointer per Trigger persist in existing KV records. Claims expire after five minutes; retry keeps exact membership and increments generation. A changed source configuration/settings revision requires renewal after expiry; changed immutable input/native identity is rejected and must arrive as a new Trigger version. Disabled sources cannot be read or committed. Duplicate exact submissions return the saved result; stale generations, expired claims, changed inputs, missing/foreign/duplicate coverage and inconsistent matter references are refused atomically.
+
+Each model response may describe zero or many semantic matters, with one message supporting several matters, but every input has exactly one coverage item (`reply/act/know/none/unknown`). Partial evidence must remain unknown in this slice. The reported model label is model-supplied audit data, not verified model identity. Version `im-shadow-v1`, timestamps, input fingerprints and settings revision identify the snapshot. The submitted selected window is never represented as complete conversation history or proof of current actionability; later replies/cancellations and native ordering gaps still need contextual validation.
+
+No Ticket, Decision, disposition, Thread, source cursor/ACK, effect or Outbox is written. Existing business evaluation continues independently, so this opt-in comparison adds work and is **not a production load-reduction rollout**. Rollback ignores these new KV prefixes; old business state and schema version are untouched. Completed shadow judgments remain readable while the source still permits the same evidence. No migration of old pending/evaluating/unavailable records is attempted.
+
+Bounded native conversation context is now an optional shadow preparation step; the cookbook describes its provider and gap contract. It does not change `contextComplete: false` or promote results.
+
+Next stage must implement one durable ownership switch between passive intake and batch triage, current-conversation context/late-version handling, recovery/fair scheduling and necessary-decision projection before activating automatic intake. Shadow matters cannot be promoted through this API. Genuine semantic quality requires a model replay and human review; the tests validate host contracts with deterministic model outputs, not accuracy.
+
+### Controlled IM pending handoff (stage C1 of issue 99)
+
+关联 #99，叠加在 #173 的影子批处理之上。此 C1 切片是安全控制前置条件，**不是积压问题的最终解决方案**。没有自动接管新消息，没有生产语义判断、事项提升、通知或“已处理 / 无需行动”结论。影子结果与本交接账本保持独立，不能据 shadow `none` 自动移走队列。
+
+#### 能力归属与限制
+
+- Core 的 `TriggerDisposition.triage` 是唯一持久独占标记；`TriageHandoffs` 负责检查、移出 pending、阻止其他业务路径，以及显式恢复。其他 disposition 字段和历史不变。
+- App 的 `TriageHandoffs` 只保存每次最多 200 个 ID 的 manifest、队龄快照、版本指纹与回执。与 Engine 使用**同一个 Store**，标记、pending 与回执在同一个 `Store.atomic` 事务中提交。构造时拒绝不同 repository。
+- 默认 `triageHandoff: false`。单独启用后只有主控 Session 获得 preview / adopt / read / release 工具，工作会话没有工具。默认主控上下文成本不变。
+- 选择必须为 1..200 个不同的、当前 Source `imEvidence` 可解析的被动 inferred pending Trigger。拒绝 addressed 请求、当前 Eval、旧 Decision、旧 evalId、Ticket origin / input、fanout / context / handback / ack、相关线程或关联线程订阅。即使历史所有者已结束也保守拒绝。本轮比最终生产迁移严格，不能声称已迁移或清完现有积压。
+- 历史 Ticket 引用查询最多检查 5000 条 Ticket，超过直接拒绝整个预览，不以未检查作为 eligible。此预算不是对生产容量的承诺；后续确有需要再增加专用引用索引。
+- 预览及接管比较 Trigger 内容、来源原生身份 / 配置、设置 revision、policy version、当前资格和队龄。任何变化重新预览；不部分接管。
+- 不删除或改写 Trigger、Decision 历史、Ticket、来源游标 / ACK、Effects 或 Outbox。新消息仍沿旧入口进入自身 pending，不能因为同线程的旧 ID 被持有而消失。
+
+#### 受控操作
+
+建议先暂停自动处理，再在明确要求下预览选定 ID，使用返回的 fingerprint 和稳定 owner ID 接管。处理暂停不禁止预览、接管或释放。接管不是完成：证据仍待补齐上下文和生产判断。没有 lease 到期释放，也没有后台自动激活。
+
+owner ID 一次性绑定完整选择；同 owner + 同 fingerprint + 同 ID 重试返回原回执，已释放 owner 不再次接管。新的接管需新 owner。release 仅按已存 manifest 的 owner + generation 恢复，不能传入任意 IDs。所有标记先验证后提交，失败不部分释放。
+
+释放恢复原 ID，队龄取原快照与其他待处理输入安全较早者，不覆盖新到达的 pending。释放本身不评估、不 ACK、不发通知；恢复到现有 Eval 管线，后续按当时 policy / scope 处理。来源仍关闭时，下一次正常 pass 可能留下 gate 拒绝的 `ignore` Decision；这不是模型完成了生产语义判断，也不承诺重开来源后同批自动继续。原 Trigger 与该拒绝历史均保留可审计去向。
+
+#### 关闭来源、关闭控制与回退
+
+关闭来源不会阻止显式 release，也不允许读取已禁用来源的原文。本控制接口从不返回原文，只有 ID、队龄、owner 和状态。
+
+关闭 `triageHandoff` 不清除标记、不把持有证据自动送回 Eval。现有 overview 的运行问题提示及 status 显示“held awaiting context and production judgment (not processed)”数量与最多 20 个 owner 引用；即使工具关闭仍可见。要释放时明确重新启用此控制开关即可，**不必重新启用消息来源**。
+
+**禁止直接降级到不认识该标记的旧二进制。** 先使用仍认识标记的版本显式释放全部持有证据或完成经过验证的状态迁移，核对 held 数量为零，再按部署文档备份和切换。仅关配置开关不等于完成回退，恢复旧数据库快照也可能丢失之后的新输入。
+
+#### 后续生产切片
+
+仍需实际、完整而有界的当前会话上下文、晚到 / 编辑版本处理、公平调度、真实模型质量验证和必要决定投影，再讨论生产接管。此切片没有把影子判定当成业务事实，也没有降低真实待判断证据总数。
 
 ### Settings
 
@@ -339,6 +403,20 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/delivery.ts` | `AgentDelivery`: shared DSH transport for Sessions and Source plugins; delivers once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
+| `src/core/triage-handoffs.ts` | Strict passive-pending eligibility, exclusive ownership and exact release, with no semantic decisions |
+| `src/app/triage-handoffs.ts` | Same-Store controlled handoff manifests, preview fingerprints and idempotent release receipts |
+| `src/app/tools/triage-handoffs.ts` | Opt-in main-only preview/adopt/read/release controls, separate from shadow model results |
+| `src/sources/im-context.ts` | Host-bounded native IM context manifests, scope/window validation, gaps and anchor comparison |
+| `src/app/automatic-triage.ts` | Atomic passive intake ownership, bounded durable legacy scanning, debounce and fair production dispatch |
+| `src/app/im-evidence-revisions.ts` | Native identity/version observation watermarks and conservative newer-known-evidence projection |
+| `src/app/tools/automatic-triage.ts` | Main-only paginated intake coverage and explicit bounded owner recovery |
+| `src/app/triage-matters.ts` | Canonical read-only cross-batch suggestions, exact historical evidence reads, CAS membership and reversible audit |
+| `src/client/triage-matters.tsx` | Paginated canonical suggestion consumer, provenance gaps and source-permission redaction |
+| `src/app/production-triage.ts` | Explicit production IM batches, per-anchor context and read receipts, shared assessment capacity, immutable semantic results and source-aware grouped projection |
+| `src/app/tools/production-triage.ts` | Main-only production lifecycle, paginated context and exhaustive result submission; mutation receipts contain metadata only |
+| `src/client/production-triage.tsx` | Read-only grouped workbench judgments and nested coverage audit, separate from business completion |
+| `src/app/triage.ts` | Opt-in shadow IM batches, exhaustive per-message coverage, leases and generation-checked semantic results; no business routing |
+| `src/app/tools/triage.ts` | Main-Session-only shadow replay claim/read/submit tools |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
@@ -350,6 +428,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
+| `src/app/lines.ts` | Work lines: the `line:<id>` KV records, `search`, `summary`, `detail`, atomic membership correction (`reassign`) and the open, attach, continue-evidence, close and reopen rules; it grants no authority and routes nothing |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
 | `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
@@ -365,6 +444,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
+| `src/infra/version.ts` | The running build's packaged version, the source commit, repository and build time the artifact records, and the comparison with the default-branch commit its Source last saw |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
 | `src/sources/kind.ts` | The `SourceKind` protocol |
@@ -379,14 +459,15 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/activity.ts`, `src/sources/activity-types.ts` | Owner-delegated recent-activity Source, durable scan ranges, source health and private delivery audience checks |
 | `src/sources/activity-lark.ts`, `src/sources/activity-wechat.ts` | Existing user Lark CLI and native read-only WeChat MCP adapters; source-owned acknowledgment after durable intake |
 | `src/sources/workbench.ts` | Explicit native discussion delegation, immutable context prefix, per-request task threads and replay checks; Host/UI wiring is tracked in Issue #22 |
-| `src/sources/workbench-session.ts` | Reads bounded original user/assistant evidence through DSH Session Controller, retaining attachment identities and marking truncation |
+| `src/sources/workbench-session.ts` | Reads bounded original user/assistant evidence through DSH Session Controller, retaining attachment identities and marking truncation; `discussionWindow` gives a Worker a read-only page of the owner's last 24 hours |
 | `src/sources/workbench-host.ts` | Optional native workbench plugin; registers owner-authenticated delegation on the DSH Connection carrier |
 | `src/sources/workbench-files.ts` | Task-local file publication and authenticated readback, with real-path containment and content-hash checks |
 | `src/sources/workbench-tools.ts` | Natural-language discussion handoff and linked-task status using original owner message evidence; excludes managed and subagent Sessions |
 | `src/client/workbench.tsx` | Native Session-row delegation and linked task view, with retained request identity on uncertain submissions |
-| `src/client/owner-desk.tsx` | Owner work projected beside the native conversation from the existing overview |
+| `src/client/owner-desk.tsx` | Owner work projected beside the native conversation from the existing overview, with a one-line answer on each Ticket that carries a Question |
 | `src/client/reply-form.tsx` | Shared required multiline reply form for the daily, conversation and Ticket views |
-| `src/client/personal-workbench.tsx` | Today's decision queue: one row per pending Question with the agent's recommendation and draft, one-click accept, revise, defer or no action, folded corrections, and running work below; detailed discussion opens the main Session |
+| `src/client/quick-reply.tsx` | One-line reply control: on a Ticket card, and under the newest completed Turn of the main Session, sending into the same Question or Session the composer would |
+| `src/client/personal-workbench.tsx` | Today's decision queue: one row per pending Question with the agent's recommendation and draft, one-click accept, revise, defer or no action, folded corrections, running work below, and the open lines with their active Ticket, latest result and recorded judgements; detailed discussion opens the main Session |
 | `src/sources/workbench-focus.ts` | Model-written reading projection of the owner focus, while Tickets and Threads remain the source of business state; the panel keeps it as a manually refreshed reference |
 | `src/sources/workbench-queue.ts` | The owner decision queue: a read model over pending Questions, plus this Source's own deferral and reversible “no action needed” records |
 | `src/app/github-migration.ts` | Atomic legacy repository identity upgrade, preserving ticket/session/receipt identities and checkpoint ownership |
@@ -414,6 +495,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
 | `src/client/deployment.tsx` | The Deployment settings, also shown in DeepSeek Harness's Plugin Manager |
 | `src/client/draft.tsx` | Settings drafts: `draftReducer`, their states and their merge with a newer saved revision, `saveBarText`, the save bar's line, and the save bar |
+| `src/client/management-draft.ts` | The Ticket management draft: the remote base of each field, local edits, same-field conflicts, and the patch that contains only edited fields |
 | `src/client/controls.tsx` | Local copies of DeepSeek Harness's controls, which follow its markup, keyboard behaviour and design tokens, since the bundle does not import `@deepseek-ai/dsh-client-ui-primitives`; they read no context |
 | `src/client/widgets.tsx` | The small components the pages share, which read the panel's context: sections, page heads, load states, times, links, confirmed actions, the setup check and Markdown |
 | `src/client/rows.tsx` | The rows the pages share: a Ticket, a Thread and a Decision, a Thread's chip, and the folding of runs of automated messages |
@@ -424,7 +506,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
-| `src/app/followups.ts` | Durable next-check times and idempotent wakeup receipts on delegated tickets |
+| `src/app/followups.ts` | Durable next-check times and idempotent wakeup receipts on delegated tickets, plus their one-way move to a DSH Host Schedule automation |
 | `src/app/management.ts` | Ticket priorities, deadlines, pause state and shared ordering |
 | `src/app/tools/followup.ts` | Bounded scheduled follow-up tools |
 | `src/executor/router.ts` | Persistent executor ownership and shared capacity |
@@ -440,6 +522,21 @@ Some generic modules still refer directly to GitHub or Feishu:
 | --- | --- |
 | `tests/routing-requirements.spec.ts` | Coordinator route omissions require correction before accepting work |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
+| `tests/assessment-delivery.spec.ts` | Shared legacy/production unread admission, durable per-request consumption, exact generated-notice cancellation and model pre-step validation |
+| `tests/automatic-triage.spec.ts` | 500-message consumed batching, Runtime interception, fair migration, opt-out, recovery, timestamps and revision fencing |
+| `tests/production-projection.spec.ts` | Complete paginated history, global unresolved counts, ownership and source redaction |
+| `tests/production-pagination-panel.spec.tsx` | Actual older/latest-page UI consumer, refreshing and stale authorization handling |
+| `tests/triage-matters.spec.ts` | Cross-batch continuation, related/split audit, citations, CAS, legacy paging, immutable receipts and revocation |
+| `tests/triage-matters-panel.spec.tsx` | Canonical projection UI, gaps/version uncertainty, full paging and refresh redaction |
+| `tests/production-triage.spec.ts` | Production effects, per-input read/commit CAS, native WeChat adapter, shared admission, revocation, retries/rollback and schema downgrade fencing |
+| `tests/production-triage-panel.spec.tsx` | Actual read-only grouped UI consumer with nested audit and no business action controls |
+| `tests/triage-handoffs.spec.ts` | Atomic failure and eligibility refusal, routing fences, restart, source/flag disable, queue-age rollback and Runtime tools/status |
+| `tests/im-context.spec.ts` | Generic IM collector scope, snapshots, gaps, budgets and source fencing |
+| `tests/im-context-triage.spec.ts` | Shadow context generation/settings/configuration fences, transaction boundaries and CAS |
+| `tests/im-context-wechat.spec.ts` | Native WeChat bounded read-window identity, pagination, outgoing evidence and no ACK |
+| `tests/im-context-lark.spec.ts` | Native Lark bounded conversation history, reread anchors and explicit coverage limits |
+| `tests/im-triage.spec.ts` | Shadow semantic batches, per-message coverage, bounds, SQLite recovery, stale commits and source capabilities |
+| `tests/eval-backpressure.spec.ts` | True in-flight admission bounds, explicit/ordinary reserved slots, durable FIFO age, retry fairness, pause/restart, legacy excess and retained evidence |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
@@ -449,11 +546,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/github-identity.spec.ts` | Repository-qualified object lookup, channel links and rejection of mismatched outbound targets |
 | `tests/activity.spec.ts`, `tests/activity-lark.spec.ts`, `tests/activity-wechat.spec.ts` | Activity ownership, pause/stop, independent checkpoints, private audience, user-identity Lark reads and isolated named MCP dispatch |
 | `tests/workbench.spec.ts` | Native delegation identity, owner and context boundaries, replay, isolated task threads and captured-context pagination |
-| `tests/workbench-session.spec.ts` | Native Session evidence boundaries, notice/reasoning exclusion, attachment identity and bounded context capture |
+| `tests/workbench-session.spec.ts` | Native Session evidence boundaries, notice/reasoning exclusion, attachment identity, bounded context capture and the owner-conversation window |
 | `tests/workbench-host.spec.ts` | Native carrier registration, persisted history delegation into a real ticket, caller-field rejection and unavailable-source failures |
 | `tests/workbench-client.spec.tsx` | Discussion action, no implicit submission, uncertain-submit replay and navigation to linked work |
-| `tests/owner-desk.spec.tsx` | Owner desk rendering of the existing overview rows |
-| `tests/personal-workbench.spec.tsx` | The decision queue's advice and one-click outcomes, folded corrections, silence when empty, and the running work and reference sections |
+| `tests/owner-desk.spec.tsx` | Owner desk rendering of the existing overview rows, and the one-line answer that leaves the full editor closed |
+| `tests/quick-reply.spec.tsx` | The one-line reply control, the single reply under a Session's newest Turn, its send, and no reply outside the main Session |
+| `tests/personal-workbench.spec.tsx` | The decision queue's advice and one-click outcomes, folded corrections, silence when empty, the running work and reference sections, and the line list with its recorded judgement |
+| `tests/lines.spec.ts` | Work-line grouping and search evidence, one line per Ticket, closure only after every stage ended, explicit reopen, the derived line view, and open Tickets on no line |
+| `tests/lines-tool.spec.ts` | `orchestrator_line` search, view, open, attach, continue and close; accepting a new stage into a line atomically; and a closed line refusing work until an explicit reopen |
 | `tests/workbench-queue.spec.ts` | Pending Questions with advice, deferrals until due, reversible “no action needed”, and stale-question refusal |
 | `tests/session-workspace.spec.ts` | Main and worker Sessions keep their execution directories without creating sidebar Workspaces; legacy main registrations are detached |
 | `tests/workbench-focus.spec.ts` | Reading projection of the owner focus, including absent optional fields |
@@ -481,6 +581,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/version.spec.ts` | The packaged version the build records, and when a running build is behind the source its GitHub Source reports |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
@@ -493,6 +594,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
+| `tests/ticket-management-draft.spec.tsx` | The Ticket management editor across polls: draft survival, same-field conflicts, edited-only saves, and failed or ended saves retaining values |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
@@ -603,6 +705,7 @@ Settings and prompt saves return the saved configuration. Policy sync returns th
 
 - The Trigger text, up to 4,000 characters, with image ids and other Triggers in the batch.
 - Up to eight `related_tickets`, open ones first, and `tickets_total`.
+- Up to five `related_lines` recalled from the Trigger's words, each with `matched` terms, `updated_at`, its most recently changed open Ticket (`active`), up to three `recent_tickets` with a short report `preview`, and a `read` pointer to `orchestrator_line action=view`; the fixed `note` states that recall is evidence, not a membership verdict. No recalled line omits the field.
 - The Eval's `policy_version`.
 - A Thread window: the first five messages and five on either side of the Trigger. Messages use `{id, from, at, text}`, normally limited to 400 characters, or 1,200 for the two on either side. Truncated messages include `chars`; image references use `images`.
 - Other loaded messages as `{id, from, preview}` stubs of 50 characters. `orchestrator_eval_read` expands them by id.
@@ -616,7 +719,9 @@ Ticket cards use the closed `TICKET_STATES` set from `src/app/cards.ts`: an open
 | Resources | Content |
 | --- | --- |
 | `tickets`, `triggers`, `threads`, `decisions` | Paged lists as `{items, next_offset}`; activity lists put newest first |
+| `conversation` | The owner's Main Session discussion from the last 24 hours, newest first, as `{session_id, through_seq, window_start, partial, items, attachments, next_offset}` |
 | `decision/<id>` | One Decision |
+| `lines`, `line/<id>` | Line summaries with their active Ticket, latest result, next check and latest judgement, or one line's member Tickets and judgements; `lines` also lists `recent_unlinked`, the open Tickets on no line |
 | `thread/<key>` | Label, Tickets, recent Decisions and a page of Triggers |
 | `trigger/<id>` | Message text, replied-to Trigger and neighboring messages, excluding CI runs |
 | `ticket/<id>` | Related ids, source-batch Triggers, Threads, and first pages of Assignments and Inputs |
@@ -632,7 +737,7 @@ Source resources include message neighborhoods, `github/pulls/<n>/thread/<commen
 
 An original's messages read in one compact shape, `{id, from, at, text, reply_to?, path?, line?, url?}`, not as GitHub or Feishu records them.
 
-An Executor Session reads only its own Ticket, its Threads, the Triggers that reached it or that its request held, the prompt versions it worked under and the originals, and its pages leave out the ids of what it cannot read, Decisions and other Tickets.
+An Executor Session reads only its own Ticket, its Threads, the Triggers that reached it or that its request held, the prompt versions it worked under and the originals, and its pages leave out the ids of what it cannot read, Decisions and other Tickets. The one exception is `conversation`: the owner's Main Session discussion from the last 24 hours, which any Ticket may read read-only to find workbench improvement candidates, without its own or another Ticket's private data. It is served only while the native workbench Source is enabled with a configured owner; it pages newest first, 20 messages by default and 50 at most, keeps at most 500 messages and 200,000 characters, and its `partial` flag reports an attachment path or message text it could not return whole. Reading it grants no authority and sends or executes nothing.
 
 Every id a page shows reads through one of these, so a Session walks from one object to the next; hashes nothing reads by, such as an Eval's id or a Policy version, stay off the pages.
 
@@ -646,7 +751,7 @@ These messages are steered into the main Session's turn:
 
 | Message | Content |
 | --- | --- |
-| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
+| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `related_lines`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
 | `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop work |
 | `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |
 | `worker_attention` | Ticket card carrying the question |
@@ -677,3 +782,63 @@ Point `DSH_HOME` at a temporary directory and create a new profile there. Copy t
 
 - Trust: which Trigger fields are trusted, such as the Source's actor and Thread membership, and which are not, such as the body and quotes.
 - Deployment isolation: the agent's profile on its own pinned DeepSeek Harness installation, so upgrading DeepSeek Harness elsewhere does not break it.
+
+### Explicit production IM information triage (#99, C3)
+
+WeChat's native `direction` is retained as optional source evidence in activity records, IM identities, bounded context messages and legacy admission projections. Incoming, outgoing and unknown native values are preserved without deriving an owner identity from them; missing senders stay unknown. Direction does not create sender authority, an explicit mandate, a reply destination or a completed-action receipt. Historical records without the field remain unchanged, including their identity fingerprints; the field is not backfilled or used as a new deduplication key.
+
+`triageProduction` is default-off. This slice only consumes an explicitly selected C1 handoff owner through main-Session tools. It does not change automatic intake routing or migrate an existing backlog on startup. Enabling the flag alone does not improve the legacy queue. C1 and C2 remain independent controls.
+
+`ProductionTriage` transfers the exact held membership atomically, groups by native conversation into at most eight inputs/32,000 source characters per batch, and queues a durable `triageAssessment` effect. At most one production batch is preparing/awaiting. It shares the existing four-total, three-per-strength main assessment budget as inferred work, preserving an explicit-work slot. Source reads run outside SQLite transactions with a 60-second whole-batch deadline, per-reader C2 limits, and a 64,000-character aggregate context budget. Repeated windows may be read separately for each anchor in this first implementation. Context budget omissions remain visible gaps.
+
+The effect really delivers an idempotent main-Session prompt. Main-only tools read bounded per-input context pages and submit exact per-message coverage plus zero or more bidirectionally linked semantic matters. Each submitted input names its context hash/revision, and every context page must have been served in order for that attempt. This proves delivery of evidence, not model comprehension or semantic truth. Owner generation, attempt, source identity/configuration, input fingerprints, settings, policy and prompt revision are checked before publication and commit. Native context remains untrusted evidence and grants no authority.
+
+Receipts classify `none`, `informational`, `suggested_action`, or `unknown`. Completion means that message version was judged within the displayed window, never that a business obligation was resolved. Suggested actions are review-only. Unknowns are visibly parked for an explicit re-read; ordinary local-sync information may be classified with native-version uncertainty disclosed. Missing/edited/deleted/partial or mismatched anchors remain unknown; an unverified native version cannot justify `none`. There are no new Tickets, legacy Decisions, notifications, replies or source ACKs. The workbench consumes a grouped read-only projection, with per-message coverage nested as audit detail rather than new individual to-dos. Source/configuration revocation redacts derived titles and reasons as well as original evidence.
+
+The existing core triage fence also covers `production` and `triaged` phases, including direct routing, replay, stale Eval and intake queues. The C1 manifest becomes `transferred`, so C1 release cannot return consumed evidence to legacy Eval. Explicit production rollback restores only unfinished, never-judged inputs with their original queue age and preserves new arrivals. Re-reading completed unknowns creates a successor for only those inputs; rolling back that successor restores the prior triaged fence. Completed information/action suggestions cannot be reopened via retry. Automatic retry loops are absent. Delivery/read failures park visibly; a failed model response may remain awaiting until explicit retry or rollback.
+
+Schema 12 prevents a schema-11/C1/C2 binary from opening production state. Opening this build upgrades the schema even while the feature is disabled. The 10→11 migration is only run for schema 10; 11→12 preserves existing records and reconciles generated held indexes. **Do not lower the schema marker to downgrade.** A previous binary requires its matching pre-upgrade database backup and reconciliation of all later records. Rolling back unfinished batches does not make a production database safe for an older reader, because completed receipts remain fenced. Build validation and Draft PR publication are not deployment or runtime adoption.
+
+The receipt is an as-of judgment of selected inputs and fetched context. New conversation messages arriving after the read do not currently invalidate it or add an automatic stale marker. Cross-batch matter merging and automatic backlog adoption remain separate work. This slice does not claim real-time current actionability or complete offline recovery.
+
+
+Assessment notices use a shared Session delivery contract. Admission is checked synchronously immediately before inbox insertion, after asynchronous history reads; owner/report input wins that race. A request with persisted `user/message` consumption evidence is acknowledged before unrelated unread input is considered. Pending or merely absent input is not consumption. Only exact own-generated assessment type/ID/generation pairs can be pruned from pending inboxes or filtered before a model step. User messages, worker reports and consumed history are not removed. Pre-upgrade legacy candidates without explicit eval_id metadata are conservatively retained, not migrated or pruned by content matching. This includes unread notices produced by #172: they continue to occupy admission until the main Session consumes them, even if their old evaluation has ended. Upgrade does not promise automatic cleanup of this legacy backlog. Already-consumed stale context cannot be withdrawn; generation guards reject its later result.
+
+Production judgment deadlines start once, when durable consumption evidence is first confirmed and persisted, not at enqueue time or the original native event timestamp. Native consumedAt remains audit evidence; delayed confirmation after pause/restart conservatively grants additional judgment time. Pause-only settings changes preserve the attempt (a fingerprint excludes only the paused bit; all other settings and source/policy/prompt identities stay fenced). Maintenance suspends deadlines while paused and parks expired judgments without starting work or returning them to legacy Eval. No-progress maintenance does not rewrite the receipt or its update time. Resume/restart preserves evidence and requires explicit retry after a timeout. Legacy candidates use the same shared consumption acknowledgement rather than assuming enqueue equals consumption.
+
+
+### 自动 IM 接管与历史待判断迁移（#99 后续切片）
+
+`triageAutomatic` 默认关闭，启用必须同时启用 `triageHandoff`、`triageProduction`；旧数据库 pending 迁移还需独立启用 `triageHistorical`。实际路径是 Runtime/Passes receive 的同步 Store 事务：先保持原采集、fanout和显式委托语义，再对核心 preview 证明无旧 owner、无 Eval/Decision/Ticket、无订阅和 fanout 的被动 inferred IM 做 C1 独占接管。事务失败则整条 receive 未提交，来源按原有游标/重试合同处理，不确认丢失的消息。原消息 ID 和持久队列年龄保留。已 ignore/unavailable/accepted 或曾被 Eval 接管的记录不属于该迁移范围。
+
+接管先进入持久化 accumulation，而不是立即逐条请求模型：按 provider/account/conversation 的 JSON 元组摘要及 live/historical lane 分组，静默 2 秒、最长 10 秒、最多 8 条或 32,000 UTF-8 字节封批。按保存消息正文前 4,000 字符计字节，不改变原 Trigger。超过 1 小时的迟到消息进入 historical lane，其他新收消息进入 live lane；这是调度分类，不是事项身份。历史 pending 扫描全部走 historical lane。完整批立即可派发，稀疏批受静默和最大等待约束；达到年龄跨度上限则分批，确保原生上下文窗口不超过七天。
+
+每个 pass 最多扫描 32 条本地 Trigger，25ms 软预算在条目间检查，不等待原生读或模型；单条数据库检查可能超过预算。固定 epoch highwater 与 rowid cursor、逐原因跳过数量、已捕获数量同事务提交。重启不移动未完成 epoch；关闭期间新增的启动前记录保留 nextHighwater，预留待后续 epoch 捕获，不能提前漏入 legacy Eval。已扫描但当时不可接管的记录每 60 秒有界重扫；覆盖表示检查过本地记录，不代表来源全量或全部已判断。仅当前符合 eligibility 的历史待扫项逐条延后 scheduled Eval，同 Thread 的明确委托不被阻塞。
+
+公平派发每 pass 至多一个批，live/historical 交替，lane 内按来源和会话上次派发顺序，再按最老证据年龄选择；最多一个 queued production 批等待既有共享准入，生产仍最多一个 preparing/awaiting。C1追加和 production transfer保持同一所有权，不新建 Ticket或通知。配置、策略、提示词、来源身份变化时旧积累组保留 blocked；pause本身不废弃快照。主会话 `orchestrator_triage_automatic_status` 可分页发现所有 open/sealed/blocked owner及扫描覆盖，`orchestrator_triage_automatic_recover` 可在明确操作请求下整批 retry/release 最多20个owner；配合既有 handoff read/release 和 production retry/rollback恢复。显式 release/rollback保留 claimed排除，不再自动抢回；若返回legacy，之后原有Policy照常处理。
+
+关闭 `triageAutomatic` 不释放 held证据；automatic production 批暂停投递与提交；已preparing/awaiting的批保留共享槽位直到恢复或明确回滚，避免重新开启时产生超额并发。人工显式 production 批不受此开关直接影响，仍遵守共享准入。开启后保持身份和已有消费超时语义恢复。控制关闭时保留 `triageHandoff` 可继续读取metadata与显式回滚。未知判断停留 unknown，配置失效、超时保留 blocked，不自动回复、ACK、通知、建单或声明事情已解决。
+
+本切片把 Store schema 提升至13，包括默认关闭时打开数据库。旧12构建不理解 automatic origin 的停用保护，必须由原版本 guard拒绝读写13，不能降schema标记。回退使用升级前匹配备份，并先核对升级后新增证据。
+
+原生会话观察水位单独保存：按 message/version精确去重，每次新的本地观察递增，即使其事件时间更早；与固定输入身份/来源配置分离，不令繁忙会话无限重试。批记录创建时水位，读取和工作台显示 `newerKnownEvidence`，既有有限覆盖仍可提交。这不是来源实时全量证明；本片没有对仅在原生上下文中发现的新消息建立完整变更索引，也不自动消除旧建议或建立跨批事项身份。
+
+生产回执通过keyset分页的HTTP/API及工作台“更早/最新”消费者完整回看，未决总数和最老时间覆盖全部当前owner，而非仅最新50组。待判断、unknown及suggested_action分列；状态只表示信息判断/待复核，不表示业务义务完成。来源撤销后隐藏派生标题/理由，分页刷新期间不保留旧授权内容。
+
+验收边界：合成500条同会话碎片需至少63批（最多8条/批），不能称为单次事项判断；多个anchor可能重复读取同一原生窗口。本片没有跨批语义合并、业务事项闭环、自动即时/日报发送，也没有运行实例激活或真实来源/模型吞吐验证。
+
+### 跨批次只读事项投影（basic linking）
+
+`TriageMatters` 是应用层的信息阅读投影，不是 Thread、Ticket、Line、订阅或业务完成状态。正式批次仍保存不可变的逐消息 coverage 与 receipt-local matters；`ProductionTriage.submit` 在同一 Store 事务中提交这些回执与可选的 `new / continue / related` 建议。canonical ID 由宿主根据原回执身份生成，模型只提出关联。`continue` 保留各原 local matter 与证据成员；`related` 只新增独立投影及导航边。主控的正式批次读取返回同 native provider/account/conversation scope 的旧事项，分页工具返回修订号；关联必须重新读完同次 attempt 的确切历史 manifest，引用 input Trigger 或 immutable manifest 的 native message/version，标题不是证据。权限、配置、scope、读凭据及 expected revision 由宿主检查，冲突不部分提交。
+
+成员误归并可以通过带 CAS 的 split 撤回，related 边可以独立撤回；修正保留审计与原回执，并保守显示 unknown。修正重试有持久化幂等键。原始消息可以对应 0..N local matters，同聊天不自动归为同一目标。Workbench 与 `GET triage-matters` 消费同一 canonical projection，提供全历史 keyset 分页、总数及最早待复核建议；原回执历史仍独立可读。来源权限或配置变更时隐藏所有相关派生标题、原因、原始成员及审计内容。
+
+升级前的 receipt-local matters 在主控读取对应 scope 时，每次最多导入 25 个已完成回执组，保留 keyset 游标并明确 `legacyRemaining`。导入只建立彼此独立的 canonical identity，绝不猜测关联、重写旧回执或启动全历史重放；尚未导入的记录继续位于原回执历史。候选分页有界，不声称已穷尽或完成历史核对。
+
+本 slice 明确保守处理新证据：自动采集已有的 observation revision 是 scalar，不含可证明的 changes-since 日志。因此 `continue` 不提升旧事项的观察 watermark；较新证据出现后仍标 stale，普通无关联的新消息也不能清掉旧 stale。完整 freshness reconciliation 尚未实现，需要后续具有明确历史 provenance floor 的观察日志，不能把读取 scalar 当作已核对全部变化。忙碌聊天的新到消息不会作废已经完成的逐消息回执。
+
+模型可以根据确切正面当前 context 引用提出 `no_further_action_suggested`，界面仅表示“模型据这些引用不再建议行动”。这不是本人身份确认、已取消、自动 none 或义务已履行；原 coverage 保持不变，unknown local evidence 不允许被提议升级为确定状态。上下文 gaps、native/source-digest 版本依据和缺失 native version 继续展示。读到某人的取消文本不证明其身份或权限。此流程不创建 Ticket、Decision、订阅、ACK、回复、通知或任何业务动作，也不替代业务授权与履约校验。
+
+跨批次 projection 版本将 Store schema 再提升至14（即使 production gate 关闭），以禁止旧13读者绕过跨回执派生文本的递归权限检查。13→14仅更新保护标记，不改任何历史 receipt。不能降低 schema 标记回退；需先核对升级后新数据，再使用匹配的升级前备份。
+
+权限 provenance 由宿主记录，不只相信模型声明的 proposal：已返回的候选/历史摘要以及任何已返回的 context 页（包括尚未读完的页）都可能影响结果。提交前重验这些依赖，保存不可变 receipt 直接依赖根；可由既有根递归覆盖的祖先不反复扁平复制。纠正操作的理由亦保留同样依赖并在写入前重验。候选/审计页面有界，但权限校验仍须遍历实际依赖图，并非宣称总历史读取恒定有界。每次同步 projection/apply 使用请求内 receipt 权限缓存与入队去重，后一次请求重新验证；不缓存可变事项修订或成员，避免权限变更与 CAS 被旧缓存遮蔽。63/500 条含密集历史依赖的测试约束源解析和数据库读取次数，且同一服务实例撤权后立即隐藏文本。

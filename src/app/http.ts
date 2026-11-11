@@ -1,4 +1,6 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
+import { TriageMatters } from './triage-matters.ts'
+import { productionOverview } from './production-triage.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -11,6 +13,9 @@ import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
   from './prompts.ts'
 import { policyVersion } from '../policy.ts'
+import { KV } from '../kv.ts'
+import { packageIdentity, runtimeVersion } from '../infra/version.ts'
+import { repositoryStatePrefix } from '../sources/github-context.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
@@ -30,6 +35,7 @@ import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { ManagementPatchSchema, updateTicketManagement } from './management.ts'
+import { detail as lineDetail, linesView, MembershipConflict, reassign } from './lines.ts'
 
 export interface HttpHost {
   continueStopped?(id: string, instruction: string): { continued: true; ticketId: string; executor: 'dsh' }
@@ -41,12 +47,14 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   transferExecutor?(id: string, request: ExecutorTransfer): Promise<{ changed: boolean; executor: 'codex' | 'dsh' }>
-  readonly followups: Pick<Followups, 'schedule' | 'cancel' | 'list' | 'pending'>
+  readonly followups: Pick<Followups, 'schedule' | 'cancel' | 'list' | 'pending' | 'migrate' | 'automations' | 'cancelAutomation'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
+  /** When this dsh-superagent instance started, the activation time of the running artifact. */
+  readonly startedAt: string
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
@@ -65,7 +73,7 @@ export interface HttpHost {
  * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
  * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
  */
-class RouteError extends Error { constructor(readonly status: 400 | 404, message: string) { super(message) } }
+class RouteError extends Error { constructor(readonly status: 400 | 404 | 409, message: string) { super(message) } }
 async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
   let size = 0; const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -111,12 +119,23 @@ function setupView(runtime: HttpHost) {
     accounts: resolved ? { repository: resolved.repository, agent: resolved.github?.login ?? null, feishu: resolved.feishu ? { appId: resolved.feishu.appId, brand: resolved.feishu.brand, botId: resolved.feishu.botId, name: resolved.feishu.name } : null } : null,
   }
 }
+/** The default-branch commit the GitHub Source last reported, compared with the running build's recorded source. */
+export function sourceHead(runtime: HttpHost) {
+  if (!runtime.configured()) return undefined
+  const { repository, githubRepositories } = runtime.deployment
+  // A multi-repository deployment scopes every Source checkpoint by repository, as the GitHub poller does.
+  const prefix = githubRepositories?.length ? repositoryStatePrefix(repository) : ''
+  const ci = runtime.store.get(`${prefix}${KV.github.branchCi}` as typeof KV.github.branchCi)
+  return ci ? { repository, branch: ci.branch, head: ci.head, observedAt: ci.observedAt } : undefined
+}
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
 export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    triageHandoff: runtime.store.triageHandoffStatus(),
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
+    runtime: runtimeVersion(packageIdentity(), runtime.startedAt, sourceHead(runtime)) }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -165,6 +184,12 @@ function routes(runtime: HttpHost): Routes {
   return {
     'GET state': () => stateView(runtime),
     'GET followups': () => runtime.followups.pending(),
+    'GET followups/automations': () => runtime.followups.automations(),
+    'GET production-triage': ({ query }) => productionOverview(store, trigger => runtime.sources.imEvidence(trigger),
+      z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(50, 100) }).parse(query)),
+    'GET triage-matters': ({ query }) => new TriageMatters(store, trigger => runtime.sources.imEvidence(trigger)).overview(
+      z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(25, 100),
+        active: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
@@ -201,6 +226,21 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
+    'GET lines': () => linesView(store),
+    'GET lines/:id': ({ params }) => {
+      const line = lineDetail(store, params.id)
+      if (!line) throw new RouteError(404, 'Line not found')
+      return line
+    },
+    'POST lines/:id/membership': async ({ params, body }) => {
+      const input = z.object({ ticketId: z.string().trim().min(1), targetLineId: z.string().trim().min(1).nullable(),
+        evidence: z.string().trim().min(1).max(1000) }).strict().parse(await body())
+      try { return reassign(store, { lineId: params.id, ...input, by: 'owner' }) }
+      catch (error) {
+        if (error instanceof MembershipConflict) throw new RouteError(409, error.message)
+        throw error
+      }
+    },
     'PUT tickets/:id/management': async ({ params, body }) => {
       const result = updateTicketManagement(runtime.engine, params.id, ManagementPatchSchema.parse(await body()))
       runtime.requestPass()
@@ -217,6 +257,16 @@ function routes(runtime: HttpHost): Routes {
         .refine(value => !(value.request_id && value.all), 'Choose one request_id or all').parse(query)
       if (!args.request_id && !args.all && runtime.followups.list(id).length > 1) throw new RouteError(400, 'Multiple checks are pending; specify request_id')
       return runtime.followups.cancel(id, args.request_id)
+    },
+    'POST tickets/:id/followup/migrate': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const { request_id } = z.object({ request_id: z.string().trim().min(1).max(200) }).strict().parse(await body())
+      return runtime.followups.migrate(id, request_id)
+    },
+    'DELETE tickets/:id/followup/automation': async ({ params, query }) => {
+      const id = ticket(params.id)
+      const { request_id } = z.object({ request_id: z.string().trim().min(1).max(200) }).strict().parse(query)
+      return runtime.followups.cancelAutomation(id, request_id)
     },
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/continue': async ({ params, body }) => {

@@ -71,6 +71,21 @@ function accepted(h: ReturnType<typeof harness>, id = '1', thread = 't1') {
   return decision
 }
 
+it('refuses a ready report that omits a required skill and records the method and skills it lists', () => {
+  const h = harness({}, { prepareTicket: ticket => ({ ...ticket,
+    execution: { name: ticket.id, directory: '/work', assignment: '', requiredSkills: ['review-weekly-role-progress'] } }) })
+  const ticketId = accepted(h).ticketId!
+  expect(h.repo.tickets.get(ticketId)?.execution?.requiredSkills).toEqual(['review-weekly-role-progress'])
+  expect(() => h.engine.report(ticketId, { state: 'ready', summary: 'Draft done', skills: [{ name: 'other-skill' }] }))
+    .toThrow(/must list the required skills/)
+  const report = h.engine.report(ticketId, { state: 'ready', summary: 'Draft done', method: 'review-weekly-role-progress',
+    skills: [{ name: 'review-weekly-role-progress', path: '/skills/weekly/SKILL.md', revision: 'abc123def456',
+      template: '2026-10-26 weekly review outline' }] }).assignments.at(-1)!.report
+  expect(report).toMatchObject({ state: 'ready', method: 'review-weekly-role-progress',
+    skills: [{ name: 'review-weekly-role-progress', path: '/skills/weekly/SKILL.md', revision: 'abc123def456',
+      template: '2026-10-26 weekly review outline' }] })
+})
+
 describe('owner answers', () => {
   it('saves the answer once, withdraws its question and waits for a read plus worker report', () => {
     const h = harness(), ticketId = accepted(h).ticketId!

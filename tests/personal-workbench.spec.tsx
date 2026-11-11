@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { expect, it, vi } from 'vitest'
+import { expect, it, onTestFinished, vi } from 'vitest'
 import { Workbench } from '../src/client/personal-workbench.tsx'
+import type { LinePageView, LineRow } from '../src/client/api.ts'
 import { PanelProvider } from '../src/client/provider.tsx'
 import { zh } from '../src/client/locales.ts'
 import { fullTime } from '../src/client/text.ts'
@@ -60,9 +61,63 @@ it('shows the agent recommendation and accepts its draft with one click', async 
   expect(document.querySelector('.pw-decision')?.textContent).toContain(advice.reason)
   expect(document.querySelector('.pw-decision')?.textContent).toContain(advice.risk)
   expect(document.querySelector('.pw-draft')?.textContent).toBe(advice.draft)
+  // The question stays the primary body text; advice, evidence and risk are separate readable layers.
+  const card = document.querySelector<HTMLElement>('.pw-decision')!
+  const question = card.querySelector<HTMLElement>('.pw-decision-question')
+  const adviceBox = card.querySelector<HTMLElement>('.pw-advice')
+  expect(question?.textContent).toContain('需要确认按钮颜色')
+  expect(adviceBox).not.toBeNull()
+  expect(question!.compareDocumentPosition(adviceBox!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(card.querySelector('.pw-advice-summary')?.textContent).toBe(advice.summary)
+  expect(card.querySelector('.pw-advice-note')?.textContent).toContain(advice.reason)
+  expect(card.querySelector('.pw-advice-risk')?.textContent).toContain(advice.risk)
+  expect(card.querySelector('.pw-draft')?.getAttribute('tabindex')).toBe('0')
   await click(zh.queueAccept)
   expect(answers).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: 'q1', instruction: advice.draft })])
   expect(document.body.textContent).toContain(zh.queueAccepted)
+})
+
+it.each([true, false])('keeps the Today reply target across card and detail navigation while submitting (success=%s)', async success => {
+  const other = ticketSummary({ id: 't2', title: '另一件事', attention: undefined })
+  server.work = { working: [other], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
+  server.ticketDetails.t2 = { ...server.ticketDetails.t1!, id: 't2', title: '另一件事', attention: undefined }
+  const original = globalThis.fetch
+  let finish!: (response: Response) => void
+  const pending = new Promise<Response>(resolve => { finish = resolve })
+  const bodies: unknown[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/answer')) { bodies.push(JSON.parse(String(init?.body))); return pending }
+    return original(url, init)
+  }))
+  await mount()
+  await click(zh.queueRevise)
+  await type(document.querySelector('textarea')!, '保留第一件事的答复')
+  await click(zh.workbenchSendUpdate)
+  const otherCard = [...document.querySelectorAll<HTMLElement>('.pw-task')]
+    .find(card => card.querySelector('.pw-title-button')?.textContent === '另一件事')!
+  const cardReply = otherCard.querySelector<HTMLButtonElement>('.pw-actions button')!
+  await click(cardReply)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('修复回归')
+  expect(cardReply.disabled).toBe(true)
+  // Reading another Ticket remains available; only replacing the in-flight editor is blocked.
+  await click(otherCard.querySelector<HTMLButtonElement>('.pw-title-button')!)
+  const detailReply = [...document.querySelectorAll<HTMLButtonElement>('button')]
+    .find(button => button.textContent === zh.ownerDeskRevise && !button.closest('.pw-task'))!
+  await click(detailReply)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('修复回归')
+  expect(document.querySelector('textarea')?.value).toBe('保留第一件事的答复')
+  expect(detailReply.disabled).toBe(true)
+  await act(async () => { finish(success ? Response.json({ saved: true }) : Response.json({ error: 'offline' }, { status: 500 })) })
+  await settle()
+  expect(bodies).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: 'q1' })])
+  if (success) expect(document.querySelector('.pw-supplement')).toBeNull()
+  else {
+    expect(document.querySelector('textarea')?.value).toBe('保留第一件事的答复')
+    expect(document.querySelector('.pw-aside-error')?.textContent).toContain('offline')
+  }
+  expect(detailReply.disabled).toBe(false)
+  await click(detailReply)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('另一件事')
 })
 
 it('defers one decision and records a reversible “no action needed” decision', async () => {
@@ -140,6 +195,30 @@ it('shows all checks beyond the four visible task cards and cancels only the sel
   await click(zh.confirm)
   expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(23)
   expect(server.requests).toContainEqual(expect.objectContaining({ method: 'DELETE', path: 'tickets/agenda-0/followup?request_id=first' }))
+})
+
+it('moves a mechanical check to the automation list and deletes it there', async () => {
+  server.person = []
+  const ticket = server.ticketDetails.t1!
+  const check = { id: 'mech', at: '2099-01-01T00:00:00.000Z', reason: '只读核对发布状态', createdAt: '2026-11-08T00:00:00.000Z' }
+  ticket.followups = [check]; ticket.followup = check
+  await mount()
+  await click(document.querySelector<HTMLButtonElement>('.dt-followup-toggle')!)
+  const migrate = [...document.querySelectorAll<HTMLButtonElement>('.dt-followup-agenda button')]
+    .find(button => button.textContent === zh.followupMigrate)!
+  await click(migrate)
+  await click(zh.confirm)
+  expect(server.requests).toContainEqual(expect.objectContaining({ method: 'POST', path: 'tickets/t1/followup/migrate' }))
+  expect(document.body.textContent).toContain(zh.followupMigrated)
+  expect(document.body.textContent).toContain(zh.followupAutomations)
+  expect(server.automations.items).toHaveLength(1)
+  const remove = [...document.querySelectorAll<HTMLButtonElement>('.dt-followup-agenda button')]
+    .find(button => button.textContent === zh.homeCancelFollowup)!
+  await click(remove)
+  await click(zh.confirm)
+  expect(server.requests).toContainEqual(expect.objectContaining({ method: 'DELETE', path: 'tickets/t1/followup/automation?request_id=mech' }))
+  expect(document.body.textContent).toContain(zh.followupAutomationCancelled)
+  expect(server.automations.items).toHaveLength(0)
 })
 
 it('keeps unavailable-evaluation recovery reachable from the daily problem details', async () => {
@@ -345,4 +424,173 @@ it('never regenerates a reading projection by the calendar or by changed evidenc
   expect(refresh).not.toHaveBeenCalled()
   expect(send).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.queueReference)
+})
+
+it('shows a long-lived line with its latest result and its recorded judgement', async () => {
+  const at = '2026-11-09T00:00:00.000Z'
+  const line: LineRow = { id: 'line1', title: '申昊战略入股', status: 'open', createdAt: at, updatedAt: at,
+    ticketCount: 2, openCount: 1,
+    active: { id: 't1', title: '修复回归', updatedAt: at, stage: 'working' },
+    lastResult: { ticketId: 't0', title: '旧工单', at, summary: '阶段结果已归档' },
+    latestJudgement: { at, action: 'attached', evidence: '盘点文档与推进步骤属于同一入股交易' } }
+  const detail: LinePageView = { ...line, judgements: [
+    { at, action: 'opened', evidence: '同一入股交易：申昊智维投资任能' },
+    { at, action: 'attached', ticketId: 't1', evidence: '盘点文档与推进步骤属于同一入股交易' },
+  ], tickets: [
+    { ...line.active!, createdAt: at, report: { state: 'progress', summary: '正在准备对外方案', at }, followups: [] },
+    { id: 't0', title: '旧工单', stage: 'ended', ended: { at, by: 'executor', outcome: 'completed' },
+      createdAt: at, updatedAt: at, followups: [] },
+  ] }
+  server.lines = { open: [line, { id: 'line2', title: '另一个明确目标', status: 'open', createdAt: at, updatedAt: at,
+    ticketCount: 0, openCount: 0 }], closed: [], closedTotal: 0, generatedAt: at }
+  server.lineDetails = { line1: detail }
+  await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
+  expect(document.body.textContent).toContain(zh.lineTitle)
+  expect(document.body.textContent).toContain('申昊战略入股')
+  expect(document.body.textContent).toContain('阶段结果已归档')
+  await click(document.querySelector<HTMLButtonElement>('.pw-line .pw-title-button')!)
+  expect(document.body.textContent).toContain(zh.lineLatestJudgement)
+  expect(document.body.textContent).toContain('盘点文档与推进步骤属于同一入股交易')
+  expect(document.body.textContent).toContain('正在准备对外方案')
+  expect(document.body.textContent).toContain(zh.lineTickets)
+  for (const target of ['line2', '']) {
+    await click(zh.lineCorrectMembership)
+    const form = document.querySelector<HTMLFormElement>('.pw-membership')!
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!
+    expect(submit.disabled).toBe(true)
+    await act(async () => {
+      const select = form.querySelector('select')!
+      select.value = target; select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await type(form.querySelector('textarea')!, '原来的归类需要纠正')
+    expect(submit.disabled).toBe(false)
+    await click(submit)
+    expect(server.requests).toContainEqual(expect.objectContaining({ method: 'POST', path: 'lines/line1/membership',
+      body: { ticketId: 't1', targetLineId: target || null, evidence: '原来的归类需要纠正' } }))
+    expect(document.querySelector('.pw-membership')).toBeNull()
+    expect(document.body.textContent).toContain(zh.lineMembershipSaved)
+  }
+})
+
+it('keeps a loaded queue, labels it stale when a poll fails, and retries it', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  onTestFinished(() => { vi.useRealTimers() })
+  await mount()
+  expect(document.querySelectorAll('.pw-decision')).toHaveLength(1)
+  const previous = globalThis.fetch
+  let down = true
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => down && url.endsWith('/queue')
+    ? Response.json({ error: 'Native workbench is disabled' }, { status: 503 })
+    : previous(url, init)))
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
+  // The last successful list stays readable and says it may be out of date.
+  expect(document.querySelectorAll('.pw-decision')).toHaveLength(1)
+  expect(document.querySelector('.pw-stale')?.textContent).toContain('列表更新失败')
+  expect(document.querySelector('.pw-stale')?.textContent).toContain('最后结果')
+  down = false
+  await click(document.querySelector<HTMLButtonElement>('.pw-stale button')!)
+  expect(document.querySelector('.pw-stale')).toBeNull()
+  expect(document.querySelectorAll('.pw-decision')).toHaveLength(1)
+})
+
+it('keeps the no-action reason when the host refuses it and shows why in the form', async () => {
+  await mount()
+  const previous = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/queue/action')
+    ? Response.json({ error: 'The decision already ended' }, { status: 409 })
+    : previous(url, init)))
+  await click(zh.queueIgnore)
+  const input = document.querySelector<HTMLInputElement>('.pw-ignore-form input')!
+  await type(input, '已当面答复')
+  await click(zh.queueIgnoreConfirm)
+  expect(document.querySelector<HTMLInputElement>('.pw-ignore-form input')?.value).toBe('已当面答复')
+  expect(document.querySelector('.pw-ignore-form [role="alert"]')?.textContent).toContain('already ended')
+})
+
+it('shows a reply failure in the visible supplement panel and asks before discarding its text', async () => {
+  await mount()
+  const previous = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/answer')
+    ? Response.json({ error: 'offline' }, { status: 500 })
+    : previous(url, init)))
+  await click(zh.queueRevise)
+  const input = document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  await type(input, '先按 A 修，补充背景见上一条。')
+  await click(zh.workbenchSendUpdate)
+  // The collaboration panel is the visible one at this width; the error must be inside it, and the text must stay.
+  expect(document.querySelector('.pw-collaboration')?.textContent).toContain('offline')
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')?.value).toBe('先按 A 修，补充背景见上一条。')
+  const discard = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .find(button => button.textContent === zh.homeDiscardDraft)!
+  await click(discard)
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(zh.homeDiscardDraftConfirm)
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')?.value).toBe('先按 A 修，补充背景见上一条。')
+  await click(zh.confirm)
+  expect(document.querySelector('.pw-supplement')).toBeNull()
+})
+
+it('shows a failed full-conversation open in the panel still on screen', async () => {
+  const { openSession } = await mount()
+  openSession.mockRejectedValueOnce(new Error('session unavailable'))
+  await click(zh.homeFullConversation)
+  expect(document.querySelector('.pw-main [role="alert"]')?.textContent).toContain('session unavailable')
+})
+
+it('does not offer to discard the draft while the reply is being submitted', async () => {
+  await mount()
+  const previous = globalThis.fetch
+  const gate = Promise.withResolvers<void>()
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/answer')
+    ? (await gate.promise, Response.json({ saved: true }))
+    : previous(url, init)))
+  await click(zh.queueRevise)
+  await type(document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!, '用蓝色')
+  const submit = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .find(button => button.textContent === zh.workbenchSendUpdate)!
+  await act(async () => { submit.click() })
+  // While the answer is in flight the editor is busy; discarding it is not offered, only the disabled cancel.
+  expect([...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .some(button => button.textContent === zh.homeDiscardDraft)).toBe(false)
+  expect(document.querySelector<HTMLButtonElement>('.pw-supplement button[disabled]')?.textContent).toBe(zh.cancel)
+  gate.resolve()
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) }); await settle()
+  expect(document.querySelector('.pw-supplement')).toBeNull()
+  expect(document.body.textContent).toContain(zh.ticketAnswerSent)
+})
+
+it('keeps a failed no-action error visible after its row leaves the queue', async () => {
+  const items = [{ id: 'q1', ticketId: 't1', attentionId: 'q1', title: '修复回归', question: '需要确认按钮颜色',
+    source: 'feishu', at: '2026-09-23T00:00:00Z' }]
+  await mount(null, null, [], { items, counts: { open: 1, deferred: 0, ignored: 0 } })
+  await click(zh.queueIgnore)
+  await type(document.querySelector<HTMLInputElement>('.pw-ignore-form input')!, '已当面答复')
+  const previous = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/queue/action')
+    ? Response.json({ error: 'The decision already ended' }, { status: 409 })
+    : previous(url, init)))
+  await click(zh.queueIgnoreConfirm)
+  expect(document.querySelector('.pw-ignore-form [role="alert"]')?.textContent).toContain('already ended')
+  // Another action removes the row; the error must not disappear with the form that owned it.
+  items.length = 0
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  expect(document.querySelector('.pw-queue [role="alert"]')?.textContent).toContain('already ended')
+})
+
+it('focuses an opened deliverable preview and returns focus to its trigger when closed', async () => {
+  const url = new URL('/api/superagent-workbench/artifact?id=a1', location.href).toString()
+  const ticket = ticketSummary({ id: 't9', title: '有成果', actions: { retry: false, stop: false },
+    deliverables: [{ title: '报告预览', url }] })
+  server.tickets.open = [ticket]
+  server.work = { working: [ticket], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
+  await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
+  const trigger = [...document.querySelectorAll<HTMLButtonElement>('.pw-actions button')]
+    .find(button => button.textContent === '报告预览')!
+  await click(trigger)
+  const panel = document.querySelector<HTMLElement>('.pw-preview')
+  expect(panel?.getAttribute('tabindex')).toBe('-1')
+  expect(document.activeElement).toBe(panel)
+  const close = [...panel!.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === zh.close)!
+  await click(close)
+  expect(document.querySelector('.pw-preview')).toBeNull()
+  expect(document.activeElement).toBe(trigger)
 })

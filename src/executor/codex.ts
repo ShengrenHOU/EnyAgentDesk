@@ -300,7 +300,9 @@ export class CodexExecutor {
         const first = ticket.assignments.length === 1
         const triggers = first ? ticket.origin.triggerIds.map(id => this.host.store.triggers.get(id)).filter(Boolean) : []
         const text = `${marker}\n${JSON.stringify({ ticket_id: ticket.id, title: ticket.title,
-          assignment: ticket.execution?.assignment, original_requests: triggers,
+          assignment: ticket.execution?.assignment, ...ticket.execution?.requiredSkills?.length
+            ? { required_skills: ticket.execution.requiredSkills } : {},
+          original_requests: triggers,
           execution_stage: this.host.store.get(KV.codex.stages(ticketId)),
           ...(first ? {} : { recovery: 'Continue this ticket from its existing files and history. Do not repeat completed external actions. Pending inputs follow.' }) })}`
         const selected = this.turnModel(ticketId)
@@ -367,7 +369,8 @@ export class CodexExecutor {
         return inputMessage(input, trigger ? { trigger_id: trigger.id, from: trigger.actor.id, text: trigger.text, at: trigger.at } : undefined)
       }).filter(text => text !== undefined)
       const marker = `superagent-input:${key(ticketId, ...inputIds)}`
-      const text = `${marker}\nTicket: ${ticketId}\n${ticket.execution?.assignment ?? ''}\n${messages.join('\n\n')}`
+      const required = ticket.execution?.requiredSkills?.length ? `\nRequired skills: ${ticket.execution.requiredSkills.join(', ')}` : ''
+      const text = `${marker}\nTicket: ${ticketId}\n${ticket.execution?.assignment ?? ''}${required}\n${messages.join('\n\n')}`
       const selected = this.turnModel(ticketId)
       if (!worker.turnId) worker.requestedModel = selected.model
       this.host.store.set(KV.codex.binding(ticketId), { threadId: worker.threadId, assignmentId: assignment.id, pending: { marker, inputIds, model: worker.requestedModel } })

@@ -117,3 +117,9 @@ describe('setup', () => {
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
   })
 })
+
+it('requires production and handoff consumers before enabling automatic or historical capture', () => {
+  expect(()=>machineOf(Config(minimal({triageAutomatic:true})))).toThrow('requires triageProduction and triageHandoff')
+  expect(()=>machineOf(Config(minimal({triageHistorical:true})))).toThrow('requires triageAutomatic')
+  expect(machineOf(Config(minimal({triageAutomatic:true,triageHistorical:true,triageProduction:true,triageHandoff:true})))).toMatchObject({triageAutomatic:true,triageHistorical:true})
+})

@@ -414,3 +414,40 @@ it('joins an aborted in-flight reader before the Source loop stops and retains i
   expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-messages'))?.pending).toBeDefined()
   expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-messages'))?.since).toBeUndefined()
 })
+
+it('projects native message headers without changing evidence identity, and fences revoked sources', () => {
+  const selected = config(); saveConfig(selected)
+  const { sources } = host()
+  const original = event({ label: 'Synthetic operations', senderLabel: 'Synthetic operator', senderType: 'app', senderIdType: 'open_id',
+    contentType: 'interactive', parentId: 'om_parent', direction: 'incoming', threadId: 'om_root' })
+  const trigger = activityTrigger(original, selected)
+  const header = sources.imHeader(trigger)
+  expect(header).toEqual({ at: original.at, conversationLabel: 'Synthetic operations', senderLabel: 'Synthetic operator',
+    senderType: 'app', senderIdType: 'open_id', contentType: 'interactive', parent: 'om_parent' })
+  expect(JSON.parse(JSON.stringify(header))).toEqual(header)
+  const renamed = activityTrigger({ ...original, label: 'Renamed conversation' }, selected)
+  expect(renamed.id).toBe(trigger.id)
+  expect(sources.imEvidence(renamed)).toEqual(sources.imEvidence(trigger))
+  expect(sources.imHeader(activityTrigger(event(), selected))).toEqual({ at: original.at })
+  saveConfig(selected, false)
+  expect(() => sources.imHeader(trigger)).toThrow('outside scope')
+})
+
+it('exposes native IM identity and sender for generic shadow batching without broadening Thread identity', () => {
+  const selected = config({ routing: 'tasks' })
+  saveConfig(selected)
+  const { sources } = host()
+  const feishu = activityTrigger(event({ senderId: 'ou_other', threadId: 'om_root' }), selected)
+  expect(sources.imEvidence(feishu)).toMatchObject({ provider: 'feishu-messages', account: 'ou_owner',
+    conversation: 'oc_business', message: 'om_update', version: 'v1', sender: 'ou_other', root: 'om_root', partial: false })
+  const wechat = activityTrigger(event({ provider: 'wechat', accountId: 'wx-owner', objectId: 'wx-chat', id: 'wxe_event', senderId: 'wx-sender',
+    locator: { provider: 'wechat', contact: 'wx-chat', messageRef: 'wx1.original', start: iso(), end: iso() }, contentPartial: true }), selected)
+  expect(sources.imEvidence(wechat)).toMatchObject({ provider: 'wechat', account: 'wx-owner', conversation: 'wx-chat',
+    message: 'wx1.original', sender: 'wx-sender', partial: true })
+  const document = activityTrigger(event({ provider: 'feishu-documents', locator: { provider: 'feishu-documents', token: 'doc', type: 'docx', url: 'https://example.com/doc' } }), selected)
+  expect(sources.imEvidence(document)).toBeUndefined()
+  saveConfig({ ...selected, wechat: false })
+  expect(sources.imEvidence(wechat)).toBeUndefined()
+  saveConfig(selected, false)
+  expect(sources.imEvidence(feishu)).toBeUndefined()
+})

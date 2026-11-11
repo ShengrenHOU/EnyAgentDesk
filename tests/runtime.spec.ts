@@ -39,6 +39,7 @@ import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets
 let runtime: Runtime
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
 const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
+let hostContext: Context
 let directory: string
 let controller: { create: ReturnType<typeof vi.fn>; selectModel: ReturnType<typeof vi.fn>; resolveAgent: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn>; inspect: ReturnType<typeof vi.fn> }
 type RegisteredTool = { name: string; output: { render: (args: unknown, result: unknown) => unknown }; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
@@ -108,7 +109,7 @@ let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
   await runtime.stop()
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store, accounts); store.close()
-  const ctx = new Context()
+  const ctx = hostContext = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   runtime = new Runtime(ctx, testMachine({ stateDir: directory, ...machine }), restarts)
   return runtime
@@ -129,8 +130,20 @@ async function route(item: Record<string, unknown>): Promise<Record<string, unkn
   if (results[0]!.refused) throw new Error(String(results[0]!.refused))
   return results[0]!
 }
+/** These lifecycle tests explicitly simulate a model consuming pending input before its next decision. */
+async function consumeMaster() {
+  const agent = agents.get(runtime.masterId)!
+  for (const message of [...agent.inbox.nextTurn, ...agent.inbox.nextStep]) {
+    hostContext.emit('session/event', (agent as unknown as { session: never }).session, { type: 'user/message', time: Date.now(), data: message } as never)
+  }
+  agent.inbox.nextTurn.length = 0; agent.inbox.nextStep.length = 0
+  runtime.store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'assessment'").run()
+  await runtime.idle()
+}
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
+  await consumeMaster()
   await receive(trigger)
+  await consumeMaster()
   expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
     worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
@@ -155,7 +168,7 @@ beforeEach(async () => {
     [HELPERS]: `file:${workerGitConfig(directory)}\0${credentialHelper(AGENT())}\0`,
     [SCOPED]: `global\0credential.helper\n\0global\0credential.https://github.com.helper\n${credentialHelper(AGENT())}\0`,
   }
-  const ctx = new Context()
+  const ctx = hostContext = new Context()
   agents = new Map()
   tools = new Map()
   sections = new Map()
@@ -231,6 +244,23 @@ beforeEach(async () => {
   deliveries.mockClear()
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
+
+it('bounds undecided candidate delivery across Runtime, Engine and MasterAssessor, then refills a freed slot', async () => {
+  const backlog = Array.from({ length: 20 }, (_, i) => feishu(`backlog-${i}`, '普通来源观察', { mentions: [] }))
+  for (const trigger of backlog) { await receive(trigger); await consumeMaster() }
+  const candidates = () => relays(runtime.masterId).filter(item => item.kind === 'candidate')
+  expect(candidates()).toHaveLength(3)
+  expect(runtime.store.threads.active().filter(thread => thread.evaluating?.delivered)).toHaveLength(3)
+  expect(runtime.store.threads.active().reduce((sum, thread) => sum + thread.pending.length, 0)).toBe(17)
+  const explicit = feishu('fresh-owner', '@bot 请处理这个请求')
+  await receive(explicit); await consumeMaster()
+  expect(candidates()).toHaveLength(4)
+  expect(candidates().at(-1)).toMatchObject({ trigger_id: explicit.id, strength: 'explicit' })
+  await route({ kind: 'ignore', trigger_id: backlog[0]!.id, reason: '不需要行动' })
+  expect(candidates()).toHaveLength(5)
+  expect(runtime.store.threads.active().filter(thread => thread.evaluating)).toHaveLength(4)
+  expect(runtime.store.tickets.list()).toEqual([])
+})
 
 it('relays an explicit member mention as a candidate and creates the ticket, acknowledgement, subscription and worker on accept', async () => {
   const { trigger, ticket, sessionId } = await acceptedTicket()
@@ -1107,6 +1137,44 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
 })
 
+it('keeps an incomplete DSH workspace fenced after reopening the runtime database', async () => {
+  const original = subprocess.spawn.getMockImplementation()!
+  subprocess.spawn.mockImplementation(spec => {
+    if (spec.argv.at(-1) === 'partial prepare') {
+      const workspace = (spec as { argv: readonly string[]; env: Record<string, string> }).env.DSH_SUPERAGENT_DIR!
+      mkdirSync(workspace, { recursive: true })
+      writeFileSync(join(workspace, 'partial.txt'), 'incomplete checkout')
+    }
+    return original(spec)
+  })
+  answers['sh -c partial prepare'] = new Error('incomplete clone')
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'partial prepare' } })
+  const { ticket, sessionId } = await acceptedTicket()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed' })
+  await restart()
+  await runtime.ready
+  expect(runtime.store.get(KV.dsh.preparing(ticket.id))).toBe(ticket.execution!.directory)
+  delete answers['sh -c partial prepare']
+  await runtime.engine.retryTicket(ticket.id)
+  await runtime.idle()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('preparation did not finish successfully') })
+  expect(deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId)).toHaveLength(0)
+  expect(readFileSync(join(ticket.execution!.directory, 'partial.txt'), 'utf8')).toBe('incomplete checkout')
+})
+
+it('does not bypass a failed workspace verification on retry', async () => {
+  const original = answers[SCOPED]
+  answers[SCOPED] = 'local\0credential.helper\nunexpected-helper\0'
+  const { ticket, sessionId } = await acceptedTicket()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('credential.helper') })
+  expect(runtime.store.get(KV.dsh.preparing(ticket.id))).toBe(ticket.execution!.directory)
+  answers[SCOPED] = original!
+  await runtime.engine.retryTicket(ticket.id)
+  await runtime.idle()
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('preparation did not finish successfully') })
+  expect(deliveries.mock.calls.filter(([call]) => call.sessionId === sessionId)).toHaveLength(0)
+})
+
 it('counts a ticket whose directory the host prepared before prepare commands existed as prepared', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
@@ -1381,7 +1449,7 @@ it('refuses a second process on the same state directory before it opens the dat
   const db = new DatabaseSync(join(directory, 'orchestrator.sqlite'))
   db.prepare("UPDATE kv SET value='10' WHERE key='schema'").run()
   db.close()
-  const ctx = new Context()
+  const ctx = hostContext = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   expect(() => new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
   expect(runtime.store.get(KV.store.schema)).toBe(10)
@@ -1389,7 +1457,7 @@ it('refuses a second process on the same state directory before it opens the dat
 })
 
 it('retries startup in the same service context after the earlier state lock is released', async () => {
-  const ctx = new Context()
+  const ctx = hostContext = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   expect(() => new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())).toThrow(/already being held/)
   expect(ctx.get('orchestrator')).toBeUndefined()
@@ -1400,7 +1468,7 @@ it('retries startup in the same service context after the earlier state lock is 
 })
 
 it('releases a newly acquired state lock when service registration is refused', () => {
-  const ctx = new Context()
+  const ctx = hostContext = new Context()
   ctx.reflect.provide('orchestrator', runtime)
   const other = join(directory, 'other-state')
   mkdirSync(other)
@@ -1438,7 +1506,7 @@ it('releases the database and the state directory lock when it fails to start, s
   const db = new DatabaseSync(join(directory, 'orchestrator.sqlite'))
   db.prepare("UPDATE kv SET value='99' WHERE key='schema'").run()
   db.close()
-  const context = () => { const ctx = new Context(); for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service); return ctx }
+  const context = () => { const ctx = hostContext = new Context(); for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service); return ctx }
   expect(() => new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())).toThrow('Unsupported orchestrator database version 99')
   const fixed = new DatabaseSync(join(directory, 'orchestrator.sqlite'))
   fixed.prepare('UPDATE kv SET value=? WHERE key=?').run(String(SCHEMA_VERSION), 'schema')

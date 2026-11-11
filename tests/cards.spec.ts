@@ -11,8 +11,9 @@ import { key, said, type Decision, type Thread, type Ticket, type Trigger } from
  * Words no text may use, tool names and schema options are checked in tests/model-surface.spec.ts.
  */
 const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
-  ['A message attaches to a ticket only on an explicit pointer', 'dispatch',
-    ['Attach only when the message points at that ticket explicitly', 'A message on a similar subject is a new request: accept or ignore it, never attach it.']],
+  ['A message continues a Ticket only on an explicit pointer or recorded line evidence', 'dispatch',
+    ['Attach only when the message points at that ticket explicitly', 'A message on a similar subject is not automatically a continuation',
+      'orchestrator_line action=search', 'orchestrator_line action=continue', 'A message never restores a closed line to open']],
   ['An Executor drops an attached thread it finds unrelated, without replying there', 'work',
     ['call orchestrator_thread_unrelated with the thread key and a one-sentence reason; do not acknowledge it or reply there.']],
   ['A located element or a few CSS lines settle no design', 'team/scope',
@@ -98,7 +99,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['An Executor merges only as the delivery requirements say, closes no issue and keeps private Feishu content off GitHub', 'worker',
     ["original owner's explicit instruction", 'Issue closure and private Feishu disclosure remain outside that permission.']],
   ['Reading context changes nothing', 'cli', ['Do not alter remote state, authorization, or configuration while reading.']],
-  ['Feishu is read as the bot, never as a person', 'cli', ['Feishu uses --as bot; unavailable content does not authorize switching to the user\'s identity.']],
+  ['Feishu uses the configured identity within its authorization', 'cli', ['Use the configured default Feishu identity for authorized work.', 'Do not change CLI identity policy or expand authorization to access unavailable content.']],
   ['Every GitHub message says an automated agent wrote it', 'team/communication',
     ['Begin every message posted on GitHub, including comments, review replies and PR descriptions, with this line: This is by an automated agent, not a human.']],
   ['Removed rules stay removed', '*', [], ['at most three investigation/implementation rounds', 'continue dispatch until explicitly instructed', 'page-size']],

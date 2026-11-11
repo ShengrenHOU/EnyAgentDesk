@@ -29,7 +29,7 @@ export class ExecutorRouter {
       const tickets = host.store.tickets
       return { ...host, get engine() { return host.engine }, slots: this.slots, beforeLaunch,
         ticketPaused: id => this.transferring.has(id) || !!host.ticketPaused?.(id),
-        store: { get: host.store.get.bind(host.store), set: host.store.set.bind(host.store),
+        store: { get: host.store.get.bind(host.store), set: host.store.set.bind(host.store), delete: host.store.delete.bind(host.store),
           settings: host.store.settings.bind(host.store), atomic: host.store.atomic.bind(host.store),
           afterCommit: host.store.afterCommit.bind(host.store), triggers: host.store.triggers, tickets: {
             get: id => { const ticket = tickets.get(id); return ticket && owns(ticket) ? ticket : undefined },

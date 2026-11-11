@@ -40,9 +40,9 @@ export interface Candidate {
 export type AssessmentOutcome =
   | { kind: 'ignore'; reason: string | Reason; audit?: Record<string, unknown> }
   | { kind: 'unavailable'; reason: string | Reason; audit?: Record<string, unknown> }
-  /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, and `note` a routing note for its worker. */
+  /** An accept: `rules` the assessment matched, `name` the ticket's requested short name, `note` a routing note for its worker, and `requiredSkills` the skills its ready report must list. */
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
-    name?: string; note?: string; stage?: 'research' | 'implementation' | 'documentation'; executor?: 'codex' | 'dsh' }
+    name?: string; note?: string; requiredSkills?: string[]; stage?: 'research' | 'implementation' | 'documentation'; executor?: 'codex' | 'dsh' }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 
 /** Semantic judgement. `request` queues the assessment, idempotently per `evalId`; the outcome returns through `Engine.decide`. */
@@ -121,6 +121,8 @@ export interface Repositories {
     active(): Thread[]
   }
   tickets: {
+    /** IDs referenced by any saved Ticket origin or Input, including historical tickets. */
+    referencingTriggers(ids: string[]): string[]
     get(id: string): Ticket | undefined
     save(ticket: Ticket): void
     list(): Ticket[]

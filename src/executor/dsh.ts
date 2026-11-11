@@ -12,6 +12,7 @@ import { prepareCommand, runAsWorker, verifyDirectory } from '../infra/environme
 import { compareTickets } from '../app/management.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
+import { KV } from '../kv.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
@@ -65,7 +66,7 @@ export interface ExecutorHost {
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted' | 'note' | 'turnStarted' | 'assignExecutor'>
   /** Tickets are read-only to an Executor: every Ticket write goes through the Engine. */
-  readonly store: Pick<Store, 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'> & {
+  readonly store: Pick<Store, 'triggers' | 'get' | 'set' | 'delete' | 'settings' | 'atomic' | 'afterCommit'> & {
     tickets: Pick<Store['tickets'], 'get' | 'list' | 'open' | 'active'>
   }
   /** Durable effect queue through which launches and input deliveries run. */
@@ -117,7 +118,8 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  const requiredSkills = outcome.requiredSkills?.length ? outcome.requiredSkills : undefined
+  return { name, directory: join(executionRoot(settings, stateDir), name), assignment, ...requiredSkills ? { requiredSkills } : {} }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -267,6 +269,8 @@ export class DshExecutor implements Executor {
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
+    // Persist before filesystem/subprocess side effects so a crash cannot turn a partial directory into a prepared one.
+    this.host.store.set(KV.dsh.preparing(ticket.id), directory)
     await mkdir(dirname(directory), { recursive: true })
     const command = this.host.store.settings().executor.prepare.trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
@@ -280,6 +284,7 @@ export class DshExecutor implements Executor {
       })
     await mkdir(directory, { recursive: true })
     await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+    this.host.store.delete(KV.dsh.preparing(ticket.id))
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -299,9 +304,8 @@ export class DshExecutor implements Executor {
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
       // Shutdown or pause re-queues the launch for resume, and transient network/provider errors retry with backoff.
-      // A failed prepare command is not retried automatically because an existing directory counts as prepared, so retrying
-      // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
-      // ticket is marked failed and waits until new human input or an explicit retry arrives.
+      // A failed prepare command is not retried automatically: it may have non-idempotent side effects.
+      // The ticket waits for human input or an explicit retry, with partial workspaces fenced by the durable marker.
       if (this.host.closing() || error instanceof Later) throw error
       if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
       this.launchFailed(ticketId, assignmentId, error)
@@ -475,8 +479,11 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    // Preserve legacy workspaces, but never accept one known to have an incomplete preparation attempt.
+    const exists = await stat(workspace).then(() => true, () => false)
+    if (exists && this.host.store.get(KV.dsh.preparing(ticket.id)) === workspace)
+      throw new PrepareFailed('Workspace preparation did not finish successfully. Preserve or move the existing directory aside, then retry with the workspace path absent; preparation will not be rerun over partial files.')
+    if (!exists) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }
@@ -497,15 +504,16 @@ export class DshExecutor implements Executor {
     const told = later && await this.host.sessions.holds(sessionId, first)
     if (!current()) return
     const retried = ticket.assignments.at(-2)?.endedReason === 'retried' ? { note: RETRIED } : {}
+    const required = ticket.execution?.requiredSkills?.length ? { required_skills: ticket.execution.requiredSkills } : {}
     const assignmentText = ticket.execution?.assignment ?? ''
     const { text: brief, chars, read } = capped(assignmentText, ASSIGNMENT_CHARS, `ticket/${ticket.id}/assignment`)
     const card = told || !source ? undefined : await this.triggerCard(ticket, source.id)
     if (!current()) return
     const batch = told ? [] : batchOf(this.host, ticket).map(batchLine)
-    const text = told ? JSON.stringify({ ticket_id: ticket.id, assignment: ticket.assignments.length, ...retried })
+    const text = told ? JSON.stringify({ ticket_id: ticket.id, assignment: ticket.assignments.length, ...retried, ...required })
       : JSON.stringify({ ticket_id: ticket.id, title: ticket.title, ...(brief ? { assignment: brief } : {}),
         ...(read ? { assignment_chars: chars, assignment_read: read } : {}), ...(card ? { trigger: card } : {}),
-        ...(batch.length ? { batch } : {}), ...retried })
+        ...(batch.length ? { batch } : {}), ...required, ...retried })
     const requestId = later ? `assignment:${ticket.id}:${assignment.id}` : first
     await this.host.sessions.prompt(sessionId, requestId, text, 'queue',
       () => { if (!current()) throw new Error('Launch authorization changed before worker delivery') },

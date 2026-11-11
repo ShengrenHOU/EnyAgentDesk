@@ -1,5 +1,6 @@
 /** User-identity Lark activity reads; the existing Source controller owns scan scheduling and watermarks. */
 import { z } from 'zod'
+import type { ImContextRequest, ImContextPage, ImContextMessage } from './im-context.ts'
 import { key } from '../core/index.ts'
 import { Commands, CliError } from '../infra/commands.ts'
 import { family } from '../kv.ts'
@@ -11,7 +12,7 @@ const id = z.string().min(1)
 const epoch = z.string().regex(/^\d+$/)
 const RawMessage = z.object({ message_id: id, chat_id: id, msg_type: id, create_time: epoch, update_time: epoch.optional(),
   deleted: z.boolean().optional(), body: z.object({ content: z.string() }).optional(),
-  sender: z.object({ id: z.string(), sender_type: z.string() }),
+  sender: z.object({ id: z.string(), sender_type: z.string(), id_type: z.string().optional() }),
   root_id: z.string().optional(), parent_id: z.string().optional(), thread_id: z.string().optional(),
   message_app_link: z.url().optional() }).refine(message => message.deleted || message.body, 'Source message has no readable body')
 type RawMessage = z.infer<typeof RawMessage>
@@ -118,6 +119,9 @@ export async function scanLarkMessages(ctx: ActivityReaderContext, binding: Lark
           at: messageTime(message), text: full.slice(0, MAX_EVENT_TEXT), reference: `feishu message ${message.message_id}`,
           locator: { provider: 'feishu-messages', chatId: message.chat_id, messageId: message.message_id },
           ...discovered.chat_name ? { label: discovered.chat_name } : {}, senderId: message.sender.id,
+          senderType: message.sender.sender_type, contentType: message.msg_type,
+          ...(message.sender.id_type ? { senderIdType: message.sender.id_type } : {}),
+          ...(message.parent_id ? { parentId: message.parent_id } : {}),
           ...(discovered.message_app_link ?? message.message_app_link) ? { url: discovered.message_app_link ?? message.message_app_link } : {},
           ...partial ? { contentPartial: true } : {} })
         active(ctx); records++; if (partial) contentPartial++
@@ -225,4 +229,62 @@ export async function readLarkActivityContext(commands: Commands, binding: LarkA
   return { messages: [{ id: locator.token, from: 'Lark document', at: event.at, text, url: locator.url }],
     ...offset + text.length < full.document.content.length ? { next: `${full.document.revision_id}:${offset + text.length}` } : {},
     body: { status: 'available', revision_id: full.document.revision_id, ...full.document.tips ? { tips: full.document.tips, contentPartial: true } : {} } }
+}
+
+/** Bounded chat timeline, not a complete thread transcript or an atomic snapshot.
+ * Native API contract: https://open.larksuite.com/document/server-docs/im-v1/message/list
+ * Raw bounded-query example and regular-group reply limitation: https://github.com/larksuite/cli/issues/2074
+ */
+export async function readLarkImContext(commands: Commands, binding: LarkActivityBinding,
+  request: ImContextRequest, cursor: string | undefined, signal: AbortSignal): Promise<ImContextPage> {
+  signal.throwIfAborted()
+  const { anchor, start, end } = request
+  if (anchor.provider !== 'feishu-messages' || anchor.account !== binding.expectedUserId) {
+    throw new Error('IM evidence belongs to a different Lark account or provider')
+  }
+  const [from, until] = rangeTimes(request)
+  const read = await userReader(commands.withSignal(signal), binding, () => signal.throwIfAborted())
+  const gaps = ['live_pagination', 'thread_replies_not_covered']
+  // A bounded context should include the most recent owner replies before older history.
+  const page = await read(z.object({ items: z.array(RawMessage), has_more: z.boolean(), page_token: z.string().optional() }),
+    ['api', 'GET', '/open-apis/im/v1/messages', '--params', JSON.stringify({ container_id_type: 'chat',
+      container_id: anchor.conversation, start_time: String(Math.floor(from / 1000)), end_time: String(Math.ceil(until / 1000)),
+      sort_type: 'ByCreateTimeDesc', page_size: 50, only_thread_root_messages: false, ...cursor ? { page_token: cursor } : {} })])
+  if (page.items.some(message => message.chat_id !== anchor.conversation)) throw new Error('Lark returned context outside the source conversation')
+  const next = nextPage(page, new Set(cursor ? [cursor] : []))
+  const view = (message: RawMessage): ImContextMessage => {
+    const full = originalText(message)
+    const partial = !message.deleted && (!['text', 'system'].includes(message.msg_type) || full.length > MAX_EVENT_TEXT)
+    if (partial && !gaps.includes('content_partial')) gaps.push('content_partial')
+    if (!message.deleted && !['text', 'system'].includes(message.msg_type) && !gaps.includes('attachments_not_read')) gaps.push('attachments_not_read')
+    return { id: message.message_id, version: key(message.update_time ?? message.create_time, message.msg_type, String(!!message.deleted), full),
+      versionBasis: 'source_digest', nativeVersion: message.update_time ?? message.create_time,
+      text: full.slice(0, MAX_EVENT_TEXT), sender: message.sender.id, senderType: message.sender.sender_type,
+      ...message.sender.id_type ? { senderIdType: message.sender.id_type } : {},
+      createdAt: new Date(Number(message.create_time)).toISOString(), ...message.update_time ? { updatedAt: new Date(Number(message.update_time)).toISOString() } : {},
+      ...message.deleted ? { deleted: true } : {}, ...partial ? { partial: true } : {},
+      ...message.parent_id ? { parent: message.parent_id } : {}, ...message.root_id ? { root: message.root_id } : {} }
+  }
+  // Reread after each history page: history can omit recalled messages and stale anchors.
+  // Parse IDs/chat before body validation so unreadable foreign records still fail closed.
+  const originals = await read(z.object({ items: z.array(z.object({ message_id: id, chat_id: id }).passthrough()) }),
+    ['api', 'GET', '/open-apis/im/v1/messages/mget', '--params', JSON.stringify({ message_ids: [anchor.message] })])
+  if (originals.items.some(message => message.message_id !== anchor.message || message.chat_id !== anchor.conversation) || originals.items.length > 1) {
+    throw new Error('Lark returned an anchor outside the source conversation or message')
+  }
+  let current: ImContextMessage | undefined
+  const raw = originals.items[0]
+  if (!raw) gaps.push('anchor_missing')
+  else {
+    const parsed = RawMessage.safeParse(raw)
+    if (!parsed.success) gaps.push('anchor_unreadable')
+    else { current = view(parsed.data); if (current.deleted) gaps.push('anchor_deleted') }
+  }
+  const items = page.items.filter(message => Number(message.create_time) >= from && Number(message.create_time) < until).map(view)
+  // The native CLI account can change independently of Source configuration during a read.
+  // Revalidate the actual identity before publishing any collected data.
+  await userReader(commands.withSignal(signal), binding, () => signal.throwIfAborted())
+  signal.throwIfAborted()
+  return { provider: anchor.provider, account: anchor.account, conversation: anchor.conversation, start, end,
+    messages: items, ...current ? { anchor: current } : {}, ...next ? { next } : {}, consistency: 'live_paginated', gaps }
 }

@@ -20,6 +20,8 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 }
 
 export const KV = {
+  /** DSH executor: workspace path whose preparation started but has not been verified successfully. */
+  dsh: { preparing: family<string, [ticket: string]>('dsh-preparing:') },
   /** Codex executor: durable session identity and the last delivery intent, reconciled against thread history. */
   codex: { stages: family<ExecutionStages, [ticket: string]>('codex-stages:'), binding: family<{ threadId: string; turnId?: string; assignmentId?: string; pending?: { marker: string; inputIds: string[]; assignmentId?: string; model?: string } }, [ticket: string]>('codex-binding:'),
     workspace: family<boolean, [ticket: string]>('codex-workspace:') },
@@ -50,7 +52,7 @@ export const KV = {
   github: { since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
     cursor: family<string, [number: number]>('github-cursor:'),
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
-    branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
+    branchCi: record<{ branch?: string; head?: string; observedAt?: string; failures?: string[]; revision: number }>('github-branch-ci'),
     ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID

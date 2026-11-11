@@ -60,9 +60,12 @@ it('opens the registered Superagent panel for its explicit browser entry only', 
 
 it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
   const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['conversation.input.dock', 'sidebar.workspaces.session.row.action',
+  expect(entries.map(entry => entry.options.name)).toEqual(['conversation.input.dock', 'conversation.chat.turnTail',
+    'sidebar.workspaces.session.row.action',
     'main', 'main', 'main', 'sidebar.panellist', 'sidebar.panellist', 'plugins.row.config'])
   expect(entries.find(entry => entry.options.name === 'plugins.row.config')!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
+  expect(entries.find(entry => entry.options.name === 'conversation.chat.turnTail')!.options).toMatchObject({ id: 'superagent-quick-reply',
+    order: 30, locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-personal-workbench', order: -90, locale: 'dshSuperagent' })

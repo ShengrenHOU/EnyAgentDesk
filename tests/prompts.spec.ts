@@ -29,6 +29,15 @@ it('distinguishes an explicitly requested named merge from proactive auto-merge'
   expect(workerPrompt).toContain("original owner's explicit instruction")
   expect(masterPrompt).not.toContain('Never merge or enable auto-merge yourself')
 })
+
+it('binds every external draft claim and question to its source, in the prompt of both roles that draft', () => {
+  for (const role of ['orchestrator', 'worker'] as const) {
+    const prompt = composePrompt(defaultPrompts(), role)
+    expect(prompt).toContain('## Communication')
+    expect(prompt).toContain('source table')
+    expect(prompt).toContain('must not enter the draft')
+  }
+})
 const promptsOf = (store: Store, maxChars = 100000) => new Prompts(store, () => maxChars, variables, () => true)
 function withStore(body: (store: Store, dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'prompts-')); const store = new Store(join(dir, 'db'))

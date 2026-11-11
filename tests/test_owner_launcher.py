@@ -147,7 +147,8 @@ class OwnerLauncherTest(unittest.TestCase):
         marker = self.root / config['stopMarker']
         old_marker = self.root / 'owner-manually-stopped'
         old_marker.write_text('old profile stopped', encoding='utf-8')
-        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), patch.object(launcher.subprocess, 'run') as run:
+        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), \
+                patch.object(launcher.subprocess, 'run', return_value=MagicMock(stdout=json.dumps(self.ready))) as run:
             launcher.ensure_running(config, self.root / 'platform-config.json', respect_stop=True)
             run.assert_called_once()
         self.assertTrue(old_marker.exists())
@@ -201,7 +202,8 @@ class OwnerLauncherTest(unittest.TestCase):
         with patch.object(launcher, 'state', side_effect=[None, self.ready]), patch.object(launcher.subprocess, 'run') as run:
             launcher.ensure_running(self.config, self.root / 'config.json')
             run.assert_not_called()
-        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), patch.object(launcher.subprocess, 'run') as run:
+        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), \
+                patch.object(launcher.subprocess, 'run', return_value=MagicMock(stdout=json.dumps(self.ready))) as run:
             launcher.ensure_running(self.config, self.root / 'config.json')
             self.assertIn('DEEPSEEK_API_KEY=DEEPSEEK_API_KEY', run.call_args.args[0])
             self.assertIn('--spawn', run.call_args.args[0])
@@ -223,7 +225,8 @@ class OwnerLauncherTest(unittest.TestCase):
             self.assertIsNone(launcher.ensure_running(self.config, self.root / 'config.json', respect_stop=True))
             run.assert_not_called()
             self.assertTrue(marker.exists())
-        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), patch.object(launcher.subprocess, 'run') as run:
+        with patch.object(launcher, 'state', side_effect=[None, None, self.ready]), \
+                patch.object(launcher.subprocess, 'run', return_value=MagicMock(stdout=json.dumps(self.ready))) as run:
             self.assertEqual(launcher.ensure_running(self.config, self.root / 'config.json'), self.ready)
             run.assert_called_once()
             self.assertFalse(marker.exists())
@@ -305,6 +308,96 @@ class OwnerLauncherTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         with launcher.launch_guard(self.root):
             pass
+
+    def test_activation_refuses_changed_bot_mode_without_touching_the_running_service(self):
+        config = launcher.validate_config(self.platform_config())
+        current = {**self.ready, 'setup': {'accounts': {'feishu': {'appId': 'cli_test', 'botId': 'ou_test'}}},
+                   'health': {**self.ready['health'], 'feishu': {'state': 'ready'}}, 'load': {'running': 0, 'queued': 0}}
+        settings = {'sources': [{'kind': 'feishu', 'value': {'enabled': True, 'config': {'cli': 'test-lark'}}}]}
+        receipt = self.root / config['receiptName']
+        receipt.write_text('{"pid":123}', encoding='utf-8')
+        for mode, bot in [('user', 'ready'), ('bot', 'not_configured')]:
+            with self.subTest(mode=mode, bot=bot), patch.object(launcher, 'state', return_value=current), \
+                    self.opener(settings), patch.object(launcher.subprocess, 'Popen') as spawn, \
+                    patch.object(launcher.subprocess, 'run', side_effect=[
+                        MagicMock(stdout=json.dumps({'appId': 'cli_test', 'identities': {'bot': {'status': bot}}})),
+                        MagicMock(stdout='strict-mode: ' + mode + ' (source: profile)'),
+                        MagicMock(stdout=json.dumps({'bot': {'open_id': 'ou_test'}})),
+                    ]), self.assertRaisesRegex(RuntimeError, 'Feishu'):
+                launcher.activation_preflight(config)
+            spawn.assert_not_called()
+            self.assertEqual(receipt.read_text(), '{"pid":123}')
+            self.assertFalse((self.root / config['stopMarker']).exists())
+
+    def test_activation_checks_the_configured_bot_in_the_startup_environment(self):
+        config = launcher.validate_config(self.platform_config())
+        current = {**self.ready, 'setup': {'accounts': {'feishu': {'appId': 'cli_test', 'botId': 'ou_test'}}},
+                   'health': {**self.ready['health'], 'feishu': {'state': 'ready'}}, 'load': {'running': 0, 'queued': 0}}
+        settings = {'sources': [{'kind': 'feishu', 'value': {'enabled': True, 'config': {'cli': 'test-lark'}}}]}
+        with patch.object(launcher, 'state', return_value=current), self.opener(settings), \
+                patch.dict(os.environ, {'LARKSUITE_CLI_CONFIG_DIR': 'wrong-user-profile'}), \
+                patch.object(launcher.subprocess, 'run', side_effect=[
+                    MagicMock(stdout=json.dumps({'appId': 'cli_test', 'identities': {'bot': {'status': 'ready'}}})),
+                    MagicMock(stdout='strict-mode: bot (source: profile)'),
+                    MagicMock(stdout=json.dumps({'bot': {'open_id': 'ou_test'}})),
+                ]) as probe:
+            launcher.activation_preflight(config)
+        self.assertEqual(probe.call_args.args[0], ['test-lark', 'api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson'])
+        self.assertTrue(all(call.kwargs['env']['LARKSUITE_CLI_CONFIG_DIR'] == str(self.root / 'lark') for call in probe.call_args_list))
+
+    def test_activation_checks_bot_directory_without_changing_user_default(self):
+        config = launcher.validate_config(self.platform_config())
+        bot_dir = str(self.root / 'bot-profile')
+        current = {**self.ready, 'setup': {'accounts': {'feishu': {'appId': 'cli_test', 'botId': 'ou_test'}}},
+                   'health': {**self.ready['health'], 'feishu': {'state': 'ready'}}, 'load': {'running': 0, 'queued': 0}}
+        settings = {'sources': [{'kind': 'feishu', 'value': {'enabled': True, 'config': {'cli': 'test-lark', 'configDir': bot_dir}}}]}
+        with patch.object(launcher, 'state', return_value=current), self.opener(settings), \
+                patch.object(launcher.subprocess, 'run', side_effect=[
+                    MagicMock(stdout=json.dumps({'appId': 'cli_test', 'identities': {'bot': {'status': 'ready'}}})),
+                    MagicMock(stdout='strict-mode: bot'),
+                    MagicMock(stdout=json.dumps({'bot': {'open_id': 'ou_test'}})),
+                ]) as probe:
+            launcher.activation_preflight(config)
+        self.assertTrue(all(call.kwargs['env']['LARKSUITE_CLI_CONFIG_DIR'] == bot_dir for call in probe.call_args_list))
+        self.assertEqual(launcher.launch_environment(config)['LARKSUITE_CLI_CONFIG_DIR'], str(self.root / 'lark'))
+
+    def test_launcher_can_bootstrap_a_bot_directory_without_changing_user_default(self):
+        config = self.platform_config()
+        bot_dir = self.root / 'bot-profile'
+        bot_dir.mkdir()
+        config['feishuBotConfigDir'] = str(bot_dir)
+        config = launcher.validate_config(config)
+        env = launcher.launch_environment(config)
+        self.assertEqual(env['DSH_FEISHU_BOT_CONFIG_DIR'], str(bot_dir))
+        self.assertEqual(env['LARKSUITE_CLI_CONFIG_DIR'], str(self.root / 'lark'))
+
+    def test_activation_refuses_unready_busy_or_manually_stopped_instances(self):
+        config = launcher.validate_config(self.platform_config())
+        for current in [None, {**self.ready, 'setup': {'feishuProblem': {'code': 'not_configured'}}},
+                        {**self.ready, 'load': {'running': 1, 'queued': 0}}]:
+            with patch.object(launcher, 'state', return_value=current), \
+                    patch.object(launcher.subprocess, 'run') as probe, self.assertRaises(RuntimeError):
+                launcher.activation_preflight(config)
+            probe.assert_not_called()
+        (self.root / config['stopMarker']).write_text('Operator stop', encoding='utf-8')
+        with patch.object(launcher, 'state', return_value=self.ready), self.assertRaises(RuntimeError):
+            launcher.activation_preflight(config)
+
+    def test_start_reuses_the_owned_childs_verified_snapshot_instead_of_a_second_cold_http_probe(self):
+        with patch.object(launcher, 'state', side_effect=[None, None, TimeoutError('cold follow-up timed out')]) as state, \
+                patch.object(launcher.subprocess, 'run', return_value=MagicMock(stdout=json.dumps(self.ready))):
+            self.assertEqual(launcher.ensure_running(self.config, self.root / 'config.json'), self.ready)
+        self.assertEqual(state.call_count, 2)
+
+    def test_activation_preserves_a_paused_backlog_but_refuses_active_or_unpaused_work(self):
+        config = launcher.validate_config(self.platform_config())
+        backlog = {**self.ready, 'paused': True, 'load': {'running': 0, 'queued': 3}}
+        with patch.object(launcher, 'state', return_value=backlog), patch.object(launcher.subprocess, 'Popen') as spawn:
+            launcher.activation_preflight(config)
+        spawn.assert_not_called()
+        for state in [{**backlog, 'paused': False}, {**backlog, 'load': {'running': 1, 'queued': 3}}]:
+            with patch.object(launcher, 'state', return_value=state), self.assertRaises(RuntimeError):
+                launcher.activation_preflight(config)
 
     def test_web_entry_keeps_token_private_and_opens_the_panel(self):
         (self.root / 'windows-server.log').write_text('dsh web: http://127.0.0.1:3083/?token=synthetic\n', encoding='utf-8')

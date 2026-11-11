@@ -1,11 +1,14 @@
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
+import { UserError, key, latestReport, reached, runningAssignment, threadKey, ticketStage, type Ticket, type Trigger } from '../core/index.ts'
+import { detail as lineDetail, linesView, unlinkedTickets, type LineSummary } from './lines.ts'
 import { batchOf, inputMessage, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
+import { WORKBENCH, workbenchKind, type WorkbenchConfig } from '../sources/workbench.ts'
+import { discussionWindow } from '../sources/workbench-session.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, reportHistory, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -26,18 +29,21 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'tickets', holds: 'ticket cards, newest first; a card\'s state is person/review after a ready report, person/blocked or person/failed after those reports, person/answer with a question, person/delivery when an input could not reach the worker, working or working/queued while it works, idle once the worker ended its turn without a report, else how the ticket ended' },
   { name: 'triggers', holds: 'trigger cards with where each went, newest first' },
   { name: 'threads', holds: 'subscribed threads, newest activity first, with their labels, tickets, current assessment and polling errors' },
+  { name: 'conversation', holds: 'Owner\'s main discussion (24h, newest first, attachment references); workers: workbench improvement candidates only.', executor: true },
   { name: 'thread/<key>', holds: 'one thread: its label and link, its tickets and latest decisions, and its triggers, newest first', executor: true },
   { name: 'decisions', holds: 'decisions, newest first' },
   { name: 'decision/<id>', holds: 'one decision with its audit' },
-  { name: 'ticket/<id>', holds: 'a ticket\'s card, the trigger, decision and threads it is tied to, its latest assignments with the start of each '
+  { name: 'lines', holds: 'work lines: active Ticket, latest result, next check, judgement, unlinked Tickets' },
+  { name: 'line/<id>', holds: 'one line\'s Tickets and judgements' },
+  { name: 'ticket/<id>', holds: 'a ticket\'s card, the trigger, decision and threads it is tied to, the required skills of its assignment, its latest assignments with the start of each '
     + 'report, and its inputs, newest first', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
-  { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report', executor: true },
+  { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report and the method and skills it recorded', executor: true },
   { name: 'ticket/<id>/reports', holds: 'a compact reading of each report, newest first: its conclusion and the lines that carry a '
     + 'number or link, with the full text behind ticket/<id>/report/<id>', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
-  { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments', executor: true },
+  { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments, with the method and skills it recorded', executor: true },
   { name: 'ticket/<id>/transcript', holds: 'its DSH Executor Session\'s messages, newest first; Codex workers use the persisted result and assignment reports', executor: true },
   { name: 'ticket/<id>/message/<n>', holds: 'one message of that transcript', executor: true },
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
@@ -62,7 +68,7 @@ export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(r
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
 
 export interface ResourceHost {
-  readonly store: Pick<Store, 'get' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
+  readonly store: Pick<Store, 'get' | 'keys' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
@@ -140,6 +146,23 @@ const ROUTES: readonly Route[] = [
     const threads = store.read.subscribedThreads().sort((a, b) => (b.lastAt ?? b.createdAt).localeCompare(a.lastAt ?? a.createdAt))
     return list(read, (offset, count) => threads.slice(offset, offset + count).map(thread => threadCard(thread, threadTitle(store, thread))))
   }],
+  // The owner's Main Session is the only discussion this window reads; a Ticket's worker reads it read-only for improvement candidates.
+  ['conversation', async read => {
+    const { host, offset, limit, signal } = read
+    const source = host.context.orchestrator.context(workbenchKind)
+    await source.ready
+    if (!source.config<WorkbenchConfig>(WORKBENCH)?.ownerId) {
+      throw new Error('Reading the owner conversation requires the enabled native workbench Source with a configured owner')
+    }
+    if (!host.masterId) throw new Error('The owner conversation is unavailable before the Main Session starts')
+    const inspection = await host.context.sessionController.inspect(host.masterId as SessionId, signal)
+    const window = discussionWindow(inspection, host.masterId, { offset, ...limit ? { limit } : {},
+      attachments: host.context.get('attachments') })
+    const references = new Set(window.messages.flatMap(message => message.references))
+    return { session_id: window.sessionId, through_seq: window.throughSeq, window_start: window.windowStart,
+      partial: window.partial, items: window.messages, attachments: window.attachments.filter(item => references.has(item.reference)),
+      next_offset: window.nextOffset }
+  }],
   ['thread/', read => {
     const { host, rest, ticketId } = read
     const thread = host.store.threads.get(rest)
@@ -162,6 +185,21 @@ const ROUTES: readonly Route[] = [
     const decision = main(read).store.decisions.get(read.rest)
     if (!decision) throw new Error('Unknown decision')
     return decisionDetails(decision)
+  }],
+  // The main Session's overview of work lines and the open Tickets that still belong to none; workers correctly cannot read it.
+  ['lines', read => {
+    const host = main(read), now = new Date()
+    const view = linesView(host.store, now), unlined = unlinkedTickets(host.store)
+    const withRead = (line: LineSummary) => ({ ...line, read: `line/${line.id}` })
+    return { generated_at: view.generatedAt, counts: { open: view.open.length, closed: view.closedTotal, unlinked: unlined.count },
+      open: view.open.slice(0, 30).map(withRead), closed: view.closed.map(withRead),
+      recent_unlinked: unlined.items.map(ticket => ({ ...ticketStage(ticket), ticket_id: ticket.id, title: ticket.title,
+        updated_at: ticket.updatedAt, read: `ticket/${ticket.id}` })) }
+  }],
+  ['line/', read => {
+    const line = lineDetail(main(read).store, read.rest)
+    if (!line) throw new Error('Unknown line')
+    return line
   }],
   ['settings', read => main(read).settings.view()],
   ['settings/', read => text(read, JSON.stringify(main(read).settings.block(read.rest)))],
@@ -302,7 +340,9 @@ const ROUTES: readonly Route[] = [
     } else if (section === 'report' && part) {
       const report = ticket.assignments.find(item => item.id === part)?.report
       if (!report) throw new Error('Unknown assignment report')
-      body = report.summary
+      const skills = report.skills?.length ? ['Skills:', ...report.skills.map(skill => `- ${skill.name}${skill.path ? ` (${skill.path})` : ''}`
+        + `${skill.revision ? `, revision ${skill.revision}` : ''}${skill.template ? `, template: ${skill.template}` : ''}`)] : []
+      body = [...report.method ? [`Method: ${report.method}`] : [], ...skills, ...skills.length ? [''] : [], report.summary].join('\n')
     } else if (part !== undefined) throw new Error('Unknown context resource')
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''

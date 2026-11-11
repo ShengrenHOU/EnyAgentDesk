@@ -1,6 +1,10 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
-import { liveTicket, ticketFollowups, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { createHash } from 'node:crypto'
+import { readFileSync, statSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
+import { latestAssignment, liveTicket, runningAssignment, ticketFollowups, UserError, type EngineForExecutor, type ReportedSkill,
+  type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import { repositoryContext } from '../../sources/github-context.ts'
@@ -19,6 +23,20 @@ export interface ExecutorToolsHost {
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
   sendReplies(): Promise<void>
+}
+/** The skills a report names, with each existing file's content revision recorded so the panel shows the text actually read. */
+function reportedSkills(skills: { name: string; path?: string; revision?: string; template?: string }[], root: string): ReportedSkill[] {
+  return skills.map(skill => {
+    if (!skill.path) return skill
+    const path = isAbsolute(skill.path) ? skill.path : resolve(root, skill.path)
+    try {
+      if (!statSync(path).isFile()) throw new Error('not a file')
+      const revision = createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 12)
+      return { ...skill, path, revision }
+    } catch {
+      throw new Error(`Reported skill ${skill.name} has no readable file at ${path}. List the skill file you actually read, or omit its path.`)
+    }
+  })
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
@@ -75,6 +93,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
     tool({
       name: 'orchestrator_report',
       description: 'Report progress, waiting, ready, blocked, failed or dropped, as the work and handoff sections say. '
+        + 'A ready report records the method and skills actually used and lists every required skill the assignment names. '
         + 'state=waiting says the only remaining work is an external condition such as CI or a review; the turn then ends and its '
         + 'shell jobs are parked, so the Ticket holds no worker slot while it waits.',
       schema: z.object({
@@ -94,6 +113,16 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           .describe('With recommendation: the known risk or uncertainty the person should weigh.'),
         draft: z.string().trim().min(1).max(4000).optional()
           .describe('With recommendation: a ready-to-review reply, message or answer the person may send or submit. Never send it yourself; the person decides.'),
+        method: z.string().trim().min(1).max(300).optional()
+          .describe('The professional method or framework you actually followed, when the result depends on one.'),
+        skills: z.array(z.object({
+          name: z.string().trim().min(1).max(120).describe('The registered skill name, such as review-weekly-role-progress.'),
+          path: z.string().trim().min(1).max(4096).optional()
+            .describe('The skill file you read; a relative path resolves against the ticket directory. The host records its content revision.'),
+          revision: z.string().trim().min(1).max(120).optional().describe('A revision to show when no file path applies.'),
+          template: z.string().trim().min(1).max(500).optional().describe('The historical template or document the work followed, when one applies.'),
+        }).strict()).max(20).optional()
+          .describe('Skills actually loaded for this result. A ready report must list every required skill the assignment names.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github?.login ?? 'the configured GitHub account'} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
         pr_repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).optional().describe('Repository of pr_number. Required for multi-repository work without a GitHub origin.'),
@@ -102,8 +131,12 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+        // The Assignment this call starts in owns its write; the Engine refuses a report after a retry or hand-over replaces it.
+        const assignmentId = (runningAssignment(current) ?? latestAssignment(current))?.id
+        if (!assignmentId) throw new UserError('unknownAssignment')
         if (args.pr_number != null && !host.github.deployment.github) throw new Error('This installation has no GitHub account; report the task result without pr_number')
         if (args.pr_repository && args.pr_number == null) throw new Error('pr_repository requires pr_number')
+        const skills = args.skills?.length ? reportedSkills(args.skills, current.execution?.directory ?? process.cwd()) : undefined
         const origin = host.github.triggers.get(current.origin.triggerId)
         const repository = args.pr_repository ?? (typeof origin?.meta.repository === 'string' ? origin.meta.repository : undefined)
         if (args.pr_number != null && host.github.deployment.githubRepositories?.length && !repository) {
@@ -118,7 +151,10 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
           const pending = host.store.tickets.get(ticketId)
-          if ((args.state === 'ready' || args.state === 'dropped') && pending && ticketFollowups(pending).length) {
+          if (!pending || !liveTicket(pending)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+          // Recheck inside the commit transaction, before any claim or relay, so a replaced Assignment owns no write from this call.
+          if ((runningAssignment(pending) ?? latestAssignment(pending))?.id !== assignmentId) throw new UserError('assignmentEnded')
+          if ((args.state === 'ready' || args.state === 'dropped') && ticketFollowups(pending).length) {
             throw new Error('The scheduled follow-up is pending. End the turn to wait, or cancel the follow-up before reporting ready or dropped.')
           }
           const refused = pull && claimPull(github, ticketId, pull)
@@ -130,11 +166,12 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
             ...(args.recommendation_reason ? { reason: args.recommendation_reason } : {}),
             ...(args.risk ? { risk: args.risk } : {}), ...(args.draft ? { draft: args.draft } : {}) } : undefined
           const report = { state: args.state, summary: args.summary, ...(args.deliverables || args.files ? { deliverables } : {}),
+            ...(args.method ? { method: args.method } : {}), ...(skills?.length ? { skills } : {}),
             ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(advice ? { advice } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
-          const updated = host.engine.report(ticketId, report)
+          const updated = host.engine.report(ticketId, report, assignmentId)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'

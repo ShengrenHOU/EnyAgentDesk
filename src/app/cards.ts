@@ -3,6 +3,7 @@ import { latestReport, reasonText, threadKey, ticketFollowups, ticketStage, type
   type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { pullOf } from '../sources/github-pull.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
+import { allLines, type LineRepo, type LineStatus } from './lines.ts'
 
 /** Collapses whitespace and truncates text for display previews while keeping code, angle brackets, and links intact for model readers. */
 export function preview(text: string): string { return text.replace(/\s+/g, ' ').slice(0, 160) }
@@ -49,6 +50,7 @@ export function assignmentLine(ticket: Ticket, item: Ticket['assignments'][numbe
   return { id: item.id, state: item.state, at: item.createdAt, ...(item.endedReason ? { ended_reason: reasonText({ code: item.endedReason }) } : {}),
     ...(item.report ? { report: { state: item.report.state, at: item.report.at, preview: preview(item.report.summary).slice(0, 100),
       ...(item.report.deliverables?.length ? { deliverables: item.report.deliverables } : {}),
+      ...(item.report.method ? { method: item.report.method } : {}), ...(item.report.skills?.length ? { skills: item.report.skills } : {}),
       chars: item.report.summary.length, read: `ticket/${ticket.id}/report/${item.id}` } } : {}) }
 }
 /**
@@ -65,6 +67,7 @@ export function reportExcerpt(ticket: Ticket, item: Ticket['assignments'][number
     && (/\d/.test(line) || /https?:\/\//.test(line))))].slice(0, 4)
   return { assignment_id: item.id, state: report.state, at: report.at, conclusion,
     ...key.length ? { key } : {}, ...(report.deliverables?.length ? { deliverables: report.deliverables } : {}),
+    ...(report.method ? { method: report.method } : {}), ...(report.skills?.length ? { skills: report.skills } : {}),
     chars: report.summary.length, read: `ticket/${ticket.id}/report/${item.id}` }
 }
 export function reportHistory(ticket: Ticket, offset: number, size: number) {
@@ -88,6 +91,7 @@ export function ticketDetails(ticket: Ticket, threads: TicketThread[], batch: re
   return { ...card, trigger_id: ticket.origin.triggerId, ...batch.length ? { batch: batch.map(batchLine) } : {},
     ...worker ? {} : { decision_id: ticket.decisionId }, threads, directory: ticket.execution?.directory,
     scope: ticket.mandate.scope, requested_by: ticket.mandate.actor.id,
+    ...ticket.execution?.requiredSkills?.length ? { required_skills: ticket.execution.requiredSkills } : {},
     ...followups.length ? { followups } : {},
     assignments: newestPage(ticket.assignments, 0, ASSIGNMENTS, item => assignmentLine(ticket, item), `ticket/${ticket.id}/assignments`),
     inputs: newestPage(ticket.inputs, 0, INPUTS, input => inputLine(ticket, input, worker), `ticket/${ticket.id}/inputs`),
@@ -119,4 +123,91 @@ export function textPage(resource: string, text: string, offset: number, limit: 
 export function relatedTickets(tickets: readonly Ticket[]) {
   const order = [...tickets].sort((a, b) => Number(!a.ended) === Number(!b.ended) ? b.createdAt.localeCompare(a.createdAt) : a.ended ? 1 : -1)
   return { related_tickets: order.slice(0, 8).map(ticketCard), tickets_total: tickets.length }
+}
+/** The fixed meaning of `related_lines`: recalled terms are evidence for the main Session's judgement, never a membership verdict. */
+export const RELATED_LINES_NOTE = '以下是按消息词面召回的可能相关主线，只是证据、不是归属结论：判断是否同一目标后，再决定 continue / attach / accept with line_id / 新建线（closed 线先带证据 restore）。'
+export const RELATED_LINES = 5, RELATED_LINE_TICKETS = 3, RELATED_LINE_TERMS = 6
+export interface RelatedLineTicket { ticket_id: string; title: string; at: string; state: TicketCardState; report?: string }
+export interface RelatedLine {
+  line_id: string; title: string; status: LineStatus; updated_at: string
+  /** The terms that recalled this line; they do not establish membership. */
+  matched: string[]
+  /** The open member Ticket that changed most recently, when the line has one. */
+  active?: { ticket_id: string; title: string; state: TicketCardState }
+  recent_tickets: RelatedLineTicket[]
+  read: { tool: 'orchestrator_line'; action: 'view'; line_id: string }
+}
+export interface RelatedLines { note: string; items: RelatedLine[] }
+const TERM_CHARS = 6
+const NOT_TERM = /[^\p{L}\p{N}]+/u
+const CJK = /[\u3400-\u9fff]+/g
+const LATIN = /[a-z][a-z0-9-]+/g
+const normalize = (value: string): string => value.normalize('NFKC').toLocaleLowerCase()
+/**
+ * The words of `corpus` that also appear in `text`, longest first. It is a bounded recall aid for Chinese and Latin
+ * terms, not a tokenizer or a semantic comparison: a recall misses rather than inventing a link.
+ */
+function sharedTerms(corpus: string, text: string): string[] {
+  const terms = new Set<string>()
+  for (const segment of corpus.split(NOT_TERM)) {
+    if (!segment) continue
+    for (const run of segment.match(CJK) ?? []) {
+      for (let size = Math.min(TERM_CHARS, run.length); size >= 2; size--) {
+        for (let start = 0; start + size <= run.length; start++) {
+          const term = run.slice(start, start + size)
+          if (text.includes(term)) terms.add(term)
+        }
+      }
+    }
+    for (const word of segment.match(LATIN) ?? []) if (word.length >= 3 && text.includes(word)) terms.add(word)
+  }
+  const longest = [...terms].sort((a, b) => b.length - a.length || a.localeCompare(b))
+  // Keep the longest matches only: a short one adds nothing when a longer one already covers it.
+  const kept: string[] = []
+  for (const term of longest) {
+    if (kept.some(other => other.includes(term))) continue
+    kept.push(term)
+    if (kept.length >= RELATED_LINE_TERMS) break
+  }
+  return kept
+}
+/**
+ * Lines a message may continue, recalled from the message's own words against line titles, member Ticket titles and
+ * recent membership evidence. The result is bounded, read-only evidence for the main Session: it never attaches,
+ * opens or closes a line, and no match at all omits the field rather than reporting an empty claim.
+ */
+export function relatedLines(repo: LineRepo, text: string, limit = RELATED_LINES): RelatedLines | undefined {
+  const query = normalize(text)
+  if (!query) return undefined
+  const entries = allLines(repo).flatMap(line => {
+    const tickets = line.tickets.flatMap(id => repo.tickets.get(id) ?? [])
+    const corpus = normalize([line.title, ...tickets.map(ticket => ticket.title), ...line.judgements.slice(-3).map(item => item.evidence)]
+      .join('\n').slice(0, 4000))
+    const matched = sharedTerms(corpus, query)
+    if (!matched.length) return []
+    const updatedAt = [line.updatedAt, ...tickets.map(ticket => ticket.updatedAt)].reduce((a, b) => a > b ? a : b)
+    return [{ line, tickets, matched, updatedAt }]
+  })
+  if (!entries.length) return undefined
+  // A term that also recalls many lines is weaker evidence than one only this line shares.
+  const frequency = new Map<string, number>()
+  for (const entry of entries) for (const term of entry.matched) frequency.set(term, (frequency.get(term) ?? 0) + 1)
+  const rank = (entry: typeof entries[number]): number => entry.matched.reduce((sum, term) => sum + (term.length - 1) / (1 + (frequency.get(term) ?? 1)), 0)
+  const items = [...entries].sort((a, b) => (a.line.status === b.line.status ? 0 : a.line.status === 'open' ? -1 : 1)
+    || rank(b) - rank(a) || b.updatedAt.localeCompare(a.updatedAt) || a.line.id.localeCompare(b.line.id))
+    .slice(0, Math.max(1, Math.min(limit, 10)))
+    .map(({ line, tickets, matched, updatedAt }): RelatedLine => {
+      const open = tickets.filter(ticket => !ticket.ended).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      const recent = [...tickets].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)).slice(0, RELATED_LINE_TICKETS)
+      const active = open[0]
+      return { line_id: line.id, title: line.title, status: line.status, updated_at: updatedAt, matched,
+        ...(active ? { active: { ticket_id: active.id, title: active.title, state: ticketCard(active).state } } : {}),
+        recent_tickets: recent.map(ticket => {
+          const report = latestReport(ticket)
+          return { ticket_id: ticket.id, title: ticket.title, at: ticket.createdAt, state: ticketCard(ticket).state,
+            ...(report ? { report: preview(report.summary) } : {}) }
+        }),
+        read: { tool: 'orchestrator_line', action: 'view', line_id: line.id } }
+    })
+  return { note: RELATED_LINES_NOTE, items }
 }

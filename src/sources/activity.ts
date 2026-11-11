@@ -10,8 +10,8 @@ import { sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
 import { ownerDiscussionChannel, type WorkbenchConfig } from './workbench.ts'
 import type { ActivityBindings, ActivityEvent, ActivityProvider, ActivityRange, ActivityReaderContext, ActivityScan, ActivityTools } from './activity-types.ts'
-import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext } from './activity-lark.ts'
-import { scanWechatActivity, readWechatActivityContext } from './activity-wechat.ts'
+import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext, readLarkImContext } from './activity-lark.ts'
+import { scanWechatActivity, readWechatActivityContext, readWechatImContext } from './activity-wechat.ts'
 
 export const SOURCE = 'activity'
 const PROVIDERS = ['feishu-messages', 'feishu-documents', 'wechat'] as const
@@ -116,6 +116,8 @@ const LocatorSchema = z.discriminatedUnion('provider', [
 const EventSchema = z.object({ provider: z.enum(PROVIDERS), accountId: z.string(), objectId: z.string(), id: z.string(),
     version: z.string(), at: z.string(), text: z.string(), reference: z.string(), locator: LocatorSchema, threadId: z.string().optional(),
   label: z.string().optional(), senderId: z.string().optional(), senderLabel: z.string().optional(), url: z.string().optional(),
+  direction: z.string().optional(),
+  senderType: z.string().optional(), senderIdType: z.string().optional(), contentType: z.string().optional(), parentId: z.string().optional(),
   contentPartial: z.boolean().optional(),
 }).refine(event => event.provider === event.locator.provider, 'Activity provider and locator disagree')
 
@@ -156,6 +158,36 @@ export function createActivityKind(bindings: ActivitySourceBindings, tools: Acti
       if (bindings.ownerChatId && message.channel.source === 'feishu' && message.channel.address.chatId === bindings.ownerChatId) {
         await assertOwnerAudience(commands, bindings)
       }
+    },
+    imEvidence: (trigger, config) => {
+      const event = EventSchema.parse(trigger.meta.activity)
+      if (!enabled(config, event.provider) || event.provider === 'feishu-documents') return undefined
+      return { provider: event.provider, account: event.accountId, conversation: event.objectId,
+        message: event.locator.provider === 'wechat' ? event.locator.messageRef : event.id, version: event.version,
+        ...(event.senderId ? { sender: event.senderId } : {}), partial: event.contentPartial ?? false,
+        ...(event.direction !== undefined ? { direction: event.direction } : {}),
+        ...(event.threadId && event.threadId !== event.id ? { root: event.threadId } : {}) }
+    },
+    imHeader: trigger => {
+      const event = EventSchema.parse(trigger.meta.activity)
+      return { at: event.at,
+        ...(event.label ? { conversationLabel: event.label } : {}),
+        ...(event.senderLabel ? { senderLabel: event.senderLabel } : {}),
+        ...(event.senderType ? { senderType: event.senderType } : {}),
+        ...(event.senderIdType ? { senderIdType: event.senderIdType } : {}),
+        ...(event.contentType ? { contentType: event.contentType } : {}),
+        ...(event.parentId ? { parent: event.parentId } : {}),
+        ...(event.url ? { url: event.url } : {}) }
+    },
+    imAnchorText: trigger => EventSchema.parse(trigger.meta.activity).text,
+    imContext: async (commands, request, cursor, config, signal) => {
+      if (request.anchor.provider === 'wechat' && enabled(config, 'wechat')) {
+        return readWechatImContext(tools, bindings.wechat, request, cursor, signal)
+      }
+      if (request.anchor.provider === 'feishu-messages' && enabled(config, 'feishu-messages')) {
+        return readLarkImContext(commands, bindings.lark, request, cursor, signal)
+      }
+      throw new Error('This IM context reader is disabled or unsupported')
     },
     threadContext: {
       messageId: trigger => {

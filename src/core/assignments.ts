@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
-import type { Attention, DecisionAdvice, Deliverable, ReportState, Ticket } from './model.ts'
+import type { Attention, DecisionAdvice, Deliverable, ReportedSkill, ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { automatic, type Tickets } from './tickets.ts'
@@ -12,6 +12,10 @@ export interface WorkerReport {
   state: ReportState
   summary: string
   deliverables?: Deliverable[]
+  /** The professional method the worker followed, when the result depends on one. */
+  method?: string
+  /** The skills the worker loaded; a ready report lists every skill the assignment requires. */
+  skills?: ReportedSkill[]
   /** Open question for a person: a string asks it, `null` clears an open one, and `undefined` keeps the current one. */
   question?: string | null
   /** The action the worker recommends, with its evidence, risk and draft; it requires the question it belongs to. */
@@ -105,10 +109,12 @@ export class Assignments extends EnginePart {
   /**
    * Records a worker status report on an open ticket's current assignment, updating `attention`, `answers`, held automated
    * inputs, and ending the ticket when `dropped` or when `ready` and not waiting on followed threads (`followsDone`).
-   * @throws UserError for an unknown or ended ticket, an ended assignment, a question combined with a ready result or answer,
-   * or a question/answer referencing a non-human or unreached trigger.
+   * `expectedAssignmentId` binds a worker's asynchronous call to the assignment it started in: once a retry, hand-over or
+   * restart has made another assignment current, the late caller is refused instead of writing into the new owner.
+   * @throws UserError for an unknown or ended ticket, an ended or replaced assignment, a question combined with a ready
+   * result or answer, or a question/answer referencing a non-human or unreached trigger.
    */
-  report(ticketId: string, report: WorkerReport): Ticket {
+  report(ticketId: string, report: WorkerReport, expectedAssignmentId?: string): Ticket {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
@@ -124,6 +130,15 @@ export class Assignments extends EnginePart {
     const assignment = runningAssignment(ticket) ?? latestAssignment(ticket)
     if (!assignment) throw new UserError('unknownAssignment')
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
+    // Checked before any report state changes, so a stale caller cannot claim a PR, clear attention, relay or end the ticket.
+    if (expectedAssignmentId && assignment.id !== expectedAssignmentId) throw new UserError('assignmentEnded')
+
+    const required = ticket.execution?.requiredSkills ?? []
+    if (report.state === 'ready' && required.length) {
+      const listed = new Set((report.skills ?? []).map(skill => skill.name))
+      const missing = required.filter(name => !listed.has(name))
+      if (missing.length) throw new UserError('missingRequiredSkills', { skills: missing.join(', ') })
+    }
     const at = this.now()
     const previous = ticket.attention
     const ask = (question: string): Attention => ({ id: key('attention', ticketId, question, at,
@@ -139,7 +154,8 @@ export class Assignments extends EnginePart {
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
     assignment.report = { state: report.state, summary: report.summary, at,
-      ...(report.deliverables ? { deliverables: report.deliverables } : {}) }
+      ...(report.deliverables ? { deliverables: report.deliverables } : {}),
+      ...(report.method ? { method: report.method } : {}), ...(report.skills?.length ? { skills: report.skills } : {}) }
     for (const input of ticket.inputs) if (input.kind === 'answer' && input.readAt && input.deliveredTo === assignment.id) input.reportedAt ??= at
     ticket.updatedAt = at
     if (report.answers && !ticket.answers?.includes(report.answers)) ticket.answers = [...ticket.answers ?? [], report.answers]

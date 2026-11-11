@@ -1,7 +1,7 @@
 /** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { SearchView } from './api.ts'
-import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
+import { Button, Dot, Icon, Input, Modal, SegmentedTabs, Tag } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
@@ -100,6 +100,24 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
+/** The running package build, with a warning when the monitored source's default branch has moved past it. */
+function RuntimeBadge() {
+  const { t } = usePanel()
+  const { state } = usePanelData()
+  const runtime = state?.runtime
+  if (!runtime) return null
+  const unknown = t('runtimeUnknown')
+  const detail = t('runtimeVersionTip', { version: runtime.packageVersion, commit: runtime.commit || unknown,
+    builtAt: runtime.builtAt || unknown, startedAt: runtime.startedAt })
+  const behind = runtime.behind
+  return <Tag tone={behind ? 'warning' : 'quiet'} title={behind
+    ? `${detail}\n${t('runtimeBehindTip', { commit: runtime.commit || unknown, repository: runtime.repository || unknown,
+      branch: behind.branch, head: behind.head })}` : detail}>
+    {behind && <Icon name="alert" size={12} />}
+    {t('runtimeVersion', { version: runtime.packageVersion })}{behind ? ` · ${t('runtimeBehind', { branch: behind.branch })}` : ''}
+  </Tag>
+}
+
 function Header({ masterId, newDiscussion, daily }: { masterId: string | undefined; newDiscussion?: () => void; daily?: boolean }) {
   const { t, call, openSession, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
@@ -133,6 +151,7 @@ function Header({ masterId, newDiscussion, daily }: { masterId: string | undefin
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
+        <RuntimeBadge />
         {newDiscussion && <Button variant="ghost" size="sm" onClick={newDiscussion}>{t('workbenchNewDiscussion')}</Button>}
         <Button variant="primary" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
         onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>

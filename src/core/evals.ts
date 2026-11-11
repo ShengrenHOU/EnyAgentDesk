@@ -34,6 +34,7 @@ export class Evals extends EnginePart {
    */
   due(thread: Thread, policy: Policy): void {
     const evaluation = thread.evaluating
+    if (evaluation) this.assertNotHeld(...evaluation.triggerIds)
     if (!evaluation || (policy.paused && evaluation.pausedAt)) return
     const now = this.now()
     if (policy.paused) evaluation.pausedAt = now
@@ -48,6 +49,7 @@ export class Evals extends EnginePart {
   delivered(evalId: string, policy: Policy): void {
     const thread = this.repo.threads.active().find(item => item.evaluating?.id === evalId)
     if (!thread?.evaluating || thread.evaluating.delivered) return
+    this.assertNotHeld(...thread.evaluating.triggerIds)
     const now = this.now()
     thread.evaluating.delivered = now
     thread.evaluating.deadline = new Date(Date.parse(now) + policy.evalTimeoutMs).toISOString()
@@ -64,13 +66,21 @@ export class Evals extends EnginePart {
     delete thread.evaluating
     thread.expired = expired
     thread.pending = [...triggerIds, ...thread.pending.filter(item => !triggerIds.includes(item))]
+    thread.evalQueuedAt = this.now()
     this.repo.threads.save(thread)
     this.options.assessor.release?.(id)
   }
   /** Start one Eval of the Triggers queued on a Thread, judged by the gate, and ask the assessor for it. */
-  start(threadKeyValue: string, policy: Policy): void {
+  start(threadKeyValue: string, policy: Policy, admit: (strength: Strength) => boolean = () => true): void {
     const thread = this.repo.threads.get(threadKeyValue)!
     const at = this.now()
+    // Repair stale duplicate queues without producing Decisions for externally held evidence.
+    const available = thread.pending.filter(id => !this.repo.triggers.disposition(id)?.triage)
+    if (available.length !== thread.pending.length) {
+      thread.pending = available
+      if (!thread.pending.length) delete thread.evalQueuedAt
+      this.repo.threads.save(thread)
+    }
     // A person's follow-up a ticket still decides is that ticket's: one an older version queued leaves the queue without a Decision.
     const delivered = (id: string) => {
       const trigger = this.repo.triggers.get(id)
@@ -81,14 +91,17 @@ export class Evals extends EnginePart {
       thread.pending = thread.pending.filter(id => !followups.includes(id))
       this.repo.threads.save(thread)
       for (const triggerId of followups) this.emit('trigger.followup', { triggerId })
-      if (!thread.pending.length) return
+      if (!thread.pending.length) { delete thread.evalQueuedAt; this.repo.threads.save(thread); return }
     }
     // Triggers that already originated a ticket cannot lend authority to a new evaluation or spawn a duplicate ticket.
     const accepted = this.accepted(thread.key)
     const started = thread.pending.filter(id => accepted.has(id))
     const startedTicket = (id: string): Reason => ({ code: 'startedTicket', triggerId: id, values: { ticket: accepted.get(id)!.ticketId! } })
     if (started.length) this.ignore(thread, started, started.map(startedTicket), policy, at)
-    const triggers = thread.pending.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
+    const deferred = thread.pending.filter(id => { const trigger = this.repo.triggers.get(id); return trigger && this.options.deferEvaluation?.(trigger) })
+    const pending = thread.pending.filter(id => !deferred.includes(id))
+    if (!pending.length) return
+    const triggers = pending.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const tickets = this.ticketsOnThread(thread)
     const reasons: Reason[] = []
     let strongest: { trigger: Trigger; strength: Strength; basis: MandateBasis } | undefined
@@ -100,16 +113,23 @@ export class Evals extends EnginePart {
       if (weaker || later) strongest = { trigger, strength: gate.strength, basis: gate.basis }
     }
     if (!strongest) {
-      if (thread.pending.length) this.ignore(thread, [...thread.pending], reasons.length ? reasons : [{ code: 'noAdmissible' }], policy, at)
+      if (pending.length) this.ignore(thread, pending, reasons.length ? reasons : [{ code: 'noAdmissible' }], policy, at)
+      if (!thread.pending.length) delete thread.evalQueuedAt
       this.repo.threads.save(thread)
       return
     }
-    const evalId = key('eval', thread.key, policy.version, at, ...thread.pending)
+    // Admission is after cleanup and the gate, but before an Eval, disposition, effect or timeout exists.
+    if (!admit(strongest.strength)) {
+      if (started.length) this.repo.threads.save(thread)
+      return
+    }
+    const evalId = key('eval', thread.key, policy.version, at, ...pending)
     const deadline = new Date(Date.parse(at) + policy.evalTimeoutMs).toISOString()
     const { strength, trigger: { actor }, basis } = strongest
-    thread.evaluating = { id: evalId, threadKey: thread.key, triggerIds: thread.pending, primary: strongest.trigger.id, strength, actor, basis,
+    thread.evaluating = { id: evalId, threadKey: thread.key, triggerIds: pending, primary: strongest.trigger.id, strength, actor, basis,
       policyVersion: policy.version, startedAt: at, deadline }
-    thread.pending = []
+    thread.pending = deferred
+    if (!deferred.length) delete thread.evalQueuedAt
     this.repo.threads.save(thread)
     for (const trigger of triggers) {
       this.repo.triggers.saveDisposition(trigger.id, { ...(this.repo.triggers.disposition(trigger.id) ?? { fanout: [], at }), evalId })
@@ -129,6 +149,7 @@ export class Evals extends EnginePart {
    * mode or without enabled matching rules.
    */
   decide(triggerId: string, outcome: Outcome): Decision {
+    this.assertNotHeld(triggerId)
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     const held = this.holding(triggerId)
@@ -165,6 +186,7 @@ export class Evals extends EnginePart {
   }
   /** Queue a Trigger for a fresh Eval on its primary Thread; false while an Eval holds it. */
   private requeue(triggerId: string): boolean {
+    this.assertNotHeld(triggerId)
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     if (this.holding(triggerId)) return false
@@ -202,6 +224,7 @@ export class Evals extends EnginePart {
     const thread = this.repo.threads.get(threadKey(trigger.threads[0]!))
     if (!thread?.pending.includes(trigger.id)) return
     thread.pending = thread.pending.filter(id => id !== trigger.id)
+    if (!thread.pending.length) delete thread.evalQueuedAt
     this.repo.threads.save(thread)
   }
   /**
@@ -225,6 +248,7 @@ export class Evals extends EnginePart {
     const decision = this.finish(thread, thread.evaluating!, { kind: 'unavailable', reason: [reason] })
     const current = this.repo.threads.get(thread.key)!
     current.pending = [...ids, ...current.pending.filter(id => !ids.includes(id))]
+    if (current.pending.length) current.evalQueuedAt = this.now()
     this.repo.threads.save(current)
     return decision
   }
@@ -235,6 +259,7 @@ export class Evals extends EnginePart {
     return thread?.evaluating?.triggerIds.includes(triggerId) ? thread : undefined
   }
   private candidateOf(thread: Thread): Candidate {
+    this.assertNotHeld(...thread.evaluating!.triggerIds)
     const evaluation = thread.evaluating!
     const triggers = evaluation.triggerIds.flatMap(id => { const trigger = this.repo.triggers.get(id); return trigger ? [trigger] : [] })
     const { id: evalId, strength, policyVersion } = evaluation
@@ -249,6 +274,7 @@ export class Evals extends EnginePart {
       actor: { source: thread.ref.source, id: '' }, basis: { via: 'followup' as const }, policyVersion: policy.version, startedAt: at, deadline: at }
     this.record(thread, evaluation, { kind: 'ignore', reason })
     thread.pending = thread.pending.filter(id => !ids.includes(id))
+    if (!thread.pending.length) delete thread.evalQueuedAt
     delete thread.expired
   }
   /**
@@ -273,13 +299,18 @@ export class Evals extends EnginePart {
     const gate = policy.gate(trigger, thread, this.ticketsOnThread(thread))
     if (!gate.admissible) throw new UserError('notAdmissible', { reason: gate.reason })
     const at = this.now()
-    if (thread.pending.includes(trigger.id)) { thread.pending = thread.pending.filter(id => id !== trigger.id); this.repo.threads.save(thread) }
+    if (thread.pending.includes(trigger.id)) {
+      thread.pending = thread.pending.filter(id => id !== trigger.id)
+      if (!thread.pending.length) delete thread.evalQueuedAt
+      this.repo.threads.save(thread)
+    }
     const id = key('eval', thread.key, 'direct', trigger.id, kind, ...ticketId ? [ticketId] : [], at)
     return { id, threadKey: thread.key, triggerIds: [trigger.id], primary: trigger.id,
       strength: gate.strength, actor: trigger.actor, basis: gate.basis, policyVersion: policy.version, startedAt: at, deadline: at }
   }
   /** Apply an outcome to an Eval of a Thread: the one in progress, or a gate-only one. */
   private decideEval(thread: Thread, evaluation: Evaluation, outcome: AssessmentOutcome): Decision {
+    this.assertNotHeld(...evaluation.triggerIds)
     const audit = outcome.audit ? { audit: outcome.audit } : {}
     // Requeue if Policy changed without a live policyChanged call (such as across an upgrade or restart).
     if (this.policy().version !== evaluation.policyVersion) {
@@ -332,6 +363,7 @@ export class Evals extends EnginePart {
     return decision
   }
   private record(thread: Thread, evaluation: Evaluation, outcome: Finished): Decision {
+    this.assertNotHeld(...evaluation.triggerIds)
     const at = this.now()
     const decision: Decision = { id: key('decision', evaluation.id), evalId: evaluation.id, threadKey: thread.key, triggerIds: evaluation.triggerIds,
       policyVersion: evaluation.policyVersion, at, kind: outcome.kind, reason: outcome.reason, strength: evaluation.strength,

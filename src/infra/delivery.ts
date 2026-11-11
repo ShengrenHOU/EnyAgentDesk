@@ -11,7 +11,7 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-type Seen = { ids: Set<string>; loaded?: Promise<void> }
+type Seen = { ids: Set<string>; consumed: Map<string, number>; loaded?: Promise<void> }
 /** The id of the message delivered under `requestId`, the same on every retry. */
 export const messageId = (requestId: string) => MessageId(`dsh-superagent:${requestId}`)
 /** Extracts the idempotency key from current or legacy plugin message sources. */
@@ -34,12 +34,12 @@ export class AgentDelivery {
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'user/message') return
       const id = deliveryId(event.data)
-      if (id) this.seen.get(session)?.ids.add(id)
+      if (id) { const seen = this.seen.get(session); seen?.ids.add(id); if (Number.isFinite(event.time)) seen?.consumed.set(id, event.time) }
     })
   }
   private async history(agent: Agent): Promise<Seen> {
     let seen = this.seen.get(agent.session)
-    if (!seen) { seen = { ids: new Set() }; this.seen.set(agent.session, seen) }
+    if (!seen) { seen = { ids: new Set(), consumed: new Map() }; this.seen.set(agent.session, seen) }
     const state = seen
     state.loaded ??= (async () => {
       await this.ctx.sessionPersistence.flush()
@@ -50,13 +50,24 @@ export class AgentDelivery {
         for (const event of events) {
           if (event.type !== 'user/message') continue
           const id = deliveryId(event.data)
-          if (id) state.ids.add(id)
+          if (id) { state.ids.add(id); if (Number.isFinite(event.time)) state.consumed.set(id, event.time) }
         }
         offset += events.length
       }
     })().catch(error => { state.loaded = undefined; throw error })
     await state.loaded
     return state
+  }
+  /** Only durable user/message evidence establishes consumption; absence from an inbox proves nothing. */
+  async consumedAt(agent: Agent, requestId: string): Promise<number | undefined> {
+    const seen = await this.history(agent)
+    await this.ctx.sessionPersistence.flush()
+    return seen.consumed.get(messageId(requestId))
+  }
+  /** Synchronous unread snapshot for the final pre-enqueue admission check (after history is loaded). */
+  unread(agent: Agent): readonly UserMessage[] {
+    const seen = this.seen.get(agent.session)
+    return [...agent.inbox.nextTurn, ...agent.inbox.nextStep].filter(message => !seen?.consumed.has(message.id))
   }
   async holds(agent: Agent, requestId: string): Promise<boolean> {
     const id = messageId(requestId)

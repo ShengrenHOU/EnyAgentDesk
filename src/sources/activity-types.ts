@@ -25,6 +25,12 @@ export interface ActivityEvent {
   label?: string
   senderId?: string
   senderLabel?: string
+  senderType?: string
+  senderIdType?: string
+  contentType?: string
+  parentId?: string
+  /** Source-native direction evidence; never proof of sender identity or authority. */
+  direction?: string
   url?: string
   contentPartial?: boolean
 }

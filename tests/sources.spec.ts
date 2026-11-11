@@ -1549,7 +1549,8 @@ describe('observing the GitHub repository', () => {
     repository(h, answers)
     await pollRound(h)
     expect(h.receive).not.toHaveBeenCalled()
-    expect(h.store.get('github-branch-ci')).toEqual({ branch: 'main', failures: ['lint'], revision: 2 })
+    expect(h.store.get('github-branch-ci')).toEqual({ branch: 'main', head: 'ddd4444', observedAt: expect.any(String),
+      failures: ['lint'], revision: 2 })
     h.store.close()
   })
   it('takes in new PRs only from when their switch turned on, apart from when new Issues were', async () => {

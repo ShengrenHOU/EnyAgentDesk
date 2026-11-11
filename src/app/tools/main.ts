@@ -8,6 +8,8 @@ import { UserError, followupOwners, key, reasonText, type Decision, type Decisio
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
+import { activeTicket, attach, close, detail as lineDetail, findLineOf, open as openLine, readLine, reassign, reopen, search, summary as lineSummary,
+  type LineRecord } from '../lines.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
 import type { Sessions } from '../sessions.ts'
@@ -19,12 +21,14 @@ const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
 const RoutingStage = z.enum([...ExecutionStage.options, 'auxiliary'])
+/** A registered skill name; the accept requires the ready report to list each one. */
+const RequiredSkill = z.string().trim().regex(/^[a-z][a-z0-9-]{0,63}$/, 'Use the registered skill name, such as review-weekly-role-progress')
 export interface MainToolsHost {
   /** Mixed execution requires a routing stage; `stage` also retains the legacy Codex-stage requirement. */
   routingRequirements?(): { executor: boolean; stage: boolean }
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
@@ -57,6 +61,14 @@ const RouteItemSchema = z.object({
   stage: RoutingStage.nullish().describe('accept: required for mixed paths even with codexModel. documentation=documents; research=deep research/architecture; implementation=code/fixes; auxiliary=simple extraction/summary or explicit DSH. Host selects executor.'),
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
   acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it.`),
+  required_skills: z.array(z.string()).nullish()
+    .describe('accept: registered skill names this task must load and list in its ready report, when it has a fixed professional method. Omit when the task has none; do not invent names.'),
+  line_id: z.string().nullish()
+    .describe('accept: an existing open line from orchestrator_line search; join the new Ticket to it.'),
+  line_title: z.string().nullish()
+    .describe('accept: a specific goal title for a new line this Ticket starts; omit for an independent Ticket.'),
+  line_evidence: z.string().nullish()
+    .describe('accept: with line_id or line_title, the facts that make this the same goal; not shared keywords alone.'),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
   reason: z.string().nullish().describe('ignore and stop: why, at most 500 characters; an ignore needs it.'),
 }).strict()
@@ -71,6 +83,10 @@ const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: r
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
   acknowledgement: { check: AcknowledgementSchema, reads: ['accept'], needs: ['accept'] },
+  required_skills: { check: z.array(RequiredSkill).min(1).max(10), reads: ['accept'], needs: [] },
+  line_id: { check: z.string().trim().min(1).max(200), reads: ['accept'], needs: [] },
+  line_title: { check: z.string().trim().min(1).max(200), reads: ['accept'], needs: [] },
+  line_evidence: { check: z.string().trim().min(1).max(1000), reads: ['accept'], needs: [] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
   reason: { check: z.string().max(500), reads: ['ignore', 'stop'], needs: ['ignore'] },
 }
@@ -79,16 +95,24 @@ function invalid(item: RouteItem): string | undefined {
   for (const [field, { check, reads, needs }] of Object.entries(FIELDS) as [Field, typeof FIELDS[Field]][]) {
     const value = item[field]
     if (!reads.includes(item.kind)) continue
-    if (value === undefined || value === null || value.trim() === '') {
+    const empty = value === undefined || value === null || (typeof value === 'string' ? value.trim() === '' : Array.isArray(value) && !value.length)
+    if (empty) {
       if (needs.includes(item.kind)) return `${item.kind} needs ${field}`
       continue
     }
     const checked = check.safeParse(value)
     if (!checked.success) return `${field}: ${checked.error.issues[0]?.message ?? 'invalid'}`
   }
+  if (item.kind === 'accept') {
+    const existing = !!item.line_id?.trim(), creating = !!item.line_title?.trim(), evidence = !!item.line_evidence?.trim()
+    if (existing && creating) return 'accept: choose line_id or line_title, not both'
+    if ((existing || creating) && !evidence) return 'accept: line_id or line_title needs line_evidence'
+    if (!existing && !creating && evidence) return 'accept: line_evidence needs line_id or line_title'
+  }
   return undefined
 }
-type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[] }
+type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | undefined; triggerIds?: readonly string[]
+  line?: { id: string; title: string; status: 'open' | 'closed' } }
 /**
  * Carry out one routing decision as its Engine command, in a transaction of its own. `decided` holds the Triggers that this
  * call's earlier items decided, with their batches.
@@ -113,14 +137,36 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
         executor = mapped
       }
       if (!accepted && required?.stage && executor === 'codex' && !stage) return { refused: 'accept needs the initial Codex stage: research, implementation or documentation' }
-      const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
-        acknowledgement: item.acknowledgement!, name: item.worktree_name!, ...(executor ? { executor } : {}), ...(stage ? { stage } : {}), ...note })
+      const lineTitle = item.line_title?.trim()
+      const linkId = item.line_id?.trim()
+      // Validate the line before accepting: a closed line needs an explicit restore to open with evidence, never an incidental link.
+      if (linkId) {
+        const target = readLine(host.store, linkId)
+        if (!target) return { refused: `Unknown line ${linkId}; search lines with orchestrator_line first` }
+        if (target.status === 'closed') return { refused: `Line “${target.title}” is closed; restore it to open with evidence before adding work` }
+      }
+      // A line and its new Ticket commit together: a refused link must not leave an accepted Ticket that belonged nowhere.
+      const acceptedLine = (): { decision: Decision; line?: LineRecord } => {
+        const decision = host.engine.decide(item.trigger_id, { kind: 'accept', title: item.title!, scope: item.title!, reason: { code: 'explicitRouted' },
+          acknowledgement: item.acknowledgement!, name: item.worktree_name!,
+          ...(item.required_skills?.length ? { requiredSkills: item.required_skills.map(name => name.trim()) } : {}),
+          ...(executor ? { executor } : {}), ...(stage ? { stage } : {}), ...note })
+        if (decision.kind !== 'accept' || !decision.ticketId || (!linkId && !lineTitle)) return { decision }
+        if (decision.id === before) return { decision, line: findLineOf(host.store, decision.ticketId) }
+        const line = linkId ? readLine(host.store, linkId) : openLine(host.store, { title: lineTitle!, evidence: item.line_evidence!,
+          requestId: `ticket:${decision.ticketId}` }).line
+        if (!line) throw new Error(`Unknown line ${linkId}`)
+        attach(host.store, { lineId: line.id, ticketId: decision.ticketId, evidence: item.line_evidence!, action: 'accepted' })
+        return { decision, line }
+      }
+      const { decision, line } = linkId || lineTitle ? host.store.atomic(acceptedLine) : acceptedLine()
+      const linked = line ? { line: { id: line.id, title: line.title, status: line.status } } : {}
       // A Decision that created no ticket is the item's refusal; one that existed before keeps what it was accepted with.
       if (decision.kind !== 'accept' || !decision.ticketId) return { refused: `Ticket was not created: ${reasonText(decision.reason)}` }
       if (decision.id === before) {
-        return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged`, ticketId: decision.ticketId }
+        return { decision: 'accept', reason: `Already accepted as ${decision.ticketId}; title and acknowledgement unchanged`, ticketId: decision.ticketId, ...linked }
       }
-      return { ...fromDecision(decision), triggerIds: decision.triggerIds }
+      return { ...fromDecision(decision), triggerIds: decision.triggerIds, ...linked }
     }
     case 'attach': {
       const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined))
@@ -158,7 +204,7 @@ function routeTool(host: MainToolsHost): Tool {
           for (const id of result.triggerIds ?? []) if (!decided.has(id)) decided.set(id, item.trigger_id)
           const ticket = result.ticketId ? host.store.tickets.get(result.ticketId) : undefined
           return { ...head, ...(result.decision ? { decision: result.decision } : {}), reason: result.reason,
-            ...(ticket ? { ticket: ticketCard(ticket) } : {}) }
+            ...(ticket ? { ticket: ticketCard(ticket) } : {}), ...(result.line ? { line: result.line } : {}) }
         } catch (error) {
           if (error instanceof UserError) return { ...head, refused: error.message }
           host.context.logger.warn('dsh-superagent could not route trigger %s: %s', item.trigger_id, String(error))
@@ -170,6 +216,89 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
+const LineActions = ['search', 'view', 'open', 'attach', 'continue', 'close', 'restore', 'detach', 'move'] as const
+/** A required field of one line action; each action names what its call must carry. */
+const need = (value: string | undefined, name: string): string => {
+  const trimmed = value?.trim()
+  if (!trimmed) throw new Error(`This action needs ${name}`)
+  return trimmed
+}
+/**
+ * `orchestrator_line`: the main Session's evidence and write path for long-lived goals.
+ * A line is judgement, not a tag: search shows the candidate lines and unlinked Tickets, and every mutation records concrete
+ * evidence. `continue` routes a follow-up to the line's open Ticket; a message alone never restores a closed line to open.
+ */
+function lineTool(host: MainToolsHost): Tool {
+  return tool({
+    name: 'orchestrator_line',
+    description: 'Search and maintain work lines (主线): one long-lived goal grouping Tickets across stages and Sessions. Before accepting work that may continue an existing goal, search with concrete terms and view the candidate; if it has an open Ticket, continue it; if not, accept the new stage with line_id and line_evidence. A different goal starts a new line (line_title) or stays independent. Never link on shared keywords alone; record what matched and what differs. attach links an existing Ticket (one line per Ticket). detach/move correct a mistaken link with evidence, without changing the Ticket. close refuses while any of its Tickets is open; only an explicit restore with evidence opens a closed line.',
+    schema: z.object({
+      action: z.enum(LineActions),
+      query: z.string().trim().max(1000).optional().describe('search: counterparty, project, asset or decision terms; omit to list open lines.'),
+      line_id: z.string().trim().min(1).max(200).optional().describe('The line id from search; detach/move use the current line.'),
+      target_line_id: z.string().trim().min(1).max(200).optional().describe('move: the existing open destination line.'),
+      ticket_id: z.string().trim().min(1).max(200).optional().describe('attach/detach/move: the existing Ticket; continue: one of the line\'s Tickets, defaulting to its most recently changed open one.'),
+      trigger_id: z.string().min(1).optional().describe('continue: the person\'s message that belongs to the line and goes to its open Ticket.'),
+      title: z.string().trim().min(1).max(200).optional().describe('open: the new goal title. Titles do not establish identity; use an existing line_id to continue a goal.'),
+      evidence: z.string().trim().min(1).max(1000).optional().describe('Mutation actions: the concrete facts behind this judgement, not a restatement of the title.'),
+    }).strict(),
+    execute: async (args, _signal, callId) => {
+      switch (args.action) {
+        case 'search': return search(host.store, args.query ?? '', 8)
+        case 'view': {
+          const line = lineDetail(host.store, need(args.line_id, 'line_id'))
+          if (!line) throw new Error(`Unknown line ${args.line_id}`)
+          return line
+        }
+        case 'open': {
+          const { line, created } = openLine(host.store, { title: need(args.title, 'a title'),
+            evidence: need(args.evidence, 'the evidence for opening the line'),
+            ...(callId ? { requestId: key('line-open', host.resources.masterId, callId) } : {}) })
+          return { line: lineSummary(host.store, line), created }
+        }
+        case 'attach': {
+          const { line, changed } = attach(host.store, { lineId: need(args.line_id, 'line_id'),
+            ticketId: need(args.ticket_id, 'ticket_id'), evidence: need(args.evidence, 'the evidence for linking the Ticket'),
+            ...(args.trigger_id ? { triggerId: args.trigger_id } : {}), action: 'attached' })
+          return { line: lineSummary(host.store, line), changed }
+        }
+        case 'detach':
+        case 'move': return reassign(host.store, { lineId: need(args.line_id, 'line_id'), ticketId: need(args.ticket_id, 'ticket_id'),
+          targetLineId: args.action === 'move' ? need(args.target_line_id, 'target_line_id') : null,
+          evidence: need(args.evidence, 'the evidence for correcting membership'), by: 'orchestrator' })
+        case 'continue': {
+          const id = need(args.line_id, 'line_id'), triggerId = need(args.trigger_id, 'trigger_id')
+          const evidence = need(args.evidence, 'the evidence for continuing the line')
+          const line = readLine(host.store, id)
+          if (!line) throw new Error(`Unknown line ${id}`)
+          if (line.status === 'closed') throw new Error(`Line “${line.title}” is closed; restore it to open with evidence before continuing it`)
+          const target = args.ticket_id ? host.store.tickets.get(args.ticket_id) : activeTicket(host.store, line)
+          if (!target) throw new Error(`Line “${line.title}” has no open Ticket; accept this work under the line with line_id instead`)
+          if (!line.tickets.includes(target.id)) throw new Error(`Ticket “${target.title}” is not on line “${line.title}”; use attach first`)
+          if (target.ended) throw new Error(`Ticket “${target.title}” has ended; continue an open Ticket or accept new work under the line with line_id`)
+          // The follow-up and its line judgement commit together: a refused one must not leave evidence claiming it was continued.
+          host.store.atomic(() => {
+            host.quietly(() => host.engine.attach(target.id, triggerId))
+            attach(host.store, { lineId: line.id, ticketId: target.id, evidence, triggerId, action: 'continued' })
+          })
+          host.requestPass()
+          const updated = host.store.tickets.get(target.id) ?? target
+          return { continued: true, line: lineSummary(host.store, readLine(host.store, line.id)!), ticket: ticketCard(updated) }
+        }
+        case 'close': {
+          const { line, closed } = close(host.store, { lineId: need(args.line_id, 'line_id'),
+            evidence: need(args.evidence, 'the evidence for closing the line') })
+          return { line: lineSummary(host.store, line), closed }
+        }
+        case 'restore': {
+          const { line, reopened } = reopen(host.store, { lineId: need(args.line_id, 'line_id'),
+            evidence: need(args.evidence, 'the evidence for restoring the line') })
+          return { line: lineSummary(host.store, line), restored: reopened }
+        }
+      }
+    },
+  })
+}
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -177,6 +306,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
     routeTool(host),
+    lineTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',

@@ -1,6 +1,6 @@
 /** The owner's decision queue: a read model over pending Questions with the owner's own defer and ignore records. */
 import { key, type DecisionAdvice } from '../core/index.ts'
-import { family } from '../kv.ts'
+import { family, type Key } from '../kv.ts'
 import type { SourceContext } from './host.ts'
 
 /** One pending decision as the panel shows it: who asks, what it is, what the agent recommends, and the draft. */
@@ -47,19 +47,31 @@ const item = (ticket: { id: string; title: string; updatedAt: string; priority?:
 const order = (a: QueueItem, b: QueueItem) => (PRIORITY[a.priority ?? 'normal']! - PRIORITY[b.priority ?? 'normal']!)
   || a.at.localeCompare(b.at)
 
+type DeferralState = { get<V>(key: Key<V>): V | undefined }
+/**
+ * The time a live deferral keeps this Ticket's current Question out of every "needs you now" count and list, or
+ * undefined when it is absent or due. The Today queue and the main-conversation overview both read this one record.
+ */
+export function deferredUntil(state: DeferralState, ticket: { id: string; attention?: { id: string } },
+  now = Date.now()): string | undefined {
+  const attention = ticket.attention
+  if (!attention) return undefined
+  const defer = state.get(queueDefer(ticket.id, attention.id))
+  return defer && defer.until > new Date(now).toISOString() ? defer.until : undefined
+}
+
 /**
  * Reads the queue from the Tickets and this Source's own records. It writes nothing: a deferred row leaves the open list and
  * returns when `until` passes, and an ignored row stays in the folded history with its reason so it can be corrected.
  */
 export function readQueue(source: SourceContext, now = Date.now()): QueueView {
-  const at = new Date(now).toISOString()
   const items: QueueItem[] = [], deferred: DeferredItem[] = []
   for (const ticket of source.tickets.open()) {
     const attention = ticket.attention
     if (!attention) continue
     const row = item(ticket, attention)
-    const defer = source.state.get(queueDefer(ticket.id, attention.id))
-    if (defer && defer.until > at) deferred.push({ ...row, until: defer.until })
+    const until = deferredUntil(source.state, ticket, now)
+    if (until) deferred.push({ ...row, until })
     else items.push(row)
   }
   const ignored = source.state.keys(queueIgnore).flatMap(entry => {

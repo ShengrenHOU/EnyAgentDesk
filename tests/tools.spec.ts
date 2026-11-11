@@ -1,12 +1,17 @@
 /** Session tool registration, role-scoped resource reads, and routing/settings tool contracts. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
+import { attach, open } from '../src/app/lines.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
+import { workbenchKind } from '../src/sources/workbench.ts'
 import { CHAT, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host
@@ -88,6 +93,52 @@ it('keeps Codex reports readable without pretending its native history is a DSH 
   expect(await read(`ticket/${ticket.id}/result`)).toMatchObject({ text: 'Persisted review evidence.' })
 })
 
+it('requires a ready report to list the accepted skills and records a checked method', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('skills', 'Write the weekly review from the fixed method'))
+  const stored = h.runtime.store.tickets.get(ticket.id)!
+  h.runtime.store.tickets.save({ ...stored, execution: { ...stored.execution!, requiredSkills: ['review-weekly-role-progress'] } })
+  await expect(h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Draft done' }))
+    .rejects.toThrow(/must list the required skills/)
+  // A claimed path the worker did not read is refused before anything is recorded.
+  await expect(h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Looking',
+    skills: [{ name: 'review-weekly-role-progress', path: join(tmpdir(), 'no-such-skill.md') }] }))
+    .rejects.toThrow('no readable file')
+  expect(h.runtime.store.tickets.get(ticket.id)?.assignments.at(-1)?.report?.skills).toBeUndefined()
+  const skill = join(tmpdir(), `dsh-skill-${process.pid}-${Date.now()}.md`)
+  writeFileSync(skill, '# Weekly review\n\nUse the existing sections.\n')
+  try {
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Draft done', method: 'review-weekly-role-progress',
+      skills: [{ name: 'review-weekly-role-progress', path: skill, template: '2026-10-26 weekly review outline' }] })
+  } finally { rmSync(skill, { force: true }) }
+  const report = h.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report!
+  expect(report).toMatchObject({ state: 'ready', method: 'review-weekly-role-progress',
+    skills: [{ name: 'review-weekly-role-progress', path: skill, template: '2026-10-26 weekly review outline',
+      revision: expect.stringMatching(/^[0-9a-f]{12}$/) }] })
+  const assignments = await read(`ticket/${ticket.id}/assignments`) as { items: { report: { method: string; skills: { name: string }[] } }[] }
+  expect(assignments.items[0]!.report).toMatchObject({ method: 'review-weekly-role-progress',
+    skills: [expect.objectContaining({ name: 'review-weekly-role-progress', path: skill })] })
+  const assignmentId = h.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id
+  const reportPage = await read(`ticket/${ticket.id}/report/${assignmentId}`) as { text: string }
+  expect(reportPage.text).toContain('Method: review-weekly-role-progress')
+  expect(reportPage.text).toContain('Skills:')
+  expect(reportPage.text).toContain(skill)
+})
+
+it('reads work lines and the open Tickets on none of them', async () => {
+  const { ticket: linked } = await h.acceptedTicket(feishu('line-1', '申昊战略入股：盘点文档'))
+  const { ticket: unlinked } = await h.acceptedTicket(feishu('line-2', '另一个独立目标'))
+  const { line } = open(h.runtime.store, { title: '申昊战略入股', evidence: '同一交易' })
+  attach(h.runtime.store, { lineId: line.id, ticketId: linked.id, evidence: '盘点文档是同一交易的准备阶段' })
+  const lines = await read('lines') as { counts: { open: number; closed: number; unlinked: number }
+    open: { id: string; read: string; active?: { id: string } }[]; recent_unlinked: { ticket_id: string; read: string }[] }
+  expect(lines.counts).toEqual({ open: 1, closed: 0, unlinked: 1 })
+  expect(lines.open).toEqual([expect.objectContaining({ id: line.id, title: '申昊战略入股', read: `line/${line.id}`,
+    active: expect.objectContaining({ id: linked.id }) })])
+  expect(lines.recent_unlinked).toEqual([expect.objectContaining({ ticket_id: unlinked.id, read: `ticket/${unlinked.id}` })])
+  expect(await read(`line/${line.id}`)).toMatchObject({ id: line.id, tickets: [expect.objectContaining({ id: linked.id })] })
+  await expect(read('line/unknown')).rejects.toThrow('Unknown line')
+})
+
 it('reads the lists, a ticket, a decision, the settings, the prompts and the models as resources', async () => {
   const { ticket, trigger } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   await h.acceptedTicket(feishu('2', '@bot 再修一个'))
@@ -128,6 +179,54 @@ it('reads the lists, a ticket, a decision, the settings, the prompts and the mod
   expect(await read('prompts', { limit: 8000 })).toMatchObject({ items: expect.objectContaining({ length: 50 }), next_offset: 50 })
 })
 
+/** Register the native workbench and give it an owner, as its plugin does before the conversation resource reads. */
+const configureWorkbench = () => {
+  h.runtime.sources.register(workbenchKind)
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, sources: { ...settings.sources, workbench: { enabled: true, config: { ownerId: 'local-owner' } } } })
+}
+const ownerMessage = (seq: number, text: string, at: number) => ({ type: 'user/message', seq, time: at,
+  data: { content: [{ type: 'text', text }], source: { kind: 'user' } } })
+
+it('serves the owner conversation only while the native workbench is enabled with an owner', async () => {
+  await expect(read('conversation')).rejects.toThrow('native workbench Source')
+  configureWorkbench()
+  const settings = h.runtime.store.settings()
+  h.runtime.store.saveSettings({ ...settings, sources: { ...settings.sources, workbench: { enabled: false, config: { ownerId: 'local-owner' } } } })
+  await expect(read('conversation')).rejects.toThrow('native workbench Source')
+})
+
+it('lets a worker read the owner\'s last 24 hours newest first, without another ticket\'s private data', async () => {
+  const first = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const second = await h.acceptedTicket(feishu('2', '@bot 再修一个'))
+  configureWorkbench()
+  const now = Date.now()
+  vi.mocked(h.controller.inspect).mockResolvedValue({ meta: { id: h.runtime.masterId }, events: [
+    ownerMessage(0, 'Old activation idea', now - 30 * 3_600_000),
+    ownerMessage(1, 'The activation page is confusing.', now - 2 * 3_600_000),
+    { type: 'assistant/message', seq: 2, time: now - 3_600_000, data: { message: { content: [{ type: 'text', text: 'Proposed workbench plan' }] } } },
+    { type: 'user/message', seq: 3, time: now - 1_800_000, data: { content: [{ type: 'text', text: 'Automated relay' }], source: { kind: 'system-prompt' } } },
+  ] } as never)
+  const page = await h.runTool(first.sessionId, 'orchestrator_read', { resource: 'conversation' }) as
+    { session_id: string; items: { seq: number; role: string; text: string }[]; attachments: unknown[]; next_offset: number | null }
+  expect(page).toMatchObject({ session_id: h.runtime.masterId, through_seq: 3, partial: false, next_offset: null, attachments: [],
+    items: [{ seq: 2, role: 'assistant', text: 'Proposed workbench plan' },
+      { seq: 1, role: 'user', text: 'The activation page is confusing.' }] })
+  const shown = JSON.stringify(page)
+  for (const id of [first.ticket.id, second.ticket.id, first.ticket.decisionId!]) expect(shown).not.toContain(id)
+})
+
+it('pages the owner conversation newest first, 20 by default and 50 at most', async () => {
+  configureWorkbench()
+  const now = Date.now()
+  const events = Array.from({ length: 60 }, (_, index) => ownerMessage(index, `Message ${index}`, now - (60 - index) * 1000))
+  vi.mocked(h.controller.inspect).mockResolvedValue({ meta: { id: h.runtime.masterId }, events } as never)
+  const first = await read('conversation') as { items: { text: string }[]; next_offset: number | null }
+  expect([first.items.length, first.items[0]?.text, first.next_offset]).toEqual([20, 'Message 59', 20])
+  expect(await read('conversation', { offset: 50 })).toMatchObject({ items: { length: 10 }, next_offset: null })
+  expect(await read('conversation', { limit: 80 })).toMatchObject({ items: { length: 50 }, next_offset: 50 })
+})
+
 it('lists in prompts the built-in parts whose text changed since the team overrode them, and the built-in parts in prompts/defaults', async () => {
   const read = (resource: string, offset = 0) => h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, offset, limit: 8000 })
   expect(await read('prompts')).not.toHaveProperty('default_changed')
@@ -165,9 +264,10 @@ it('saves with the prompt save tool an override without its base, refuses a part
 
 it('keeps the main Session\'s resources from an Executor Session, which lists only its own', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  for (const resource of ['tickets', 'triggers', 'threads', 'decisions', 'settings', 'prompts', 'models']) {
+  for (const resource of ['tickets', 'triggers', 'threads', 'decisions', 'lines', 'settings', 'prompts', 'models']) {
     await expect(h.runTool(sessionId, 'orchestrator_read', { resource })).rejects.toThrow('belongs to the main Session')
   }
+  await expect(h.runTool(sessionId, 'orchestrator_read', { resource: 'line/any' })).rejects.toThrow('belongs to the main Session')
   expect(await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}` })).toMatchObject({ ticket_id: ticket.id })
   type Registered = { description: string; parameters: { properties: { resource: { description: string } } } }
   const registered = h.tools.get(sessionId)!.get('orchestrator_read') as unknown as Registered
@@ -203,6 +303,30 @@ it('answers every routing tool in one shape: the decision it recorded, why, and 
   expect(stopped).toEqual({ trigger_id: request.id, kind: 'stop', decision: 'stop', reason: 'Not needed after all',
     ticket: expect.objectContaining({ ticket_id: ticket.id, state: 'stopped', ended }) })
   expect(TICKET_STATES).toContain(stopped.ticket.state)
+})
+
+it('carries required skills from an accept into the ticket execution', async () => {
+  const request = feishu('skills-route', '@bot 写一份周评')
+  h.runtime.receive(request); await h.runtime.idle()
+  const { results } = await h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [{ kind: 'accept', trigger_id: request.id,
+    title: 'Weekly review', worktree_name: 'weekly-review', acknowledgement: '收到。', required_skills: [' review-weekly-role-progress '] }] })
+  const accepted = results as { ticket?: { ticket_id: string } }[]
+  // A padded name is trimmed before it is stored, so a report that trims its own names can satisfy it.
+  expect(h.runtime.store.tickets.get(accepted[0]!.ticket!.ticket_id)?.execution?.requiredSkills).toEqual(['review-weekly-role-progress'])
+})
+
+it('refuses only the routing item whose required skills are invalid', async () => {
+  const bad = feishu('bad-skill', '@bot 写一份周评'), good = feishu('good-ignore', '@bot 谢谢')
+  h.runtime.receive(bad); h.runtime.receive(good); await h.runtime.idle()
+  const route = (required_skills: string[]) => h.runTool(h.runtime.masterId, 'orchestrator_route', { decisions: [
+    { kind: 'accept', trigger_id: bad.id, title: 'Weekly review', worktree_name: 'weekly-review', acknowledgement: '收到。', required_skills },
+    { kind: 'ignore', trigger_id: good.id, reason: 'Thanks only.' }] }) as Promise<{ results: Record<string, unknown>[] }>
+  const invalidName = await route(['Not A Skill'])
+  expect(invalidName.results[0]).toMatchObject({ trigger_id: bad.id, kind: 'accept', refused: expect.stringContaining('required_skills') })
+  expect(invalidName.results[1]).toEqual({ trigger_id: good.id, kind: 'ignore', decision: 'ignore', reason: 'Thanks only.' })
+  // The count limit is checked per item too, so the rest of the call still runs.
+  const tooMany = await route(Array.from({ length: 11 }, (_, index) => `skill-${index}`))
+  expect(tooMany.results[0]).toMatchObject({ trigger_id: bad.id, kind: 'accept', refused: expect.stringContaining('required_skills') })
 })
 
 it('routes several triggers in one call, in order, and answers a refused or failed item without undoing the others', async () => {
@@ -461,25 +585,31 @@ it('shows a candidate with its thread\'s tickets open first, the tickets it reac
   const handBack = async (id: string) => {
     await h.runTool(first.sessionId, 'orchestrator_trigger_handback', { trigger_id: id, reason: 'Another change.' })
     await h.runtime.pump(); await h.runtime.idle()
+    await h.consumeMain()
   }
   const second = feishu('2', '@bot 另一个问题', { root_id: 'om_1' })
   h.runtime.receive(second); await h.runtime.idle()
+  h.consume()
   await handBack(second.id)
+  h.consume()
   const b = (await h.route({ kind: 'accept', trigger_id: second.id, title: 'Other', worktree_name: 'fix-other', acknowledgement: '收到。' })).ticket as
     { ticket_id: string }
   h.runtime.engine.stopTicket(b.ticket_id)
   // A follow-up reaches the live ticket without an Eval; handed back, its candidate shows where it went.
   const more = feishu('3', '@bot 还有按钮', { root_id: 'om_1' })
   h.runtime.receive(more); await h.runtime.idle()
+  h.consume()
   await handBack(more.id)
   const followup = relaysOf('candidate').at(-1)!
   expect((followup.related_tickets as { ticket_id: string }[]).map(card => card.ticket_id)).toEqual([a.id, b.ticket_id])
   expect(followup).toMatchObject({ tickets_total: 2, delivered_to: [a.id], thread: `feishu:${CHAT}:om_1` })
   expect(String(followup.next_action).length).toBeLessThanOrEqual(100)
+  h.consume()
   // A message elsewhere that names a pull request reads the tickets that follow it.
   const thread = { key: 'github:123', ref: { source: 'github', id: '123' }, createdAt: '', subscriptions: [a.id], correlated: [], pending: [], meta: {} }
   h.runtime.store.threads.save(thread)
   h.runtime.receive(feishu('4', '@bot 看看 #123 的进展')); await h.runtime.idle()
+  await h.consumeMain()
   expect(relaysOf('candidate').at(-1)).toMatchObject({ related_tickets: [], tickets_total: 0, referenced_tickets: [{ ticket_id: a.id }] })
 })
 
@@ -642,4 +772,37 @@ it('gives a worker the other messages of the request its ticket was accepted fro
   const page = await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}` })
   expect(page).toMatchObject({ batch: [{ trigger_id: other, read: `trigger/${other}` }] })
   expect(await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `trigger/${other}` })).toMatchObject({ trigger_id: other })
+})
+
+it('refuses a report that started in an assignment a retry replaced, before it claims the PR or ends the ticket', async () => {
+  const { ticket, sessionId, trigger } = await h.acceptedTicket(feishu('report-race', 'Fix the report race'))
+  expect(ticket.execution?.name).toContain('fix-regression')
+  const branch = `agent/${ticket.execution!.name}`
+  h.runtime.engine.report(ticket.id, { state: 'failed', summary: 'The turn broke.' })
+  const oldId = h.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id
+  // Hold the PR read so the retry lands after the tool call started, but before its commit transaction.
+  const release = Promise.withResolvers<void>()
+  let pullRead!: () => void
+  const readStarted = new Promise<void>(resolve => { pullRead = resolve })
+  vi.mocked(Commands.prototype.gh).mockImplementation(async args => {
+    if (args[1]?.includes('/pulls/')) {
+      pullRead()
+      await release.promise
+      return { state: 'open', user: { login: 'agent-bot' }, html_url: 'https://github.com/acme/widgets/pull/42',
+        head: { sha: 'head-1', ref: branch, repo: { full_name: 'acme/widgets' } } }
+    }
+    return args[1] === 'user' ? { login: 'agent-bot' } : { default_branch: 'master', permissions: { push: true } }
+  })
+  const late = h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Old assignment result', pr_number: 42 })
+  await readStarted
+  h.runtime.engine.retryTicket(ticket.id)
+  expect(h.runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.id).not.toBe(oldId)
+  release.resolve()
+  await expect(late).rejects.toThrow(new UserError('assignmentEnded'))
+  const after = h.runtime.store.tickets.get(ticket.id)!
+  expect(after.ended).toBeUndefined()
+  expect(after.assignments.at(-1)!.report).toBeUndefined()
+  // The stale call did not bind PR 42 to the Ticket it no longer owns.
+  expect(after.follows ?? []).toEqual([])
+  expect(trigger.id).toBeTruthy()
 })

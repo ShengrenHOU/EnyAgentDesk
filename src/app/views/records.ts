@@ -135,6 +135,7 @@ export function ticketSummary(ticket: Ticket) {
     ...ticket.paused ? { taskPaused: true as const } : {},
     ...followups.length ? { followup: followups[0], followups } : {},
     ...latestReport(ticket)?.deliverables ? { deliverables: latestReport(ticket)!.deliverables } : {},
+    ...ticket.execution?.requiredSkills?.length ? { requiredSkills: ticket.execution.requiredSkills } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,

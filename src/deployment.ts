@@ -13,6 +13,11 @@ const reason = (error: unknown): string => error instanceof Error ? error.messag
 const absolute = (description: string) => s.string().pattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
+  triageAutomatic: s.boolean().default(false).description('Automatically hold and batch eligible passive IM. Requires triageProduction and triageHandoff. No business actions.'),
+  triageHistorical: s.boolean().default(false).description('Bounded migration of legacy eligible pending IM while triageAutomatic is enabled.'),
+  triageProduction: s.boolean().default(false).description('Explicit production IM judgment of held evidence. No business actions or source acknowledgements.'),
+  triageHandoff: s.boolean().default(false).description('Expose explicitly controlled passive pending IM handoff and rollback tools to the main Session. Held evidence remains fenced when disabled.'),
+  triageShadow: s.boolean().default(false).description('Expose explicit read-only IM shadow replay tools to the main Session; does not replace automatic evaluation.'),
   codexCommand: s.string().default('').description('Local Codex executable; empty retains the upstream DSH executor.'),
   codexModel: s.string().default('').description('Codex model override; empty uses the local Codex configuration.'),
   codexReadOnly: s.boolean().default(false).description('Use a read-only Codex sandbox for review-only profiles.'),
@@ -31,6 +36,11 @@ export const Config = s.object({
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
+  triageAutomatic?: boolean
+  triageHistorical?: boolean
+  triageProduction?: boolean
+  triageHandoff?: boolean
+  triageShadow?: boolean
   githubReadRepositories?: string[]
   codex?: { command: string; model?: string; readOnly?: boolean; networkAccess?: boolean; hostAccess?: boolean }
   git?: { name: string; email: string }
@@ -53,7 +63,9 @@ export function machineOf(config: DeploymentConfig): Machine {
   const name = gitName.trim(); const email = gitEmail.trim()
   // A half-declared identity would silently keep git's guessing disabled for the other half; reject it where the operator can see the reason.
   if ((name === '') !== (email === '')) throw new Error('dsh-superagent needs both gitName and gitEmail, or neither; docs/006-deployment.md lists the keys')
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
+  if (config.triageAutomatic && (!config.triageProduction || !config.triageHandoff)) throw new Error('triageAutomatic requires triageProduction and triageHandoff')
+  if (config.triageHistorical && !config.triageAutomatic) throw new Error('triageHistorical requires triageAutomatic')
+  return { ...(config.triageAutomatic ? { triageAutomatic: true } : {}), ...(config.triageHistorical ? { triageHistorical: true } : {}), ...(config.triageProduction ? { triageProduction: true } : {}), ...(config.triageHandoff ? { triageHandoff: true } : {}), ...(config.triageShadow ? { triageShadow: true } : {}), stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
     ...(githubReadRepositories.length ? { githubReadRepositories } : {}),
     ...(name && email ? { git: { name, email } } : {}),
     ...(codexCommand ? { codex: { command: codexCommand, readOnly: codexReadOnly, networkAccess: codexNetworkAccess, hostAccess: codexHostAccess, ...(codexModel ? { model: codexModel } : {}) } } : {}) }
@@ -64,7 +76,11 @@ export const GithubAccountsSchema = z.object({
   repositories: z.array(z.object({ repository: z.string().trim().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) }).strict()).default([]),
   cli: z.string().trim().default(''),
 })
-export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+export const FeishuBotSchema = z.object({ cli: z.string().trim().default(''), configDir: z.string().trim().refine(value => !value || isAbsolute(value), 'absolute path').default('') })
+export function feishuConfigDir(feishu: unknown): string {
+  const { configDir } = FeishuBotSchema.parse(feishu ?? {})
+  return FeishuBotSchema.parse({ configDir: configDir || process.env.DSH_FEISHU_BOT_CONFIG_DIR || '' }).configDir
+}
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
@@ -74,7 +90,7 @@ export interface Deployment extends Machine {
   github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
-export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+export interface FeishuBot { cli: string; configDir?: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -145,10 +161,11 @@ const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), bra
 const BotInfo = z.object({ bot: z.object({ open_id: z.string().regex(/^ou_[A-Za-z0-9]+$/), app_name: z.string().default('') }) })
 /**
  * Verify that the configured Feishu CLI is authenticated as a bot and restricted to strict mode `bot`.
- * Workers invoke this CLI as `lark-cli`, so a CLI that also permits a user identity would let workers act as that user.
+ * A configured bot directory isolates the channel from the host and worker user identity.
  */
 export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<FeishuBot | undefined> {
   const { cli: name } = FeishuBotSchema.parse(feishu ?? {})
+  const configDir = feishuConfigDir(feishu)
   if (!name) return undefined
   const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('feishuCliFailed', { output: reason(error) }) }
   let cli = ''
@@ -164,5 +181,5 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   // `--format json` unwraps only `data`, whereas this endpoint returns the payload under `bot`.
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
-  return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+  return { cli, ...(configDir ? { configDir } : {}), appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
 }

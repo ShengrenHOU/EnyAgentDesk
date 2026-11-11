@@ -1,14 +1,16 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
-import { useRef, useState, type ReactNode } from 'react'
+import { useReducer, useRef, useState, type ReactNode } from 'react'
 import { answerAttention, ApiError, usePoll, type TicketPageView } from './api.ts'
 import { Button, DisclosureRow, Dot, Icon, Input, Tag, type IconName } from './controls.tsx'
+import { conflicts, dirtyFields, initialManagement, managementPatch, managementReducer, managementValues, sameManagement, shownValues,
+  unsavedFields, unsavedValues, type ManagementField, type ManagementPriority, type ManagementValues } from './management-draft.ts'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { ReplyForm } from './reply-form.tsx'
 import { Field } from './settings-kit.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
-import { actorName, errorText, fullTime, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
+import { actorName, errorText, fullTime, localized, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
 import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
 
@@ -25,11 +27,6 @@ function ContinueStopped({ id, reload }: { id: string; reload: () => Promise<voi
       <Button type="submit" variant="primary" disabled={action.busy || !instruction.trim()}>{t('continueStopped')}</Button>
     </form>
   </Section>
-}
-function localDateTime(value?: string): string {
-  if (!value) return ''
-  const date = new Date(value)
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 }
 type AnswerRequest = { requestId: string; sessionId: string; throughSeq: number; ticketId: string; attentionId?: string;
   instruction: string }
@@ -85,25 +82,82 @@ function AnswerComposer({ ticket, sessionId, reload }: { ticket: TicketPageView;
     {failure && <p className="dt-error" role="alert">{failure}</p>}
   </>
 }
-function TicketManagement({ ticket, reload }: { ticket: TicketPageView; reload: () => Promise<void> }) {
+const managementLabel = (t: T, field: ManagementField): string => field === 'priority' ? t('ticketPriority')
+  : field === 'dueAt' ? t('ticketDueAt') : t('ticketPaused')
+const managementValue = (t: T, field: ManagementField, value: ManagementValues[ManagementField] | undefined): string => {
+  if (field === 'priority') return value === undefined ? t('unsetValue') : t(`priority.${value as ManagementPriority}`)
+  if (field === 'dueAt') return value ? String(value) : t('unsetValue')
+  return t(value ? 'yes' : 'no')
+}
+/**
+ * The management editor keeps one component identity for a Ticket and holds local edits in its own draft. A poll that
+ * brings another entry's change updates the fields the owner did not edit, while a field edited in both places waits for a
+ * choice; only edited fields are sent, so an unedited field saved elsewhere is not overwritten.
+ */
+function TicketManagement({ ticket, reload, ended }: { ticket: TicketPageView; reload: () => Promise<void>; ended: boolean }) {
   const { t, call } = usePanel()
-  const [priority, setPriority] = useState(ticket.priority ?? 'normal')
-  const [dueAt, setDueAt] = useState(localDateTime(ticket.dueAt))
-  const [paused, setPaused] = useState(!!ticket.taskPaused)
-  const save = useAction(() => call('PUT tickets/:id/management', { id: ticket.id,
-    body: { priority, dueAt: dueAt ? new Date(dueAt).toISOString() : null, paused } }), { reload })
+  const [state, dispatch] = useReducer(managementReducer, managementValues(ticket), initialManagement)
+  const remote = managementValues(ticket)
+  // Follow server values between polls without touching the local draft; this adjusts state during render by design.
+  // While a save is in flight its reducer ignores polls, so this dispatch must wait or it would re-render forever.
+  if (state.phase !== 'saving' && !sameManagement(state.remote, remote)) dispatch({ type: 'server', remote })
+  const [failure, setFailure] = useState<string>()
+  const [saving, setSaving] = useState(false)
+  const values = shownValues(state)
+  const dirty = dirtyFields(state)
+  const unsaved = unsavedFields(state)
+  const disputed = conflicts(state)
+  const busy = saving || state.phase === 'saving'
+  const canEdit = !ended && !busy
+  const save = async () => {
+    // A field changed in both places needs the owner's choice; saving would silently pick the local side.
+    if (busy || !unsaved.length || disputed.length) return
+    let patch: ReturnType<typeof managementPatch>
+    try { patch = managementPatch(state.remote, unsavedValues(state)) }
+    catch { setFailure(t('ticketDueAtInvalid')); return }
+    setFailure(undefined); setSaving(true); dispatch({ type: 'submit' })
+    try {
+      await call('PUT tickets/:id/management', { id: ticket.id, body: patch })
+      dispatch({ type: 'saved' })
+      await reload()
+    } catch (error) { dispatch({ type: 'failed' }); setFailure(errorText(error)) }
+    finally { setSaving(false) }
+  }
+  // An ended Ticket keeps a clean editor from coming back after the next poll; an active draft stays visible and copyable.
+  if (ended && !dirty.length) return null
   return <Details icon="queue" title={t('taskManagement')}>
-    <form className="dt-form" onSubmit={event => { event.preventDefault(); void save.run() }}>
-      <Field label={t('ticketPriority')}><select className="dt-select" value={priority} disabled={save.busy}
-        onChange={event => setPriority(event.target.value as typeof priority)}>
+    <form className="dt-form" onSubmit={event => { event.preventDefault(); void save() }}>
+      {ended && <Hint>{t('ticketManagementEnded')}</Hint>}
+      <Field label={t('ticketPriority')}><select className="dt-select" value={values.priority} disabled={!canEdit}
+        onChange={event => dispatch({ type: 'priority', value: event.target.value as ManagementValues['priority'] })}>
         {(['low', 'normal', 'high', 'urgent'] as const).map(value => <option key={value} value={value}>{t(`priority.${value}`)}</option>)}
       </select></Field>
-      <Field label={t('ticketDueAt')}><Input type="datetime-local" value={dueAt} disabled={save.busy}
-        onChange={event => setDueAt(event.target.value)} /></Field>
-      <label><input type="checkbox" checked={paused} disabled={save.busy}
-        onChange={event => setPaused(event.target.checked)} /> {t('ticketPaused')}</label>
+      <Field label={t('ticketDueAt')}><Input type="datetime-local" value={values.dueAt} disabled={!canEdit}
+        onChange={event => dispatch({ type: 'dueAt', value: event.target.value })} /></Field>
+      <label><input type="checkbox" checked={values.paused} disabled={!canEdit}
+        onChange={event => dispatch({ type: 'paused', value: event.target.checked })} /> {t('ticketPaused')}</label>
       <Hint>{t('ticketPausedHint')}</Hint>
-      <Button type="submit" variant="outline" disabled={save.busy}>{t('managementSave')}</Button>
+      {!ended && <Button type="submit" variant="outline" disabled={busy || !unsaved.length || disputed.length > 0}>{t('managementSave')}</Button>}
+      {disputed.map(field => <div key={field} className="dt-banner" role="alert">
+        <p>{t('ticketManagementConflict', { field: managementLabel(t, field) })}</p>
+        <KeyValues rows={[[t('ticketManagementBase'), managementValue(t, field, state.base[field])],
+          [t('ticketManagementLocal'), managementValue(t, field, state.mine[field])],
+          [t('ticketManagementRemote'), managementValue(t, field, state.remote[field])]]} />
+        <div className="dt-banner-actions">
+          <Button type="button" size="sm" variant="outline" disabled={busy}
+            onClick={() => dispatch({ type: 'useRemote', field })}>{t('ticketManagementUseRemote')}</Button>
+          <Button type="button" size="sm" variant="ghost" disabled={busy}
+            onClick={() => dispatch({ type: 'keepMine', field })}>{t('ticketManagementKeepMine')}</Button>
+        </div>
+      </div>)}
+      {ended && !!dirty.length && <KeyValues rows={dirty.map(field => [managementLabel(t, field), managementValue(t, field,
+        state.mine[field])])} />}
+      {busy ? <Hint>{t('ticketManagementSaving')}</Hint> : <>
+        {!disputed.length && state.notice === 'merged' && <Hint>{t('ticketManagementRemoteUpdated')}</Hint>}
+        {!disputed.length && !!unsaved.length && <Hint>{t('ticketManagementEditing')}</Hint>}
+        {!disputed.length && !unsaved.length && state.notice === 'saved' && <span className="dt-hint" role="status">{t('saved')}</span>}
+      </>}
+      {failure && <p className="dt-error" role="alert">{failure}</p>}
     </form>
   </Details>
 }
@@ -167,6 +221,24 @@ function Details({ icon, title, open = false, children }: { icon: IconName; titl
     <div className="dt-disclosure-body">{children}</div>
   </DisclosureRow>
 }
+type Report = NonNullable<TicketPageView['assignments'][number]['report']>
+/** The professional method and the skills a report recorded, so the result's basis is visible without asking the worker. */
+function MethodSkills({ report }: { report: Report }) {
+  const { t } = usePanel()
+  if (!report.method && !report.skills?.length) return null
+  return <div className="dt-report-method">
+    {report.method && <KeyValues rows={[[t('reportMethod'), report.method]]} />}
+    {!!report.skills?.length && <div>
+      <span className="dt-stat-label">{t('reportSkills')}</span>
+      <ul className="dt-plain-list">{report.skills.map(skill => <li key={`${skill.name}:${skill.path ?? ''}`}>
+        <span className="dt-mono">{skill.name}</span>
+        {skill.path && <span className="dt-mono"> · {skill.path}</span>}
+        {skill.revision && <span> · {t('reportSkillRevision', { revision: skill.revision })}</span>}
+        {skill.template && <span> · {t('reportSkillTemplate', { template: skill.template })}</span>}
+      </li>)}</ul>
+    </div>}
+  </div>
+}
 function Assignments({ ticket }: { ticket: TicketPageView }) {
   const { t } = usePanel()
   const report = (state: string) => t('assignmentReportShort', { state: valueLabel(t, 'report', state) })
@@ -184,6 +256,7 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
           t('lang')) || t('now') })}</span>
         {item.endedReason && <span>{reasonLabel(t, item.endedReason)}</span>}
       </div>
+      {item.report && <MethodSkills report={item.report} />}
     </div>
     {item.ref && item.ref !== ticket.sessionId && <div className="dt-row-actions"><SessionButton variant="outline"
       sessionId={item.ref} /></div>}
@@ -224,6 +297,7 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
     { version: mandate.policyVersion }))}>{mandate.policyVersion.slice(0, 8)}</button>
   return <Section title={t('mandateDetails')} icon="shield">
     <KeyValues rows={[...rows, [t('term.scope'), legacy ? t('legacyScopeShort') : mandate.scope || t('empty')],
+      ...ticket.requiredSkills?.length ? [[t('requiredSkills'), ticket.requiredSkills.join(t('listSeparator'))] as [string, ReactNode]] : [],
       ...facts.map((item): [string, string] => [valueLabel(t, 'basis', item.name), fact(item)]),
       ...legacy ? [] : [[t('policyVersion'), version] as [string, ReactNode]]]} />
   </Section>
@@ -244,6 +318,7 @@ export function TicketPage({ id }: { id: string }) {
   const undelivered = data.inputs.filter(input => !input.delivered)
   const failedText = /^(?:\w+Error|Error)\b[:：]/.test(data.summary)
   const failed = data.stage === 'person' && data.action === 'failed'
+  const latest = data.assignments.findLast(item => item.report)?.report
   const opening = data.threads.find(thread => thread.url)
   const ended = data.ended && (() => {
     const outcome = valueLabel(t, 'outcome', data.ended.outcome), reason = reasonLabel(t, data.ended.reason), time = when(data.ended.at,
@@ -272,8 +347,22 @@ export function TicketPage({ id }: { id: string }) {
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
     </div>
     {ended && <Hint>{ended}</Hint>}
+    {data.attention && <div className="dt-banner dt-attention" role="group" aria-label={t('attentionPrefix')}>
+      <span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite text={data.attention.question} />
+      <AnswerComposer key={`${data.id}:answer`} ticket={data} reload={reload} />
+      {channel && <div className="dt-banner-actions">
+        {channel.sessionId ? <SessionButton sessionId={channel.sessionId} label={t('workbenchReturnDiscussion')} />
+          : <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>}
+      </div>}
+    </div>}
+    {/* A halted Ticket is the second thing to see: its reason and the retry action stay next to the pending question. */}
+    {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
+      <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
+    </p>}
+    {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
+      <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
+    </p>}
     {data.ended?.outcome === 'stopped' && setup?.machine.executor.kind === 'dsh' && <ContinueStopped id={id} reload={reload} />}
-    {!data.ended && <TicketManagement key={`${data.id}:${data.priority}:${data.dueAt}:${data.taskPaused}`} ticket={data} reload={reload} />}
     {(!data.ended || data.followups?.length || data.followup) && <Section title={t('ticketFollowupAt')} icon="clock">
       {(data.followups ?? (data.followup ? [data.followup] : [])).map(item => <div key={item.id}>
         <KeyValues rows={[[t('ticketFollowupAt'), fullTime(item.at, t('lang'))], [t('ticketFollowupReason'), item.reason]]} />
@@ -295,23 +384,9 @@ export function TicketPage({ id }: { id: string }) {
         <iframe src={preview.url} title={preview.title} sandbox="" />
       </div>}
     </Section>}
-    {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
-      text={data.attention.question} />
-      <AnswerComposer key={`${data.id}:answer`} ticket={data} reload={reload} />
-      {channel && <div className="dt-banner-actions">
-        {channel.sessionId ? <SessionButton sessionId={channel.sessionId} label={t('workbenchReturnDiscussion')} />
-          : <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>}
-      </div>}</div>}
     {!data.attention && workbench?.sessionId && data.ended?.by !== 'human' && <Section title={t('ownerDeskRevise')} icon="message">
       <AnswerComposer key={`${data.id}:update`} ticket={data} sessionId={workbench.sessionId} reload={reload} />
     </Section>}
-    {/* Ordinary progress stays in the Session/Channels; halted work also has its report beside the available retry. */}
-    {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
-      <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
-    </p>}
-    {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
-      <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
-    </p>}
     {data.executionStages && <Section title={t('executionStages')} icon="clock">
       <KeyValues rows={[[t('executionStage'), data.executionStages.current],
         [t('executionPending'), data.executionStages.pending?.stage ?? t('empty')]]} />
@@ -334,9 +409,11 @@ export function TicketPage({ id }: { id: string }) {
         || data.stage === 'person' && data.action === 'review') && <div className="dt-details">
       <Details icon="message" title={t('latestExecutionReport')} open>
         <MarkdownLite text={data.summary} />
+        {latest && <MethodSkills report={latest} />}
         {data.codexThreadId && <Hint>{t('codexReportHistoryHint')}</Hint>}
       </Details>
     </div>}
+    <TicketManagement key={data.id} ticket={data} reload={reload} ended={!!data.ended} />
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
       <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>

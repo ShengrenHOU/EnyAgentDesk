@@ -5,7 +5,7 @@ It leaves other context reads and local downloads to workers, routes tickets and
 Do not alter remote state, authorization, or configuration while reading.
 Use gh for every GitHub call; specify --repo or an explicit API path.
 The watcher remains limited to the deployment's repository; linked context may be read elsewhere.
-Feishu uses --as bot; unavailable content does not authorize switching to the user's identity.
+Use the configured default Feishu identity for authorized work. The message channel uses its separately configured bot identity. Do not change CLI identity policy or expand authorization to access unavailable content.
 Start with lark-cli <domain> --help, schema <service.resource.method>, or skills read lark-im.
 Follow root_id, parent_id, thread_id, forwarded message IDs and document URLs recursively as relevant, tracking visited IDs.
 im +messages-mget expands merged forwards; im +threads-messages-list pages replies.

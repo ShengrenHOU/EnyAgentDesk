@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger, Ticket, Deliverable } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
+import type { ImContextPage, ImContextRequest } from './im-context.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
 
@@ -57,6 +58,8 @@ export interface SourceChannel<C> {
 /** Normalized message returned by thread context readers; `bot` marks a non-human sender whose message can never authorize work on its own (at most an inferred candidate). */
 export interface ContextMessage {
   id: string; from: string; at: string; text: string
+  /** Source-native direction evidence, not an authenticated sender or an authorization. */
+  direction?: string
   bot?: true; deleted?: true; reply_to?: string; url?: string; path?: string; line?: number
 }
 export type ContextPartName = 'thread' | 'root' | 'parent'
@@ -81,6 +84,31 @@ export interface TriggerContext {
   image(agent: Agent, commands: Commands, message: { id: string; text: string }, key: string, stateDir: string,
     signal: AbortSignal): Promise<unknown>
 }
+/** Native IM evidence identity for bounded, read-only shadow triage; never a business Thread or authority. */
+export interface ImEvidence {
+  provider: string
+  account: string
+  conversation: string
+  message: string
+  version: string
+  root?: string
+  /** Observed sender identity, not proof of authority or of being the owner. */
+  sender?: string
+  /** Source-native direction; absent on historical evidence and never inferred from sender/text. */
+  direction?: string
+  partial: boolean
+}
+/** Source-observed reading context. Display labels never establish identity or authority. */
+export interface ImMessageHeader {
+  at: string
+  conversationLabel?: string
+  senderLabel?: string
+  senderType?: string
+  senderIdType?: string
+  contentType?: string
+  parent?: string
+  url?: string
+}
 /** Pluggable source kind descriptor registered with SourceRegistry. */
 export interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>> {
   /** Stable ID; a default instance with the same ID exists when none is stored. */
@@ -104,6 +132,14 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   guardOutbound?(commands: Commands, message: OutboundMessage, config: C): Promise<void>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */
   threadContext?: ThreadContext<C>
+  /** Optional native IM identity. Returning undefined excludes non-message events; must not fabricate conversation identity. */
+  imEvidence?(trigger: Trigger, config: C): ImEvidence | undefined
+  /** Reading projection of native metadata, independent of stable IM identity. */
+  imHeader?(trigger: Trigger, config: C): ImMessageHeader
+  /** Source-native anchor content for comparing a fetched message with its collected version. */
+  imAnchorText?(trigger: Trigger, config: C): string
+  /** Optional fixed-window, read-only conversation evidence capability. Host owns budgets and completeness. */
+  imContext?(commands: Commands, request: ImContextRequest, cursor: string | undefined, config: C, signal: AbortSignal): Promise<ImContextPage>
   /** Maps a search query to candidate Thread keys (such as `github:12`) and Trigger search terms (such as a Feishu `om_` ID). */
   find?(query: string): { threads: string[]; terms: string[] }
   /** Returns the ID of the Trigger whose message this Trigger replies to, when derivable without a network read. */

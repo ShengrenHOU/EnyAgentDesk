@@ -49,6 +49,8 @@ After each turn, background work has at most 30 minutes to finish. At that limit
 
 A handoff to a person frees the slot immediately and leaves the Report in effect. This applies after a `ready` Report or a question, unless another Input arrived since, and after any `blocked` or `failed` Report.
 
+An accept may name required skills. A `ready` Report records the method it followed and every skill it loaded, each with the file path read, the content revision the host computed and any historical template it used; a Report that omits a required skill is refused, and a claimed path that is not a readable file is refused. The Ticket page and the report resource show what was recorded.
+
 At handoff, subagents stop. Shell jobs, such as a server offered for review, may continue until the Assignment ends. They hold no slot and are exempt from the 30-minute limit, including after later turns. Their completion does not wake the Executor; it reads the results on its next turn.
 
 A person can also start a turn by writing directly in the Executor Session. Its background work follows the same rules.
@@ -63,7 +65,7 @@ Worker subagents, including nested ones, use DeepSeek Harness's `standard` prese
 
 Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.
 
-A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries preparation again. A typical command uses `git worktree` to create a checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
+A failed command fails the Ticket and records its output. Preparation is marked durably before filesystem or command side effects, and cleared only after the directory is verified. Empty directories left by a failed command are removed, so a retry or a person's message on one of the Ticket's Threads can try preparation again. Non-empty directories are preserved: a known incomplete preparation blocks worker launch, including after restart, until the directory is preserved or moved aside and the workspace path is absent. The Executor never reruns a potentially non-idempotent prepare command over partial files. Existing legacy directories without an incomplete marker remain compatible. A typical command uses `git worktree` to create a checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
 
 ### Concurrency
 
@@ -118,7 +120,9 @@ Chat Channels receive one final notice about the pull-request outcome. GitHub al
 
 ### Follow-ups and context Threads
 
-Timed Ticket checks remain on the original Ticket. `GET followups` projects every open Ticket's pending checks in time order, including legacy single checks. The daily workbench and My work show this same list, its due times and reasons, and the scheduler's actual blockers: global/Ticket pause, pending owner answer, blocked/failed report, no running Assignment or revoked authority. Cancelling uses the existing per-Ticket receipt and removes only the selected check. This view creates no new scheduler or DSH automation entity; a held check remains visible until resolved, cancelled or its Ticket ends.
+Timed Ticket checks remain on the original Ticket. `GET followups` projects every open Ticket's pending checks in time order, including legacy single checks, and includes the latest report's state, summary and time. The daily workbench and My work show this same list, its due times and reasons, the scheduler's actual blockers (global/Ticket pause, pending owner answer, blocked/failed report, no running Assignment or revoked authority), and the last result. Cancelling uses the existing per-Ticket receipt and removes only the selected check. This view creates no new scheduler for Ticket checks; a held check remains visible until resolved, cancelled or its Ticket ends.
+
+A mechanical, read-only check can be moved, once, to a DSH automation task. `POST tickets/:id/followup/migrate` writes a migration intent, creates a Host Schedule reminder bound to the main Session at the check's next time, with a prompt that preserves the original check and an internal marker, then removes the Ticket follow-up and retains a `migrated` receipt. The same view lists migrated automations from `GET followups/automations` with their next target and current state. Moving a check does not create a second scheduler: the Host Schedule owns the timer afterwards, and the Ticket no longer wakes for it. Deleting a migrated automation uses the Host Schedule; ending the Ticket removes its migrated automations. An orchestration pass reconciles a crash between the Host write and the local commit by adopting the marked task, and retries a deletion that failed when its Ticket ended. Classification is explicit: judgement checks, which need the Ticket's context, evidence or authority, stay on the Ticket; no automatic classification or bulk migration runs.
 
 The Executor decides human follow-ups on its Ticket's own Threads. It handles in-scope requests and hands back requests beyond its scope or for another Ticket. Once no Executor owns the message, it becomes a candidate for the main Session. The main Session may otherwise act on the follow-up only to stop work at the person's request.
 
@@ -214,3 +218,9 @@ An Eval in progress does not expire during a pause; its deadline moves later by 
 ### Invalid configuration
 
 A stored Source configuration that its kind rejects disables that Source instance.
+
+### 跟进迁移中的执行所有权
+
+迁移意图或同一检查的任一宿主清理记录尚未完成时，原工单检查显示“迁移待核对”并暂停触发，避免两套调度同时执行；其他检查不受影响。创建结果未知且宿主目录不可用时，保留这一阻塞，不盲目重建任务。已知自动化补偿删除失败时，按 automationId 保留清理责任，全部清理确认后原检查才恢复。
+
+显式迁移、后台收养和补偿清理按同一 ticketId + requestId 串行协调。后台恢复正在处理的检查不能被显式重试抢先收养后又当孤儿删除。已合并的创建幂等与目录核对机制继续保留，Superagent 不另建调度器，也不扩大业务授权。

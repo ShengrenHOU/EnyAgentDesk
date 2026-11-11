@@ -4,10 +4,15 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { expect, it, vi } from 'vitest'
 import { AgentDelivery } from '../src/infra/delivery.ts'
+import { Sessions } from '../src/app/sessions.ts'
+import { Later } from '../src/app/effects.ts'
 
 function fixture(history: UserMessage[] = []) {
   const ctx = new Context()
-  const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[] }
+  const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[], remove: (id: string) => {
+    for (const list of [inbox.nextTurn, inbox.nextStep]) { const i = list.findIndex(message => message.id === id); if (i >= 0) { list.splice(i, 1); return true } }
+    return false
+  } }
   const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
   const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
   const injected = vi.fn((_message: UserMessage) => {})
@@ -21,6 +26,7 @@ function fixture(history: UserMessage[] = []) {
   const agents = new Map([[agent.id, agent]])
   ctx.reflect.provide('agents', agents)
   ctx.reflect.provide('sessionPersistence', { open, flush })
+  ctx.reflect.provide('sessionController', { resolveAgent: async () => ({ agent }) })
   const delivery = new AgentDelivery(ctx)
   const signal = new AbortController()
   const send = (id = 'request', mode: 'queue' | 'steer' = 'steer') => delivery.send(agent, id, '{"event_id":"event"}', mode, signal.signal)
@@ -30,7 +36,7 @@ function fixture(history: UserMessage[] = []) {
     inbox.nextStep.splice(0); inbox.nextTurn.splice(0)
     ctx.emit('session/event', agent.session, event(message))
   }
-  return { agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
+  return { ctx, delivery, agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
 }
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
@@ -143,4 +149,69 @@ it('tells whether the Session holds a message: one waiting in its inbox, one it 
   expect([f.inbox.nextStep.length, await f.holds('request')]).toEqual([0, true])
   const restored = fixture([f.steer.mock.calls[0]![0]])
   expect([await restored.holds('request'), await restored.holds('other')]).toEqual([true, false])
+})
+
+
+it('holds a burst outside the native inbox until each candidate is consumed, without blocking owner input', async () => {
+  const f = fixture()
+  const active = new Set(Array.from({ length: 400 }, (_, i) => `e${i}`))
+  const sessions = new Sessions({ context: f.ctx, masterId: f.agent.id, lifetime: f.signal.signal,
+    effects: { handle: vi.fn() }, assessmentCurrent: (notice: { id: string }) => active.has(notice.id) } as never)
+  const deliver = (i: number) => sessions.assessment(`candidate:e${i}`, JSON.stringify({ kind: 'candidate', trigger_id: `t${i}`, eval_id: `e${i}` }), () => {})
+  const attempts = await Promise.allSettled(Array.from({ length: 400 }, (_, i) => deliver(i)))
+  expect(attempts.every(result => result.status === 'rejected' && result.reason instanceof Later)).toBe(true)
+  expect(f.inbox.nextTurn).toHaveLength(1)
+  expect(f.followup).toHaveBeenCalledOnce()
+  f.consume(f.inbox.nextTurn[0]!)
+  await expect(deliver(0)).resolves.toBe(new Date(0).toISOString())
+  await expect(deliver(1)).rejects.toBeInstanceOf(Later)
+  expect(f.inbox.nextTurn).toHaveLength(1)
+})
+
+it('acknowledges a consumed candidate while other input waits, instead of deferring its deadline', async () => {
+  const f = fixture()
+  const active = new Set(Array.from({ length: 400 }, (_, i) => `e${i}`))
+  const sessions = new Sessions({ context: f.ctx, masterId: f.agent.id, lifetime: f.signal.signal,
+    effects: { handle: vi.fn() }, assessmentCurrent: (notice: { id: string }) => active.has(notice.id) } as never)
+  await expect(sessions.assessment('candidate:e1', JSON.stringify({ kind: 'candidate', trigger_id: 't1', eval_id: 'e1' }), () => {})).rejects.toBeInstanceOf(Later)
+  f.consume(f.inbox.nextTurn[0]!)
+  // A person's message waiting behind the notice must not hold the consumed assessment's deadline.
+  f.inbox.nextTurn.push(createUserMessage({ content: [{ type: 'text', text: 'owner' }], source: { kind: 'user' } }))
+  expect(await sessions.candidateState('candidate:e1')).toBe('consumed')
+  await expect(sessions.assessment('candidate:e1', JSON.stringify({ kind: 'candidate', trigger_id: 't1', eval_id: 'e1' }), () => {})).resolves.toBe(new Date(0).toISOString())
+  expect(await sessions.candidateState('candidate:e2')).toBe('blocked')
+  f.consume(f.inbox.nextTurn[0]!)
+  expect(await sessions.candidateState('candidate:e2')).toBe('ready')
+})
+
+it('prunes decided and superseded plugin candidates while preserving user instructions and reports', async () => {
+  const f = fixture()
+  const active = new Set(Array.from({ length: 400 }, (_, i) => `e${i}`))
+  const sessions = new Sessions({ context: f.ctx, masterId: f.agent.id, lifetime: f.signal.signal,
+    effects: { handle: vi.fn() }, assessmentCurrent: (notice: { id: string }) => active.has(notice.id) } as never)
+  active.clear(); active.add('old-eval')
+  await expect(sessions.assessment('candidate:old-eval', JSON.stringify({ kind: 'candidate', trigger_id: 'old', eval_id: 'old-eval' }), () => {})).rejects.toBeInstanceOf(Later)
+  await f.delivery.send(f.agent, 'report', JSON.stringify({ kind: 'worker_report', trigger_id: 'old' }), 'queue', f.signal.signal)
+  const user = createUserMessage({ content: [{ type: 'text', text: '{"kind":"candidate","trigger_id":"old"}' }], source: { kind: 'user' } })
+  f.inbox.nextTurn.push(user)
+  active.delete('old-eval'); active.add('new-eval')
+  sessions.pruneAssessments()
+  expect(f.inbox.nextTurn).toHaveLength(2)
+  expect(f.inbox.nextTurn).toContain(user)
+  expect(f.inbox.nextTurn.some(message => message.content.some(block => block.type === 'text' && block.text.includes('worker_report')))).toBe(true)
+  await expect(sessions.assessment('candidate:new-eval', JSON.stringify({ kind: 'candidate', trigger_id: 'old', eval_id: 'new-eval' }), () => {})).rejects.toBeInstanceOf(Later)
+  expect(f.inbox.nextTurn).toHaveLength(2)
+})
+
+it('retains pre-upgrade candidates without exact eval metadata until consumed, without silently freeing admission', async () => {
+  const f = fixture()
+  const sessions = new Sessions({ context: f.ctx, masterId: f.agent.id, lifetime: f.signal.signal,
+    effects: { handle: vi.fn() }, assessmentCurrent: () => false } as never)
+  await f.delivery.send(f.agent, 'legacy-candidate', JSON.stringify({ kind: 'candidate', trigger_id: 'old' }), 'queue', f.signal.signal)
+  const old = f.inbox.nextTurn[0]!
+  sessions.pruneAssessments()
+  expect(f.inbox.nextTurn).toEqual([old])
+  expect(await sessions.candidateState('candidate:new')).toBe('blocked')
+  f.consume(old)
+  expect(await sessions.candidateState('candidate:new')).toBe('ready')
 })

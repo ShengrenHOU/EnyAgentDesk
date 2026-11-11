@@ -42,6 +42,8 @@ export interface Trigger {
 export interface TriggerDisposition {
   /** Rejected by the source scope filter before entering the domain, for the Source's reason. */
   filtered?: Reason
+  /** Exclusive controlled handoff; no lease expiry or implicit return to Eval. */
+  triage?: { owner: string; generation: number; heldAt: string; phase?: 'production' | 'triaged'; batchId?: string }
   evalId?: string
   decisionId?: string
   /**
@@ -171,6 +173,8 @@ export interface Thread {
   correlated: string[]
   /** Triggers waiting for the next eval (debounce buffer). */
   pending: string[]
+  /** Local queue age, not source event time. New evidence preserves it; a retry joins the tail. */
+  evalQueuedAt?: string
   evaluating?: Evaluation
   /** How many Evals of its queued Triggers expired in a row, each of which queued them again; a Decision clears it. */
   expired?: number
@@ -216,6 +220,11 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
 /** A verified work result in its approved destination, such as a document, research note or pull request. */
 export interface Deliverable { title: string; url: string }
+/**
+ * A skill or method the worker actually loaded for its result: the registered name, the file it read, the revision the
+ * host computed from that file, and any historical template the work followed.
+ */
+export interface ReportedSkill { name: string; path?: string; revision?: string; template?: string }
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -226,7 +235,11 @@ export interface Assignment {
   turnStartedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string; deliverables?: Deliverable[] }
+  report?: { state: ReportState; summary: string; at: string; deliverables?: Deliverable[]
+    /** The professional method the worker says it followed, for a report whose result depends on one. */
+    method?: string
+    /** The skills the worker loaded for this report; a ready report lists every skill the assignment requires. */
+    skills?: ReportedSkill[] }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -341,7 +354,9 @@ export type ExecutorKind = 'codex' | 'dsh'
 export interface ExecutionHandoff { from: ExecutorKind; to: ExecutorKind; at: string;
   handoff: { purpose: string; decisions: string; results: string; evidence: string; remaining: string } }
 export interface Execution { name: string; directory: string; assignment: string; executor?: ExecutorKind
-  handoffs?: ExecutionHandoff[] }
+  handoffs?: ExecutionHandoff[]
+  /** Registered skill names the assignment requires; a ready report must list each of them. */
+  requiredSkills?: string[] }
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

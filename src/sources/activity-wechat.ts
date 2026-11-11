@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { family, record } from '../kv.ts'
 import type { Commands } from '../infra/commands.ts'
+import type { ImContextPage, ImContextRequest } from './im-context.ts'
 import type { ContextPart, ContextPartName } from './kind.ts'
 import type { ActivityEvent, ActivityRange, ActivityReaderContext, ActivityScan, ActivityTools, WechatActivityBinding } from './activity-types.ts'
 
@@ -91,7 +92,8 @@ function eventOf(evidence: z.infer<typeof Evidence>, label: string): ActivityEve
   const original = evidence.original, start = new Date(original.timestamp * 1000).toISOString()
   return { provider: 'wechat', accountId: original.account, objectId: original.conversation,
     id: evidence.event_id, version: evidence.fingerprint, at: start, text: original.text,
-    reference: original.message_ref, label, senderId: original.sender,
+    reference: original.message_ref, label, senderId: original.sender, direction: original.direction,
+    contentType: original.local_type,
     locator: { provider: 'wechat', contact: original.conversation, messageRef: original.message_ref,
       start, end: new Date((original.timestamp + 1) * 1000).toISOString() },
     ...original.attachment !== undefined || ['3', '34', '43', '47'].includes(original.local_type) ? { contentPartial: true } : {} }
@@ -190,10 +192,70 @@ export async function readWechatActivityContext(tools: ActivityTools, binding: W
     if (part === 'root' && !records.length && page.has_more) { offset = page.next_offset!; snapshotId = page.snapshot_id; continue }
     const next = part === 'thread' && page.has_more ? Buffer.from(JSON.stringify({ reference: event.reference,
       offset: page.next_offset, snapshotId: page.snapshot_id })).toString('base64url') : undefined
-    return { messages: records.map(record => ({ id: record.message_ref, from: record.sender,
+    return { messages: records.map(record => ({ id: record.message_ref, from: record.sender, direction: record.direction,
       at: new Date(record.timestamp * 1000).toISOString(), text: record.text })), ...next ? { next } : {},
       status: part === 'root' && !records.length ? 'not_found' : 'partial',
       body: { contentPartial: true, eventVersion: event.version, currentLocalSnapshot: true,
         window: { start: selected.start, end: selected.end }, coverage: 'Only the bound message timestamp window; not the full conversation. Attachments were not read.' } }
   }
+}
+
+
+const ImWindowCursor = z.object({ server: z.string(), account: z.string(), conversation: z.string(),
+  anchor: z.string(), version: z.string(), start: DateTime, end: DateTime,
+  offset: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), snapshot: z.string().min(1) }).strict()
+const ImReadWindow = ReadWindow.extend({ records: z.array(Original).max(100),
+  account: z.string().min(1).optional(), start_inclusive: DateTime.optional(), end_exclusive: DateTime.optional() })
+
+/** Read a fixed conversation window without participating in the monitor's delivery or ACK protocol. */
+export async function readWechatImContext(tools: ActivityTools, binding: WechatActivityBinding, request: ImContextRequest,
+  cursor: string | undefined, signal: AbortSignal): Promise<ImContextPage> {
+  signal.throwIfAborted()
+  const { anchor, start, end } = request
+  DateTime.parse(start); DateTime.parse(end)
+  const startMs = Date.parse(start), endMs = Date.parse(end)
+  if (anchor.provider !== 'wechat' || !anchor.account || !anchor.conversation || !anchor.message.startsWith('wx1.')
+    || endMs <= startMs) {
+    throw new Error('Invalid WeChat IM context identity or window')
+  }
+  // Native timestamps are whole seconds and native bounds truncate milliseconds. Ceil preserves the exact half-open set.
+  const nativeStart = Math.ceil(startMs / 1000) * 1000, nativeEnd = Math.ceil(endMs / 1000) * 1000
+  const scope = { server: binding.serverName, account: anchor.account, conversation: anchor.conversation,
+    anchor: anchor.message, version: anchor.version, start, end }
+  const continuation = cursor === undefined ? undefined : ImWindowCursor.parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')))
+  if (continuation && Object.entries(scope).some(([key, value]) => continuation[key as keyof typeof scope] !== value)) {
+    throw new Error('WeChat IM context cursor belongs to another binding, anchor or window')
+  }
+  // A positive subsecond window can contain no possible whole-second message timestamp.
+  if (nativeStart === nativeEnd) return { provider: 'wechat', account: anchor.account, conversation: anchor.conversation, start, end,
+    messages: [], consistency: 'live_paginated', gaps: ['local_sync_only', 'native_version_unavailable', 'deletion_status_unavailable', 'account_unverified_empty_window'] }
+  const offset = continuation?.offset ?? 0
+  const page = await call(tools, binding, 'wechat_read_window', { contact: anchor.conversation, start: new Date(nativeStart).toISOString(), end: new Date(nativeEnd).toISOString(),
+    limit: 100, offset, snapshot_id: continuation?.snapshot ?? '' }, ImReadWindow, signal)
+  if (page.conversation !== anchor.conversation || page.count !== page.records.length
+    || (page.account !== undefined && page.account !== anchor.account)
+    || (page.start_inclusive !== undefined && Date.parse(page.start_inclusive) !== nativeStart)
+    || (page.end_exclusive !== undefined && Date.parse(page.end_exclusive) !== nativeEnd)
+    || (continuation && continuation.snapshot !== page.snapshot_id)) {
+    throw new Error('WeChat IM context page changed account, conversation, window or snapshot')
+  }
+  if (page.has_more ? !page.count || !Number.isSafeInteger(page.next_offset) || page.next_offset !== offset + page.count
+    : page.next_offset !== null) throw new Error('Invalid WeChat IM context continuation')
+  const recordIds = new Set<string>(), messageIds = new Set<string>()
+  for (const original of page.records) {
+    if (original.account !== anchor.account || original.conversation !== anchor.conversation
+      || original.timestamp * 1000 < startMs || original.timestamp * 1000 >= endMs
+      || Date.parse(original.time) !== original.timestamp * 1000
+      || recordIds.has(original.record_id) || messageIds.has(original.message_ref)) {
+      throw new Error('WeChat IM context returned duplicate records or escaped its account, conversation or window')
+    }
+    recordIds.add(original.record_id); messageIds.add(original.message_ref)
+  }
+  return { provider: 'wechat', account: anchor.account, conversation: anchor.conversation, start, end,
+    snapshot: page.snapshot_id, consistency: 'native_snapshot', gaps: ['local_sync_only', 'native_version_unavailable', 'deletion_status_unavailable',
+      ...!page.records.length && page.account === undefined ? ['account_unverified_empty_window'] : []],
+    messages: page.records.map(original => ({ id: original.message_ref, text: original.text, sender: original.sender, direction: original.direction,
+      createdAt: new Date(original.timestamp * 1000).toISOString(),
+      ...original.attachment !== undefined || ['3', '34', '43', '47'].includes(original.local_type) ? { partial: true } : {} })),
+    ...page.has_more ? { next: Buffer.from(JSON.stringify({ ...scope, offset: page.next_offset, snapshot: page.snapshot_id })).toString('base64url') } : {} }
 }

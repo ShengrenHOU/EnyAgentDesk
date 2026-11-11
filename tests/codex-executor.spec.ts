@@ -34,6 +34,19 @@ async function fixture(completeImmediately = false, readOnly = false, beforeThre
   return { host, connections, codex }
 }
 describe('Codex executor integration with upstream Engine and Effects', () => {
+  it('tells the initial Codex launch which skills the ticket requires', async () => {
+    const { host: h, connections } = await fixture()
+    const trigger = feishu('skills-launch', 'Write the weekly review')
+    h.runtime.receive(trigger); await h.runtime.idle()
+    h.runtime.engine.decide(trigger.id, { kind: 'accept', title: 'Weekly review', scope: 'Weekly review',
+      name: 'weekly-review', acknowledgement: '收到。', reason: 'Legacy core executor acceptance',
+      requiredSkills: ['review-weekly-role-progress'] })
+    await h.runtime.idle()
+    const launch = connections[0]!.call.mock.calls.find(([method]) => method === 'turn/start')?.[1] as
+      { input: { text: string }[] } | undefined
+    expect(launch?.input[0]?.text).toContain('"required_skills":["review-weekly-role-progress"]')
+  })
+
   it('consumes an owner answer when its Codex report arrives before turn completion', async () => {
     const { host: h, connections } = await fixture()
     const { ticket } = await h.acceptedLegacyTicket(feishu('1', 'Prepare a summary'))

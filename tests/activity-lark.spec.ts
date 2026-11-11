@@ -32,6 +32,17 @@ function fixture(handler: (args: string[]) => unknown | Promise<unknown>, user =
 }
 afterEach(() => vi.restoreAllMocks())
 
+it('retains native sender type, namespace, content kind and reply reference at collection', async () => {
+  const f = fixture(args => args.includes('+messages-search')
+    ? envelope({ messages: [discovered()], has_more: false })
+    : envelope({ items: [original({ sender: { id: 'cli_other', sender_type: 'app', id_type: 'app_id' },
+      msg_type: 'interactive', parent_id: 'om_parent', root_id: 'om_root' })] }))
+  await scanLarkMessages(f.ctx, binding, range)
+  expect(f.events[0]).toMatchObject({ label: 'Synthetic conversation', senderId: 'cli_other', senderType: 'app',
+    senderIdType: 'app_id', contentType: 'interactive', parentId: 'om_parent', threadId: 'om_root' })
+  expect(f.events[0]?.senderLabel).toBeUndefined()
+})
+
 it('lets the CLI refresh a renewable user token on the next actual read', async () => {
   const f = fixture(() => envelope({ messages: [], has_more: false }), binding.expectedUserId, 'needs_refresh')
   expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ complete: true })

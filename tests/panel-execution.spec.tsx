@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 // The Execution status, a Ticket, and the Execution settings.
 import { act } from 'react'
-import { expect, it, vi } from 'vitest'
+import { expect, it, onTestFinished, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, all, find, tab, click, type, text, field, at, settle } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -25,6 +25,17 @@ it('edits priority and deadline on the original ticket page and exposes follow-u
   expect(server.ticketDetails.t1?.taskPaused).toBe(true)
 })
 
+it('puts the pending decision above setup and history on the Ticket page', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' } }
+  at({ page: 'execution', id: 't1' }); await mount()
+  const attention = document.querySelector('.dt-attention')!
+  expect(attention.textContent).toContain('需要确认按钮颜色')
+  expect(attention.querySelector('textarea')).toBeTruthy()
+  expect(document.querySelector('.dt-status-line')!.compareDocumentPosition(attention) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(attention.compareDocumentPosition(find(zh.taskManagement)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
 it('shows the saved full report for completed and ready Codex Tickets without a DSH Session link', async () => {
   const summary = '审查完成。\n\n[报告证据](https://github.com/acme/widgets/pull/42)\n\n' + '保留限定。'.repeat(100) + '\n报告末尾已保留。'
   const original = server.ticketDetails.t1!
@@ -43,6 +54,23 @@ it('shows the saved full report for completed and ready Codex Tickets without a 
   await remount()
   expect(text()).toContain(zh.latestExecutionReport)
   expect(text()).toContain('报告末尾已保留。')
+})
+
+it('shows the required skills and the method and skill files a report recorded', async () => {
+  const original = server.ticketDetails.t1!
+  const report = { state: 'ready' as const, at: '2026-09-23T00:00:00Z', summary: 'Weekly review drafted',
+    method: 'review-weekly-role-progress', skills: [{ name: 'review-weekly-role-progress', path: '/skills/weekly/SKILL.md',
+      revision: 'abc123def456', template: '2026-10-26 outline' }] }
+  server.ticketDetails.t1 = { ...original, stage: 'person', action: 'review', ended: undefined, summary: report.summary,
+    requiredSkills: ['review-weekly-role-progress'],
+    assignments: [{ ...original.assignments[0]!, state: 'ended' }, { ...original.assignments[0]!, id: 'a2', state: 'ended', report }] }
+  at({ page: 'execution', id: 't1' }); await mount()
+  expect(text()).toContain(zh.requiredSkills)
+  expect(text()).toContain(zh.reportMethod)
+  expect(text()).toContain(zh.reportSkills)
+  expect(text()).toContain('/skills/weekly/SKILL.md')
+  expect(text()).toContain('abc123def456')
+  expect(text()).toContain('2026-10-26 outline')
 })
 
 it('keeps a completed DSH result readable with its executor handoff history', async () => {
@@ -315,6 +343,8 @@ it('reuses the same answer after an uncertain transport result', async () => {
 })
 
 it('preserves a draft when the worker replaces the pending question and requires explicit retargeting', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  onTestFinished(() => { vi.useRealTimers() })
   const t1 = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...t1, stage: 'person', action: 'answer', attention: { id: 'q1', question: '需要确认按钮颜色' },
     mandate: { ...t1.mandate, actor: { source: 'workbench', id: 'owner' } },
@@ -322,9 +352,8 @@ it('preserves a draft when the worker replaces the pending question and requires
   at({ page: 'execution', id: 't1' }); await mount()
   await type(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction), '用蓝色')
   server.ticketDetails.t1 = { ...server.ticketDetails.t1, attention: { id: 'q2', question: '改用红色还是蓝色？' } }
-  // A management save reloads the Ticket, as the poll would when the worker replaces its question.
-  await click(zh.taskManagement)
-  await click(zh.managementSave)
+  // The next poll brings the replaced question; the editor's draft stays with the question it was written for.
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000) }); await settle()
   expect(text()).toContain('改用红色还是蓝色？')
   expect(field<HTMLTextAreaElement>(zh.workbenchReplyInstruction).value).toBe('用蓝色')
   expect(text()).toContain(zh.ticketAnswerChanged)
@@ -468,5 +497,32 @@ it('sends one stop for a double click on Confirm', async () => {
   await click(zh.stop)
   const confirm = find(zh.confirm)
   await act(async () => { confirm.click(); confirm.click() })
+  expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
+})
+
+it('keeps a submitted confirmation dialog open until the action settles', async () => {
+  at({ page: 'execution', id: 't1' })
+  await mount()
+  await click(zh.stop)
+  const base = globalThis.fetch
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith('/tickets/t1/stop') && init?.method === 'POST') await gate
+    return base(url, init)
+  }))
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]')
+  const button = (name: string) => [...dialog()!.querySelectorAll('button')].find(item => item.textContent?.trim() === name)
+  const confirm = find(zh.confirm)
+  await act(async () => { confirm.click() })
+  await settle()
+  // The dialog no longer offers "Cancel" as if it could withdraw the request; every close path stays open while it runs.
+  expect(button(zh.confirming)).toBeDefined()
+  expect(button(zh.cancel)?.disabled).toBe(true)
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+  await settle()
+  expect(dialog()).not.toBeNull()
+  await act(async () => { release(); await settle() })
+  expect(dialog()).toBeNull()
   expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
 })

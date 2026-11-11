@@ -1,5 +1,6 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger, Ticket, Deliverable } from '../core/index.ts'
+import type { ImContextReader } from './im-context.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
@@ -115,6 +116,50 @@ export class SourceRegistry implements SourceScope {
   find(query: string): { threads: string[]; terms: string[] } {
     const found = [...this.kinds.values()].flatMap(kind => kind.find ? [kind.find(query)] : [])
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
+  }
+  /** Resolves IM evidence only while its installed Source is enabled and still listens to this exact record. */
+  imEvidence(trigger: Trigger) {
+    const kind = this.kinds.get(trigger.source)
+    if (!kind?.imEvidence) return undefined
+    const instance = this.resolve(kind, this.settings().sources[kind.kind])
+    if (!instance.enabled || !this.scope(trigger).listened) return undefined
+    const evidence = kind.imEvidence(trigger, instance.config)
+    return evidence ? { ...evidence, configuration: JSON.stringify(instance.config) } : undefined
+  }
+  /** Read display context only while the native evidence remains in current scope. */
+  imHeader(trigger: Trigger) {
+    if (!this.imEvidence(trigger)) throw new Error('IM header source is unavailable or outside scope')
+    const kind = this.kinds.get(trigger.source)!
+    return kind.imHeader?.(trigger, this.resolve(kind, this.settings().sources[kind.kind]).config) ?? { at: trigger.at }
+  }
+  /** Captures an exact source/identity/configuration fence, not a permission to reuse stale configuration. */
+  imContext(trigger: Trigger, commands: Commands): ImContextReader {
+    const kind = this.kinds.get(trigger.source), captured = this.imEvidence(trigger)
+    if (!kind || !captured) throw new Error('IM context source is unavailable or outside scope')
+    const fingerprint = JSON.stringify(captured), { configuration, ...anchor } = captured
+    const assertActive = () => {
+      if (this.kinds.get(trigger.source) !== kind || JSON.stringify(this.imEvidence(trigger)) !== fingerprint) {
+        throw new Error('IM context source configuration, account or scope changed')
+      }
+    }
+    const config = this.resolve(kind, this.settings().sources[kind.kind]).config
+    return { anchorText: kind.imAnchorText?.(trigger, config) ?? trigger.text, assertActive, read: async (request, cursor, signal) => {
+      assertActive(); signal.throwIfAborted()
+      if (JSON.stringify(request.anchor) !== JSON.stringify(anchor)) throw new Error('IM context anchor does not match captured evidence')
+      if (!kind.imContext) return { provider: anchor.provider, account: anchor.account, conversation: anchor.conversation,
+        start: request.start, end: request.end, messages: [], consistency: 'live_paginated', gaps: ['history_unsupported'] }
+      const config = this.resolve(kind, this.settings().sources[kind.kind]).config
+      if (JSON.stringify(config) !== configuration) throw new Error('IM context source configuration changed')
+      try {
+        const page = await kind.imContext(commands.withSignal(signal), request, cursor, config, signal)
+        assertActive(); signal.throwIfAborted()
+        return page
+      } catch {
+        assertActive(); signal.throwIfAborted()
+        // Never return previously read private text or persist CLI stderr after a permission/read failure.
+        throw new Error('IM context read failed or permission is unavailable; no context was attached')
+      }
+    } }
   }
   repliesTo(trigger: Trigger): string | undefined { return this.kinds.get(trigger.source)?.repliesTo?.(trigger) }
   threadContext(trigger: Trigger, settings = this.settings()): TriggerContext | undefined {
