@@ -144,6 +144,7 @@ export class Runtime extends Service implements SourceHost {
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, masterId, context: ctx,
+        get matters() { return runtime.productionTriage?.matters },
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
@@ -159,6 +160,7 @@ export class Runtime extends Service implements SourceHost {
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
       const executorHost = { context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+        guardExecution: async (ticket: Ticket) => { await sources.guardExecution(store.triggers.get(ticket.origin.triggerId), commands, ticket) },
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), launchReady: (id: string) => effects.launchReady(id), ticketPaused: (id: string) => !!store.tickets.get(id)?.paused, environment, sourceLink: link,
         repliedTo: (trigger: Trigger) => repliedTo({ store, sources }, trigger) }
       this.executor = machine.codex ? new ExecutorRouter({ ...executorHost, get engine() { return runtime.engine }, codex: machine.codex,
@@ -229,6 +231,7 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+        matters: this.productionTriage.matters,
         routingRequirements: () => ({ executor: !!machine.codex, stage: !!machine.codex && !machine.codex.model }),
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),

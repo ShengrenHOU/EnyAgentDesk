@@ -23,10 +23,11 @@ import { KV } from '../kv.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
+import type { TriageMatters } from './triage-matters.ts'
 
 /** Resource descriptors exposed via orchestrator_read, marking which resources worker sessions may also read for their own ticket. */
 export const RESOURCES: readonly { name: string; holds: string; executor?: true }[] = [
-  { name: 'tickets', holds: 'ticket cards, newest first; a card\'s state is person/review after a ready report, person/blocked or person/failed after those reports, person/answer with a question, person/delivery when an input could not reach the worker, working or working/queued while it works, idle once the worker ended its turn without a report, else how the ticket ended' },
+  { name: 'tickets', holds: 'newest cards: person/review, blocked, failed, answer or delivery needs attention; working/queued is pending; idle means no report; ended cards show outcome' },
   { name: 'triggers', holds: 'trigger cards with where each went, newest first' },
   { name: 'threads', holds: 'subscribed threads, newest activity first, with their labels, tickets, current assessment and polling errors' },
   { name: 'conversation', holds: 'Owner\'s main discussion (24h, newest first, attachment references); workers: workbench improvement candidates only.', executor: true },
@@ -35,12 +36,15 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'decision/<id>', holds: 'one decision with its audit' },
   { name: 'lines', holds: 'work lines: active Ticket, latest result, next check, judgement, unlinked Tickets' },
   { name: 'line/<id>', holds: 'one line\'s Tickets and judgements' },
-  { name: 'ticket/<id>', holds: 'a ticket\'s card, the trigger, decision and threads it is tied to, the required skills of its assignment, its latest assignments with the start of each '
-    + 'report, and its inputs, newest first', executor: true },
+  { name: 'triage/matters', holds: 'readable message suggestions, current revisions and evidence references' },
+  { name: 'triage/evidence/<id>', holds: 'one source receipt' },
+  { name: 'line/<id>/evidence', holds: 'source receipt references linked to a line and its Tickets' },
+  { name: 'ticket/<id>', holds: 'card, origin, threads, required skills, recent assignments, report excerpts and inputs', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
+  { name: 'ticket/<id>/evidence', holds: 'linked source receipts', executor: true },
+  { name: 'ticket/<id>/evidence/<reference>', holds: 'one source receipt', executor: true },
   { name: 'ticket/<id>/assignments', holds: 'its assignments, newest first, with the start of each report and the method and skills it recorded', executor: true },
-  { name: 'ticket/<id>/reports', holds: 'a compact reading of each report, newest first: its conclusion and the lines that carry a '
-    + 'number or link, with the full text behind ticket/<id>/report/<id>', executor: true },
+  { name: 'ticket/<id>/reports', holds: 'recent report conclusions and evidence; full text at ticket/<id>/report/<id>', executor: true },
   { name: 'ticket/<id>/inputs', holds: 'its inputs, newest first', executor: true },
   { name: 'ticket/<id>/result', holds: 'its latest report', executor: true },
   { name: 'ticket/<id>/report/<id>', holds: 'the report of one of its assignments, with the method and skills it recorded', executor: true },
@@ -68,6 +72,7 @@ export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(r
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
 
 export interface ResourceHost {
+  readonly matters?: Pick<TriageMatters, 'overview' | 'workEvidence' | 'readEvidence'>
   readonly store: Pick<Store, 'get' | 'keys' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
@@ -197,9 +202,28 @@ const ROUTES: readonly Route[] = [
         updated_at: ticket.updatedAt, read: `ticket/${ticket.id}` })) }
   }],
   ['line/', read => {
-    const line = lineDetail(main(read).store, read.rest)
+    const host = main(read), [id, section, ...extra] = read.rest.split('/')
+    if (extra.length || section !== undefined && section !== 'evidence') throw new Error('Unknown line resource')
+    const line = lineDetail(host.store, id!)
     if (!line) throw new Error('Unknown line')
+    if (section === 'evidence') {
+      if (!host.matters) throw new Error('Evidence view is unavailable')
+      return host.matters.workEvidence({ kind: 'line', id: id! }, read.offset || undefined, Math.min(read.limit ?? 20, 50))
+    }
     return line
+  }],
+  ['triage/matters', read => {
+    const host = main(read)
+    if (!host.matters) throw new Error('Evidence view is unavailable')
+    const page = host.matters.overview({ before: read.offset || undefined, limit: Math.min(read.limit ?? 5, 25), active: true })
+    return { ...page, groups: page.groups.map(({ members, ...group }) => ({ ...group,
+      references: members.map(member => ({ reference: member.id, read: `triage/evidence/${member.id}` })) })), next_offset: page.nextBefore }
+  }],
+  ['triage/evidence/', read => {
+    const host = main(read)
+    if (!host.matters) throw new Error('Evidence view is unavailable')
+    const body = host.matters.readEvidence(read.rest)
+    return sourcePage(read, 'evidence', async () => body)
   }],
   ['settings', read => main(read).settings.view()],
   ['settings/', read => text(read, JSON.stringify(main(read).settings.block(read.rest)))],
@@ -297,6 +321,13 @@ const ROUTES: readonly Route[] = [
     if (ticketId && ticketId !== id) throw new Error('Ticket does not belong to this worker')
     const ticket = host.store.tickets.get(id)
     if (!ticket) throw new UserError('unknownTicket')
+    if (section === 'evidence') {
+      if (!host.matters) throw new Error('Evidence view is unavailable')
+      const target = { kind: 'ticket' as const, id }
+      if (!part) return host.matters.workEvidence(target, read.offset || undefined, Math.min(read.limit ?? 20, 50))
+      const body = host.matters.readEvidence(part, target)
+      return sourcePage(read, 'evidence', async () => body)
+    }
     if (section === undefined) {
       const running = runningAssignment(ticket) && workerSessionId(ticket.id)
       const retry = 'sessions' in host ? (host as MainResourceHost).sessions.modelRetry(running) : {}

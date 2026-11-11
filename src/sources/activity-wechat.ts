@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { family, record } from '../kv.ts'
 import type { Commands } from '../infra/commands.ts'
-import type { ImContextPage, ImContextRequest } from './im-context.ts'
+import { ImContextReadError, type ImContextPage, type ImContextRequest } from './im-context.ts'
 import type { ContextPart, ContextPartName } from './kind.ts'
 import type { ActivityEvent, ActivityRange, ActivityReaderContext, ActivityScan, ActivityTools, WechatActivityBinding } from './activity-types.ts'
 
@@ -45,8 +45,19 @@ async function call<T>(tools: ActivityTools, binding: WechatActivityBinding, too
   const name = toolName(binding, tool)
   // Execute the named tool directly; projecting every installed schema can fail on an unrelated plugin.
   const result = await tools.execute({ callId: ToolCallId(`activity-wechat-${randomUUID()}`), name, arguments: args, signal })
+    .catch((error: unknown) => {
+      active(); signal.throwIfAborted()
+      if (tool === 'wechat_read_window') throw new ImContextReadError(true)
+      throw error
+    })
   active(); signal.throwIfAborted()
-  if (result.isError) throw new Error(`WeChat ${tool} failed: ${result.error.message}`)
+  if (result.isError) {
+    const message = result.error.message
+    if (tool === 'wechat_read_window') throw new ImContextReadError(
+      !/permission|forbidden|unauthori[sz]ed|access denied|\b40[13]\b/i.test(message)
+      && /unavailable|temporar|disconnected|timed?\s*out|timeout|ECONNRESET|ECONNREFUSED|\b(?:429|502|503|504)\b/i.test(message))
+    throw new Error(`WeChat ${tool} failed: ${message}`)
+  }
   const envelope = Envelope.parse(result.value), structured = envelope.structuredContent
   // Existing JSON-string tools and the activity-aware structured list are both native MCP output contracts.
   if (structured && typeof structured === 'object' && 'status' in structured) return schema.parse(structured)

@@ -311,6 +311,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET triage-matters': { query: ['before', 'limit', 'active'], answer: () => overviewView().triageMatters },
+  'GET tickets/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },
+  'GET lines/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },
   'GET production-triage': { query: ['before', 'limit'], answer: () => overviewView().productionTriage },
   'GET followups': { answer: () => Object.values(server.ticketDetails).filter(ticket => ticket.state === 'open')
     .flatMap(ticket => (ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => ({ ...item,

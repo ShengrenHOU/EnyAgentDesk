@@ -3,7 +3,8 @@ import { useEffect, useState } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { T } from './text.ts'
 type View = ApiResponse<'GET triage-matters'>
-export function CanonicalMatters({ view, t, loadPage }: { view: View; t: T; loadPage?: (before: number) => Promise<View> }) {
+export function CanonicalMatters({ view, t, loadPage, openWork }: { view: View; t: T; loadPage?: (before: number) => Promise<View>;
+  openWork?: (kind: 'ticket' | 'line', id: string) => void }) {
   const [before, setBefore] = useState<number>()
   const [loaded, setLoaded] = useState<{ base: View; before: number; page: View }>()
   const [error, setError] = useState('')
@@ -23,8 +24,8 @@ export function CanonicalMatters({ view, t, loadPage }: { view: View; t: T; load
   const zh = t('lang').startsWith('zh')
   const label = (en: string, cn: string) => zh ? cn : en
   return <section className="pw-section" aria-label={label('Canonical IM matters', '跨回执 IM 事项')}>
-    <h2>{label('Cross-receipt matter suggestions', '跨回执事项建议')}</h2>
-    <p className="pw-muted">{label('Read-only model suggestions, not business obligations or owner confirmation. No automatic work or replies.', '只读模型建议，不代表业务义务或本人确认，不自动派工或回复。')}</p>
+    <h2>{label('Information and work', '信息与事项')}</h2>
+    <p className="pw-muted">{label('Evidence retains its sources and gaps. Linked work follows the existing Ticket authorization.', '线索保留来源与缺口，关联后的推进沿用原工单授权。')}</p>
     <p>{label('All canonical groups', '全部归一事项组')}: {shown.total}
       {shown.oldestAt && <> · {label('Oldest recorded group', '最早记录组')}: {shown.oldestAt}</>}</p>
     <p>{label('Active suggestions awaiting review', '待复核的模型建议组')}: {shown.unresolved.total}
@@ -35,6 +36,12 @@ export function CanonicalMatters({ view, t, loadPage }: { view: View; t: T; load
       <p className="pw-muted">{label('Matter', '事项')}: {group.id} · {label('Revision', '修订')}: {group.revision} · {group.updatedAt}</p>
       {group.redacted ? <p>{label('Source permission or configuration changed; all source content is hidden.', '来源权限或配置已变更，全部来源内容已隐藏。')}</p> : <>
         <p>{group.conversation}</p><p>{group.reason}</p>
+        {group.handoff && <p>{label('Linked work', '关联事项')}{' '}
+          {openWork ? <button type="button" className="pw-title-button" onClick={() => openWork(group.handoff!.kind, group.handoff!.id)}>
+            {group.handoff.title ?? label('View linked work', '查看关联事项')}</button>
+            : <span>{group.handoff.title ?? label('Linked work recorded', '已记录关联事项')}</span>}
+          {group.handoff.inputId && <small> · {label('Saved in Ticket context', '已保存到工单上下文')}</small>}
+        </p>}
         <p>{label('Model assessment', '模型判断')}: {group.assessment}</p>
         {group.assessment === 'no_further_action_suggested' && <p>{label('Model no longer suggests action based on these citations. This covers bounded observed evidence only, not owner confirmation, cancellation, completion or resolution of an obligation.', '模型据这些引用不再建议行动。仅涵盖已观察的有界证据，不代表本人确认、取消、完成或解除义务。')}</p>}
         {group.related && <p>{label('Related matter', '相关事项')}: {group.related}</p>}

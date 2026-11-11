@@ -1,5 +1,6 @@
 /** The main Session's line tool: semantic continuation evidence, retroactive grouping, and non-reopening closure. */
 import { afterEach, expect, it } from 'vitest'
+import { z } from 'zod'
 import { detail } from '../src/app/lines.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -10,6 +11,44 @@ const rename = (host: Host, id: string, title: string) => {
   host.runtime.store.tickets.save({ ...ticket, title })
 }
 const line = (host: Host, id: string) => detail(host.runtime.store, id)!
+
+it('hands a judged receipt to an existing worker through normal tools and fences cached reads after revocation', async () => {
+  h = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('evidence-work', 'Review deployment evidence'))
+  const runtime = h.runtime, sourceId = 'evidence-test'
+  runtime.sources.register({ kind: sourceId, title: { en: 'Evidence', zh: 'Evidence' }, description: { en: 'Evidence', zh: 'Evidence' },
+    schema: z.object({}), fields: [], health: [], scope: () => ({ listened: true, observed: true }),
+    imEvidence: trigger => ({ provider: 'test', account: 'owner', conversation: 'chat', message: trigger.id, version: '1', partial: false }),
+    imContext: async (_commands, request) => ({ provider: 'test', account: 'owner', conversation: 'chat', start: request.start, end: request.end,
+      consistency: 'live_paginated', gaps: [], messages: [{ id: request.anchor.message, text: request.anchorText, version: '1', createdAt: request.start }] }) })
+  const settings = runtime.store.settings()
+  runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources, [sourceId]: { allowed: [{ id: 'sender' }] } } } })
+  const id = 'deployment-evidence'
+  runtime.engine.receive({ id, source: sourceId, threads: [{ source: sourceId, id: 'chat' }], actor: { source: sourceId, id: 'sender' }, human: true,
+    text: 'Deployment evidence from a native source', at: '2026-11-11T01:00:00.000Z', meta: {} })
+  runtime.triageHandoffs.adopt('evidence-owner', [id], runtime.triageHandoffs.preview([id]).fingerprint)
+  const [batch] = runtime.productionTriage.start('evidence-owner', 1, { start: '2026-11-11T00:00:00.000Z', end: '2026-11-12T00:00:00.000Z' })
+  await runtime.idle(); h.consume()
+  const current = runtime.productionTriage.read(batch!.id), context = current.contexts[id]!
+  let offset: number | null = 0
+  do { offset = runtime.productionTriage.context(current.id, 1, id, offset).next_offset } while (offset !== null)
+  runtime.productionTriage.submit(current.id, 1, current.binding!, { model: 'test', items: [{ triggerId: id, kind: 'informational',
+    reason: 'Deployment update', context: { revision: context.revision, hash: context.hash }, matterIds: ['deployment'] }],
+    matters: [{ id: 'deployment', title: 'Deployment update', reason: 'Same deployment', triggerIds: [id] }] })
+  const matter = runtime.productionTriage.matters.overview().groups[0]!
+  const args = { ticket_id: ticket.id, text: 'Read the deployment update', matter_id: matter.id, matter_revision: matter.revision }
+  const first = await h.runTool(runtime.masterId, 'orchestrator_ticket_note', args)
+  expect(first.saved).toBe(true)
+  expect((await h.runTool(runtime.masterId, 'orchestrator_ticket_note', args)).reused).toBe(true)
+  expect(runtime.store.tickets.get(ticket.id)!.inputs.filter(input => input.kind === 'note')).toHaveLength(1)
+  const page = await h.runTool(sessionId, 'orchestrator_read', { resource: `ticket/${ticket.id}/evidence` }) as { items: { reference: string }[] }
+  const resource = `ticket/${ticket.id}/evidence/${page.items[0]!.reference}`
+  const read = await h.runTool(sessionId, 'orchestrator_read', { resource, limit: 100 })
+  expect(read.text).toContain('batchId')
+  await expect(h.runTool(sessionId, 'orchestrator_read', { resource: `triage/evidence/${page.items[0]!.reference}` })).rejects.toThrow('main Session')
+  runtime.store.saveSettings({ ...runtime.store.settings(), sources: { ...runtime.store.settings().sources, [sourceId]: { enabled: false, config: {} } } })
+  await expect(h.runTool(sessionId, 'orchestrator_read', { resource, offset: 100 })).rejects.toThrow('access changed')
+})
 
 it('uses the native call identity for retries, while allowing separately chosen goals with the same title', async () => {
   h = await startRuntime()

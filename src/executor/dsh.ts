@@ -87,6 +87,7 @@ export interface ExecutorHost {
   paused(): boolean
   /** Execution environment variables for `ticket`, passed to its workspace prepare command. */
   environment(ticket: Ticket): Variable[]
+  guardExecution?(ticket: Ticket): Promise<void>
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
   /** Stored Trigger of the message `trigger` replies to, when it replies to one. */
   repliedTo(trigger: Trigger): Trigger | undefined
@@ -478,6 +479,8 @@ export class DshExecutor implements Executor {
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
+    if (!current()) return
+    await this.host.guardExecution?.(ticket)
     if (!current()) return
     // Preserve legacy workspaces, but never accept one known to have an incomplete preparation attempt.
     const exists = await stat(workspace).then(() => true, () => false)

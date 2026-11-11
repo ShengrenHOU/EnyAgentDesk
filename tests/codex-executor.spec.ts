@@ -34,6 +34,17 @@ async function fixture(completeImmediately = false, readOnly = false, beforeThre
   return { host, connections, codex }
 }
 describe('Codex executor integration with upstream Engine and Effects', () => {
+  it('checks execution ownership before connecting an external executor', async () => {
+    const { host: h, connections } = await fixture()
+    const guard = vi.spyOn(h.runtime.sources, 'guardExecution').mockRejectedValue(new Error('External executor owns this object'))
+    const { ticket } = await h.acceptedLegacyTicket(feishu('ownership', 'Continue the existing task'))
+    expect(connections).toHaveLength(0)
+    expect(h.runtime.store.tickets.get(ticket.id)?.assignments.at(-1)?.report?.state).toBe('failed')
+    guard.mockResolvedValue(undefined)
+    h.runtime.engine.retryTicket(ticket.id); await h.runtime.idle()
+    expect(connections).toHaveLength(1)
+  })
+
   it('tells the initial Codex launch which skills the ticket requires', async () => {
     const { host: h, connections } = await fixture()
     const trigger = feishu('skills-launch', 'Write the weekly review')

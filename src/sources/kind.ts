@@ -130,6 +130,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   publishFiles?(ticket: Ticket, files: { title: string; path: string }[], config: C): Promise<Deliverable[]>
   /** Enforce an installed source's audience constraints before any outbound delivery, including retained reports. */
   guardOutbound?(commands: Commands, message: OutboundMessage, config: C): Promise<void>
+  /** Reread Source-owned execution claims before an assignment starts. */
+  guardExecution?(commands: Commands, trigger: Trigger | undefined, config: C, ticket?: Ticket): Promise<void>
   /** Bounded context reader for assessments; assessments of a kind without `threadContext` read none. */
   threadContext?: ThreadContext<C>
   /** Optional native IM identity. Returning undefined excludes non-message events; must not fabricate conversation identity. */

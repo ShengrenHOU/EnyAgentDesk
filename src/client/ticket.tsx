@@ -1,5 +1,6 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
 import { useReducer, useRef, useState, type ReactNode } from 'react'
+import { WorkEvidence } from './work-evidence.tsx'
 import { answerAttention, ApiError, usePoll, type TicketPageView } from './api.ts'
 import { Button, DisclosureRow, Dot, Icon, Input, Tag, type IconName } from './controls.tsx'
 import { conflicts, dirtyFields, initialManagement, managementPatch, managementReducer, managementValues, sameManagement, shownValues,
@@ -339,6 +340,7 @@ export function TicketPage({ id }: { id: string }) {
       {data.codexThreadId && <code title="Codex thread">Codex: {data.codexThreadId}</code>}
     </PageHead>
     {error && <LoadState error={error} loading={false} />}
+    <WorkEvidence key={id} t={t} load={before => call('GET tickets/:id/evidence', { id, query: { before } })} />
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
       {data.executor && <LabelValue label={t('term.executor')} value={t(`executorKind.${data.executor}`)} />}

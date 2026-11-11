@@ -1,18 +1,19 @@
 import { githubObject, githubThreadKey, repositoryContext, scopedRepository } from './github-context.ts'
 /** GitHub source kind definition, notification and repository polling loops, and Cordis plugin entry. */
 import type { Context } from '@deepseek-ai/cordis'
-import { key, type Thread } from '../core/index.ts'
+import { key, type Thread, type Trigger } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { githubAccount, GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, githubRepository, githubThread, issueTrigger, IssueSchema, pullTrigger, SOURCE }
   from './github-trigger.ts'
+import { externalExecution, GithubLabelsSchema, EXTERNAL_EXECUTION_LABEL } from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
-import { KV, record } from '../kv.ts'
+import { KV, record, family } from '../kv.ts'
 import { ownerDiscussionChannel } from './workbench.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -45,6 +46,39 @@ function scopeOf(meta: Record<string, unknown>): Scope | undefined {
 }
 const taskAuthor = (config: GithubConfig, author: unknown, repository: string) => typeof author === 'string'
   && config.taskAuthors.some(item => sameName(item.id, author) && (!item.repository || sameName(item.repository, repository)))
+type HeldRequest = { triggerId: string; resumeId: string; legacyId?: string }
+const executionHolds = family<HeldRequest & { additional?: HeldRequest[] }, [number: number]>('github-external-hold:')
+const executionHoldKey = executionHolds
+/** Retain the original owner request and record its release without re-executing closed objects. */
+async function receiveObject(ctx: SourceContext, trigger: Trigger, state: string, observedAt: string): Promise<void> {
+  const heldKey = executionHoldKey(Number(trigger.meta.number)), held = ctx.state.get(heldKey)
+  if (trigger.meta.executionHeld === true && state !== 'closed') {
+    const { legacyId, ...meta } = trigger.meta
+    const retained = { ...trigger, id: key('github-execution-held', trigger.id), meta }
+    await ctx.receive(retained)
+    const request = { triggerId: retained.id, resumeId: trigger.id, ...(typeof legacyId === 'string' ? { legacyId } : {}) }
+    if (!held) ctx.state.set(heldKey, request)
+    else if (![held, ...held.additional ?? []].some(item => item.triggerId === retained.id)) {
+      ctx.state.set(heldKey, { ...held, additional: [...held.additional ?? [], request] })
+    }
+    return
+  }
+  if (held) {
+    if (state !== 'open' && state !== 'closed') throw new Error('Unknown GitHub execution handoff state')
+    for (const request of [held, ...held.additional ?? []]) {
+      const original = ctx.triggers.get(request.triggerId)
+      if (!original) throw new Error('The original externally held GitHub request is unavailable')
+      const { executionHeld: _held, ...meta } = original.meta
+      await ctx.receive({ ...original, id: request.resumeId,
+        meta: { ...meta, ...(request.legacyId ? { legacyId: request.legacyId } : {}),
+          ...(state === 'closed' ? { executionClosed: true, executionClosedObservedAt: observedAt } : { executionReleaseObservedAt: observedAt }) },
+        text: `[External execution ${state === 'closed' ? 'object closed' : 'claim released'}; reread current source state before action]\n${original.text}` })
+    }
+    ctx.state.set(heldKey, undefined)
+    return
+  }
+  await ctx.receive(trigger)
+}
 export const githubKind: SourceKind<GithubConfig> = {
   kind: SOURCE,
   title: { zh: 'GitHub', en: 'GitHub' },
@@ -81,11 +115,28 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
+    if (meta.executionHeld === true) return { listened: false, reason: 'external_execution' }
+    if (meta.executionClosed === true) return { listened: false, reason: 'external_execution_closed' }
     const row = meta.ci === true && meta.isPr === true && config.routing !== 'tasks' ? undefined : scopeOf(meta)
     const author = meta.prAuthor ?? meta.objectAuthor
     const owned = config.routing === 'tasks' && taskAuthor(config, author, typeof meta.repository === 'string' ? meta.repository : config.repository)
     return { listened: true, observed: row !== undefined && config[OBSERVED[row]]
       && (config.routing !== 'tasks' || (row === 'ci' || owned) && meta.routing === 'tasks'), ...row ? { row } : {} }
+  },
+  guardExecution: async (commands, trigger, config, ticket) => {
+    const objects = new Map<string, { repository: string; number: number }>()
+    const add = (ref: { repository?: string; number: number }) => {
+      const repository = ref.repository || config.repository || commands.repository
+      objects.set(`${repository.toLowerCase()}:${ref.number}`, { repository, number: ref.number })
+    }
+    if (trigger?.source === SOURCE && typeof trigger.meta.number === 'number' && Number.isSafeInteger(trigger.meta.number) && trigger.meta.number > 0) {
+      add({ number: trigger.meta.number, ...(typeof trigger.meta.repository === 'string' ? { repository: trigger.meta.repository } : {}) })
+    }
+    for (const follow of ticket?.follows ?? []) { const ref = githubObject(follow.thread); if (ref) add(ref) }
+    for (const { repository, number } of objects.values()) {
+      const object = await commands.forRepository(repository).api(z.object({ labels: GithubLabelsSchema }), `issues/${number}`)
+      if (externalExecution(object)) throw new Error(`External executor owns this GitHub object (${EXTERNAL_EXECUTION_LABEL}). Wait for an explicit handoff before retrying.`)
+    }
   },
   health: ['github'],
   channel: { send: sendGithub, link: githubLink },
@@ -179,11 +230,11 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
 interface Round {
   started: string; signal?: AbortSignal | undefined
   pulls: Map<number, Promise<Pull>>; read: Set<number>; failures: string[]; dropped: number[]; abandoned: number[]
-  authors: Map<number, string>
+  objects: Map<number, { author: string; executionHeld: boolean }>
   tally: Tally
 }
 const newRound = (signal?: AbortSignal): Round => ({ started: new Date().toISOString(), signal, pulls: new Map(), read: new Set(),
-  failures: [], dropped: [], abandoned: [], authors: new Map(), tally: { skipped: 0 } })
+  failures: [], dropped: [], abandoned: [], objects: new Map(), tally: { skipped: 0 } })
 const stopped = (ctx: SourceContext, round: Round): boolean => !!round.signal?.aborted || !ctx.config(SOURCE)
 export interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 const RETRY_WINDOW_MS = 24 * 3600_000
@@ -263,8 +314,8 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
     if (id === 'issues') {
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
-      if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login, scopedRepository(ctx)) : issueTrigger(issue.data, login, scopedRepository(ctx)))
+      if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues') && !ctx.state.get(executionHoldKey(issue.data.number))) continue
+      await receiveObject(ctx, pr ? pullTrigger(issue.data, login, scopedRepository(ctx)) : issueTrigger(issue.data, login, scopedRepository(ctx)), issue.data.state, round.started)
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
     }
@@ -273,14 +324,18 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
     const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
     // Task routing checks the parent object's author, so a repository-wide comment on an owned Issue or PR reaches
     // assessment even when the comment itself does not address the agent.
-    let author: string | undefined
+    let object: { author: string; executionHeld: boolean } | undefined
     if (config.routing === 'tasks') {
-      try { author = await commentAuthor(ctx, round, number) }
+      try { object = await commentObject(ctx, round, number) }
       catch (error) { if (deleted(error)) continue; throw error }
     }
-    const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {}, ...author ? { objectAuthor: author } : {} }
+    const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {},
+      ...(object ? { objectAuthor: object.author, executionHeld: object.executionHeld } : {}) }
     const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login, scopedRepository(ctx))
-    if (trigger.text) await ctx.receive(trigger)
+    if (trigger.text) {
+      if (trigger.meta.executionHeld === true) await receiveObject(ctx, trigger, 'open', round.started)
+      else await ctx.receive(trigger)
+    }
   }
   const newest = Math.max(...items.map(item => Date.parse(item.updated_at ?? '')).filter(Number.isFinite))
   const moved = Number.isFinite(newest) ? cursorAt(new Date(newest).toISOString()) : since
@@ -290,12 +345,13 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
   ctx.state.set(name, { since: next, started, ...etag && next === since ? { etag } : {} })
 }
 /** The author of the Issue or PR a repository-wide comment is on, read once per object in a round; task routing checks ownership against it. */
-async function commentAuthor(ctx: SourceContext, round: Round, number: number): Promise<string> {
-  const known = round.authors.get(number)
+async function commentObject(ctx: SourceContext, round: Round, number: number): Promise<{ author: string; executionHeld: boolean }> {
+  const known = round.objects.get(number)
   if (known !== undefined) return known
   const issue = await ctx.commands.withSignal(round.signal).api(IssueSchema, `issues/${number}`)
-  round.authors.set(number, issue.user.login)
-  return issue.user.login
+  const object = { author: issue.user.login, executionHeld: externalExecution(issue) }
+  round.objects.set(number, object)
+  return object
 }
 /** Polls default-branch CI checks, emitting a trigger only when the set of failing checks changes after the initial baseline. */
 async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
@@ -374,6 +430,12 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
     const { number, pr } = address
     items.set(number, { since: [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!, pr })
   }
+  // Label removal need not produce a notification; revisit retained requests oldest-first in bounded rounds.
+  const held = state.keys(executionHolds).map(key => Number(key.slice(executionHolds.prefix.length)))
+    .sort((a, b) => (state.get(KV.github.cursor(a)) ?? '').localeCompare(state.get(KV.github.cursor(b)) ?? ''))
+  for (const number of held.slice(0, 20)) {
+    if (!items.has(number)) items.set(number, { since: state.get(KV.github.cursor(number)) ?? since, pr: false })
+  }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
     round.read.add(number)
@@ -405,8 +467,8 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
       const { login } = githubAccount(ctx.deployment)
       const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
-      if (opened) await ctx.receive(issueTrigger(issue, login, scopedRepository(ctx)))
-      await intakeComments(ctx, { number, isPr: false, url: issue.html_url, objectAuthor: issue.user.login }, since, round)
+      if (opened || ctx.state.get(executionHoldKey(number))) await receiveObject(ctx, issueTrigger(issue, login, scopedRepository(ctx)), issue.state, round.started)
+      await intakeComments(ctx, { number, isPr: false, url: issue.html_url, objectAuthor: issue.user.login, executionHeld: externalExecution(issue) }, since, round)
       nameThread(ctx, number, issue.title)
     }
   }
@@ -414,11 +476,11 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     const pr = await pull(ctx, round, number)
     // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
     const { login } = githubAccount(ctx.deployment)
-    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
-      const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
-      await ctx.receive(pullTrigger(opened, login, scopedRepository(ctx)))
+    if (pr.created_at && (Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login) || ctx.state.get(executionHoldKey(number)))) {
+      const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url, ...(pr.labels ? { labels: pr.labels } : {}) }
+      await receiveObject(ctx, pullTrigger(opened, login, scopedRepository(ctx)), pr.state, round.started)
     }
-    await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)
+    await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login, executionHeld: externalExecution(pr) }, since, round)
     if (pr.title) nameThread(ctx, number, pr.title)
   }
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
@@ -449,7 +511,10 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
       if (sameName(comment.user.login, login)) continue
       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
       const trigger = commentTrigger(comment, ref, kind, login, scopedRepository(ctx))
-      if (trigger.text) await ctx.receive(trigger)
+      if (trigger.text) {
+        if (trigger.meta.executionHeld === true) await receiveObject(ctx, trigger, 'open', round.started)
+        else await ctx.receive(trigger)
+      }
     }
   }
 }
@@ -505,8 +570,11 @@ async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Pro
   const since = ctx.state.get(checkpoint) ?? thread.createdAt
   if (thread.meta.isPr === true) {
     const pr = await pull(ctx, round, number)
-    await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)
-  } else await intakeComments(ctx, { number, isPr: false }, since, round)
+    await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login, executionHeld: externalExecution(pr) }, since, round)
+  } else {
+    const object = ctx.config<GithubConfig>(SOURCE)?.routing === 'tasks' ? await commentObject(ctx, round, number) : undefined
+    await intakeComments(ctx, { number, isPr: false, ...(object ? { objectAuthor: object.author, executionHeld: object.executionHeld } : {}) }, since, round)
+  }
   ctx.state.set(checkpoint, cursorAt(round.started))
 }
 
@@ -585,9 +653,9 @@ async function pollOwnedPulls(ctx: SourceContext, round: Round): Promise<void> {
     const trigger = pullTrigger(pr, githubAccount(ctx.deployment).login, scope)
     trigger.id = key('github-owned-pull', repository, String(pr.number), pr.head.sha)
     trigger.at = round.started
-    trigger.meta = { repository, number: pr.number, isPr: true, prAuthor: pr.user.login, kind: 'pull', head: pr.head.sha, automaticMerge: true }
+    trigger.meta = { repository, number: pr.number, isPr: true, prAuthor: pr.user.login, kind: 'pull', head: pr.head.sha, automaticMerge: true, ...(externalExecution(pr) ? { executionHeld: true } : {}) }
     trigger.text = `[Current owned PR observation; evaluate under the owner's enabled rules]\n${trigger.text}`
-    await ctx.receive(trigger)
+    await receiveObject(ctx, trigger, pr.state, round.started)
     nameThread(ctx, pr.number, pr.title)
   }
   const etag = /etag:\s*(.+)/i.exec(headers)?.[1]?.trim()

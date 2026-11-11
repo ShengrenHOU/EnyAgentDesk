@@ -1123,6 +1123,53 @@ describe('github source', () => {
     expect(h.store.read.threadTriggers('github:12', 10)).toEqual([stored])
     h.store.close()
   })
+  it.each(['issues', 'pulls'] as const)('revisits a held notification-only %s request without a new notification', async kind => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    const original = { ...issue(12), ...(kind === 'pulls' ? openPull(12) : {}),
+      created_at: '2026-09-09T00:00:00Z', body: '@agent-bot keep this goal', labels: [{ name: 'execution:external' }] }
+    const routes: Record<string, unknown> = { notifications: [notification(12, kind)],
+      'issues/12': kind === 'pulls' ? { ...original, pull_request: { url: 'x' } } : original, 'pulls/12': original }
+    github(h, routes)
+    await pollRound(h)
+    expect(h.store.get('github-external-hold:12')).toBeDefined()
+    routes.notifications = []
+    routes['issues/12'] = { ...original, labels: [], body: 'later edit', ...(kind === 'pulls' ? { pull_request: { url: 'x' } } : {}) }
+    routes['pulls/12'] = { ...original, labels: [], body: 'later edit' }
+    await pollRound(h)
+    expect(h.store.get('github-external-hold:12')).toBeUndefined()
+    expect(h.receive.mock.calls.at(-1)![0].text).toContain('keep this goal')
+    expect(h.receive.mock.calls.at(-1)![0].meta.executionReleaseObservedAt).toBeDefined()
+    const calls = h.receive.mock.calls.length
+    await pollRound(h)
+    expect(h.receive).toHaveBeenCalledTimes(calls)
+    h.store.close()
+  })
+  it.each(['open', 'closed'])('retains multiple comments on an older held object and handles its %s handoff', async state => {
+    const h = host()
+    h.store.set('github-since', '2026-09-08T00:00:00.000Z')
+    const original = issue(12, { created_at: '2026-08-01T00:00:00Z', labels: [{ name: 'execution:external' }] })
+    const comments = [1, 2].map(id => ({ id, body: `@agent-bot request ${id}`, user: { login: 'alice', type: 'User' },
+      created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }))
+    const routes: Record<string, unknown> = { notifications: [notification(12)], 'issues/12': original, 'issues/12/comments': comments }
+    github(h, routes)
+    await pollRound(h)
+    expect(h.store.get('github-external-hold:12')).toMatchObject({ additional: [expect.anything()] })
+    routes.notifications = []; routes['issues/12/comments'] = []
+    routes['issues/12'] = { ...original, state, labels: state === 'closed' ? original.labels : [] }
+    await pollRound(h)
+    expect(h.store.get('github-external-hold:12')).toBeUndefined()
+    for (const comment of comments) {
+      const trigger = commentTrigger(comment, { number: 12, isPr: false }, 'conversation', 'agent-bot')
+      const resumed = h.store.triggers.get(trigger.id)!
+      expect(resumed.text).toContain(comment.body)
+      expect(resumed.meta.executionClosed).toBe(state === 'closed' ? true : undefined)
+    }
+    expect(h.receive).toHaveBeenCalledTimes(4)
+    await pollRound(h)
+    expect(h.receive).toHaveBeenCalledTimes(4)
+    h.store.close()
+  })
   it('takes in an Issue body only when the Issue was opened since the cursor, not when an edit or a comment changed it', async () => {
     const h = host()
     // Whoever edits the body, its author would be the actor, so a mention added by an edit is not read.
@@ -1191,6 +1238,39 @@ describe('github source', () => {
     expect(claimPull(h, 't1', openPull(30))).toBe('Ticket ended because its PR was closed')
     h.store.close()
   })
+})
+
+it('adopts an existing owned PR with a reason without replacing its branch or another active owner', () => {
+  const h = host()
+  h.store.tickets.save({ ...openTicket('t1'), execution: execution('task-one') })
+  h.store.tickets.save({ ...openTicket('t2'), execution: execution('task-two') })
+  const pr: Pull = { ...openPull(77), user: { login: 'agent-bot' },
+    head: { sha: 'current-head', ref: 'fix/existing-session', repo: { full_name: 'acme/widgets' } } }
+  expect(claimPull(h, 't1', pr)).toContain('PR does not belong')
+  expect(claimPull(h, 't1', { ...pr, labels: [{ name: 'execution:external' }] }, 'Same accepted goal')).toContain('held by an external')
+  expect(claimPull(h, 't1', pr, 'Same accepted goal')).toBeUndefined()
+  expect(h.store.threads.get('github:77')?.meta.adoption).toEqual({ ticketId: 't1', reason: 'Same accepted goal' })
+  expect(claimPull(h, 't2', pr, 'Same accepted goal')).toBe('PR already belongs to another active ticket')
+  expect(pr.head.ref).toBe('fix/existing-session')
+  expect(h.store.tickets.get('t1')?.follows).toEqual([{ thread: 'github:77', own: false }])
+  h.store.close()
+})
+
+it('rereads native ownership before execution even when the collected trigger predates the external claim', async () => {
+  const h = host()
+  vi.spyOn(h.commands, 'forRepository').mockReturnValue(h.commands)
+  const api = vi.spyOn(h.commands, 'gh').mockResolvedValue({ labels: [{ name: 'Execution:External' }] })
+  const trigger = commentTrigger({ id: 1, body: '@agent-bot fix', user: { login: 'alice' } },
+    { number: 77, isPr: true }, 'conversation', 'agent-bot')
+  await expect(h.sources.guardExecution(trigger, h.commands)).rejects.toThrow('External executor owns')
+  api.mockResolvedValue({ labels: [] })
+  await expect(h.sources.guardExecution(trigger, h.commands)).resolves.toBeUndefined()
+  const ticket = { ...openTicket('bound'), follows: [{ thread: 'github:88', own: false }, { thread: 'github:77', own: false }] }
+  api.mockImplementation(async args => args[1]?.endsWith('/88') ? { labels: [{ name: 'execution:external' }] } : { labels: [] })
+  await expect(h.sources.guardExecution({ ...trigger, source: 'feishu' }, h.commands, ticket)).rejects.toThrow('External executor owns')
+  await expect(h.sources.guardExecution(trigger, h.commands, ticket)).rejects.toThrow('External executor owns')
+  await expect(h.sources.guardExecution(undefined, h.commands, ticket)).rejects.toThrow('External executor owns')
+  h.store.close()
 })
 
 describe('source context', () => {
@@ -1439,6 +1519,7 @@ describe('observing the GitHub repository', () => {
       if (bare === 'notifications') return 'HTTP/2.0 200 OK\r\n\r\n[]'
       if (args.includes('If-None-Match: "same"')) throw commandError({ stderr: 'gh: HTTP 304', code: 1 })
       if (bare === 'issues') return listed(answers.issues)
+      if (/^issues\/\d+$/.test(bare)) return JSON.stringify(answers.issues?.find(item => (item as { number: number }).number === Number(bare.split('/')[1])))
       if (bare === 'issues/comments') return listed(answers.comments)
       if (bare === 'pulls/comments') return listed(answers.reviewComments)
       if (bare === '') return JSON.stringify({ default_branch: 'main' })
@@ -1448,6 +1529,38 @@ describe('observing the GitHub repository', () => {
     })
     return calls
   }
+  it.each(['open', 'closed'])('retains an external owner request and releases an %s object once', async state => {
+    const h = host()
+    observe(h, { observeIssues: true })
+    h.store.set('github-since', at(-24))
+    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
+    const original = issue(8, { body: '@agent-bot repair the original goal', user: { login: 'alice' },
+      created_at: at(2), updated_at: at(2), labels: [{ name: 'execution:external' }] })
+    const answers = { issues: [original] }
+    repository(h, answers)
+    await pollRound(h)
+    const held = h.receive.mock.calls[0]![0]
+    expect(h.store.triggers.disposition(held.id)?.filtered?.code).toBe('external_execution')
+    expect(h.store.tickets.list()).toEqual([])
+    h.store.set('github-stream:issues', { since: at(3), started: { issues: at(0) } })
+    answers.issues = [{ ...original, state, labels: [], body: 'a later edit', updated_at: at(4) }]
+    await pollRound(h); await pollRound(h)
+    expect(h.store.get('github-external-hold:8')).toBeUndefined()
+    const resumed = h.store.triggers.get(issueTrigger(original, 'agent-bot').id)
+    if (state === 'open') {
+      expect(resumed?.text).toContain('repair the original goal')
+      expect(resumed?.text).not.toContain('a later edit')
+      expect(resumed?.meta.executionReleaseObservedAt).toBeDefined()
+      expect(resumed?.meta.executionHeld).toBeUndefined()
+    } else {
+      expect(resumed?.meta.executionClosed).toBe(true)
+      expect(h.store.triggers.disposition(resumed!.id)?.filtered?.code).toBe('external_execution_closed')
+      expect(h.store.tickets.list()).toEqual([])
+    }
+    expect(h.receive).toHaveBeenCalledTimes(4)
+    expect(await h.receive.mock.results[2]!.value).toBe('duplicate')
+    h.store.close()
+  })
   it('takes in the new Issues and PRs from when it started observing them, and asks again with the ETag while nothing is newer',
     async () => {
     const h = host()

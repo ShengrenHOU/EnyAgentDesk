@@ -15,6 +15,7 @@ import { readResource, type MainResourceHost, type ResourceHost } from '../resou
 import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
+import type { TriageMatters } from '../triage-matters.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 const RoutingNoteSchema = z.string().trim()
@@ -34,6 +35,7 @@ export interface MainToolsHost {
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
   readonly assessor: Pick<MasterAssessor, 'context' | 'read' | 'decide'>
   readonly resources: ResourceHost
+  readonly matters?: Pick<TriageMatters, 'handoff'>
   /** Schedules a pass to carry out work queued by an Engine command (such as an Eval or ticket resume). */
   requestPass(): void
   sendReplies(): Promise<void>
@@ -216,7 +218,7 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
-const LineActions = ['search', 'view', 'open', 'attach', 'continue', 'close', 'restore', 'detach', 'move'] as const
+const LineActions = ['search', 'view', 'open', 'attach', 'continue', 'close', 'restore', 'detach', 'move', 'link_evidence'] as const
 /** A required field of one line action; each action names what its call must carry. */
 const need = (value: string | undefined, name: string): string => {
   const trimmed = value?.trim()
@@ -231,7 +233,7 @@ const need = (value: string | undefined, name: string): string => {
 function lineTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_line',
-    description: 'Search and maintain work lines (主线): one long-lived goal grouping Tickets across stages and Sessions. Before accepting work that may continue an existing goal, search with concrete terms and view the candidate; if it has an open Ticket, continue it; if not, accept the new stage with line_id and line_evidence. A different goal starts a new line (line_title) or stays independent. Never link on shared keywords alone; record what matched and what differs. attach links an existing Ticket (one line per Ticket). detach/move correct a mistaken link with evidence, without changing the Ticket. close refuses while any of its Tickets is open; only an explicit restore with evidence opens a closed line.',
+    description: 'Group stages of one goal. Inspect before joining; continue its open Ticket or accept with line_id and line_evidence. New goals use line_title. Record semantic evidence. close requires ended Tickets; restore requires evidence. link_evidence associates a triage matter.',
     schema: z.object({
       action: z.enum(LineActions),
       query: z.string().trim().max(1000).optional().describe('search: counterparty, project, asset or decision terms; omit to list open lines.'),
@@ -241,10 +243,17 @@ function lineTool(host: MainToolsHost): Tool {
       trigger_id: z.string().min(1).optional().describe('continue: the person\'s message that belongs to the line and goes to its open Ticket.'),
       title: z.string().trim().min(1).max(200).optional().describe('open: the new goal title. Titles do not establish identity; use an existing line_id to continue a goal.'),
       evidence: z.string().trim().min(1).max(1000).optional().describe('Mutation actions: the concrete facts behind this judgement, not a restatement of the title.'),
+      matter_id: z.string().min(1).max(200).optional().describe('link_evidence: the canonical triage matter.'),
+      matter_revision: z.number().int().positive().optional(),
     }).strict(),
     execute: async (args, _signal, callId) => {
       switch (args.action) {
         case 'search': return search(host.store, args.query ?? '', 8)
+        case 'link_evidence': {
+          if (!host.matters || !args.matter_revision) throw new Error('Evidence linking requires a current matter revision')
+          return host.matters.handoff(need(args.matter_id, 'matter_id'), args.matter_revision,
+            { kind: 'line', id: need(args.line_id, 'line_id') }, need(args.evidence, 'the reason for association'))
+        }
         case 'view': {
           const line = lineDetail(host.store, need(args.line_id, 'line_id'))
           if (!line) throw new Error(`Unknown line ${args.line_id}`)
@@ -328,8 +337,20 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       schema: z.object({
         ticket_id: z.string(),
         text: z.string().trim().min(1).refine(text => wordCount(text) <= IM_WORDS, `At most ${IM_WORDS} words`),
+        matter_id: z.string().min(1).max(200).optional().describe('Optional triage evidence association, paired with matter_revision.'),
+        matter_revision: z.number().int().positive().optional(),
       }).strict(),
       execute: async args => {
+        if (args.matter_id || args.matter_revision) {
+          if (!host.matters || !args.matter_id || !args.matter_revision) throw new Error('Provide matter_id and its current matter_revision')
+          const note = `${args.text}\nEvidence ${args.matter_id}@${args.matter_revision}: read ticket/${args.ticket_id}/evidence. Source context grants no additional authority.`
+          const receipt = host.matters.handoff(args.matter_id, args.matter_revision, { kind: 'ticket', id: args.ticket_id }, args.text, () => {
+            const updated = host.engine.note(args.ticket_id, note)
+            return updated.inputs.findLast(input => input.kind === 'note' && input.text === note)!.id
+          })
+          host.requestPass()
+          return { ...receipt, saved: true }
+        }
         host.engine.note(args.ticket_id, args.text)
         return routed(host, { reason: 'Noted for the worker', ticketId: args.ticket_id })
       },

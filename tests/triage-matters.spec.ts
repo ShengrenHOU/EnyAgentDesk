@@ -1,6 +1,7 @@
 /** Production pipeline: real durable effects, per-anchor evidence, ownership, and no business effects. */
 import { createHash } from 'node:crypto'
 import { TriageMatters } from '../src/app/triage-matters.ts'
+import { open as openLine, attach } from '../src/app/lines.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,7 +24,7 @@ let native: (id: string) => ImContextReader
 const deliver = vi.fn(async (_id: string, _text: string, authorize: () => void) => { authorize(); return now })
 const policy = (): Policy => ({ version, paused, evalTimeoutMs: 60000, revalidate: () => true, admitsInferred: () => true,
   gate: trigger => ({ admissible: true, strength: trigger.addressed ? 'explicit' : 'inferred', basis: { via: 'followup' } }) })
-const evidence = (trigger: Trigger) => source ? { provider, account: 'owner', conversation: String(trigger.meta.chat ?? 'chat'), message: trigger.id, version: 'v1', partial: false, configuration } : undefined
+const evidence = (trigger: Trigger) => source ? { provider: String(trigger.meta.provider ?? provider), account: 'owner', conversation: String(trigger.meta.chat ?? 'chat'), message: trigger.id, version: 'v1', partial: false, configuration } : undefined
 const options = () => ({ repo: store, policy, now: () => now, externalAssessments: () => service?.activeCount() ?? 0,
   scope: { scope: () => ({ listened: true as const, observed: true }) }, assessor: { request: vi.fn(), release: vi.fn() },
   executor: { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() }, outbox: { send: vi.fn(), status: () => undefined, withdraw: vi.fn() } })
@@ -34,8 +35,8 @@ function setup() {
   service = new ProductionTriage({ store, engine, handoffs, effects, evidence, context: trigger => native(trigger.id),
     enabled: () => enabled, paused: () => paused, policy: () => version, prompt: () => prompt, now: () => now, deliver })
 }
-const add = (id: string, chat = 'chat', addressed = false) => engine.receive({ id, source: 'im', threads: [{ source: 'im', id: chat }],
-  at: now, actor: { source: 'im', id: 'sender' }, human: true, text: `private ${id}`, meta: { chat }, ...(addressed ? { addressed: 'mention' as const } : {}) })
+const add = (id: string, chat = 'chat', addressed = false, nativeProvider?: string) => engine.receive({ id, source: 'im', threads: [{ source: 'im', id: chat }],
+  at: now, actor: { source: 'im', id: 'sender' }, human: true, text: `private ${id}`, meta: { chat, ...(nativeProvider ? { provider: nativeProvider } : {}) }, ...(addressed ? { addressed: 'mention' as const } : {}) })
 const start = (ids = ['a']) => {
   handoffs.adopt('owner', ids, handoffs.preview(ids).fingerprint)
   return service.start('owner', 1, { start: '2026-11-09T00:00:00.000Z', end: '2026-11-11T00:00:00.000Z' })
@@ -58,8 +59,8 @@ beforeEach(() => {
 })
 afterEach(async () => { await effects.drain(); store.close(); rmSync(directory, { recursive: true, force: true }) })
 
-async function next(id: string, text = 'A concrete goal', chat = 'chat') {
-  add(id, chat); observeImEvidence(store, evidence(store.triggers.get(id)!)!)
+async function next(id: string, text = 'A concrete goal', chat = 'chat', nativeProvider?: string) {
+  add(id, chat, false, nativeProvider); observeImEvidence(store, evidence(store.triggers.get(id)!)!)
   const ids = [id], owner = `owner-${id.replace(/[^A-Za-z0-9_-]/g, '_')}`; handoffs.adopt(owner, ids, handoffs.preview(ids).fingerprint)
   const [batch] = service.start(owner, 1, { start: '2026-11-09T00:00:00.000Z', end: '2026-11-11T00:00:00.000Z' }); await drain(); consume(batch!)
   const live = service.read(batch!.id), value = { ...result(batch!), matters: [{ id: 'local', title: text, reason: 'Cited observation', triggerIds: ids }] }
@@ -80,6 +81,62 @@ function link(current: Awaited<ReturnType<typeof next>>, old: ProductionBatch, r
   const candidate = service.matterCandidates(current.batch.id, 1).groups.find(group => group.members.some(member => member.batchId === old.id))!
   return { localMatterId: 'local', relation, targetId: candidate.id, expectedRevision: candidate.revision, assessment: 'suggested_action', reason: 'Same observed goal', evidence: [cite(current.batch), cite(old)] }
 }
+it('associates two native channels with existing work and revalidates each receipt independently', async () => {
+  const first = await next('a', 'Deployment update', 'feishu-chat', 'feishu'); commit(first)
+  const second = await next('b', 'Deployment feedback', 'wechat-chat', 'wechat'); commit(second)
+  add('owner', 'owner-chat', true)
+  const accepted = engine.decide('owner', { kind: 'accept', title: 'Deployment review', scope: 'Read deployment evidence', name: 'deployment-review', reason: 'Owner request', acknowledgement: 'Received' })
+  const ticketId = accepted.ticketId!, target = { kind: 'ticket' as const, id: ticketId }
+  const line = openLine(store, { title: 'Deployment', evidence: 'Owner deployment goal' }).line
+  attach(store, { lineId: line.id, ticketId, evidence: 'Same goal' })
+  const groups = service.matters.overview().groups
+  const feishu = groups.find(group => group.conversation === 'feishu-chat')!, wechat = groups.find(group => group.conversation === 'wechat-chat')!
+  const delivery = vi.fn(() => engine.note(ticketId, 'Read associated evidence').inputs.at(-1)!.id)
+  const linked = service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', delivery)
+  expect(linked.inputId).toBeDefined()
+  expect(service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', delivery).reused).toBe(true)
+  expect(delivery).toHaveBeenCalledTimes(1)
+  service.matters.handoff(wechat.id, wechat.revision, { kind: 'line', id: line.id }, 'Same deployment')
+  const page = service.matters.workEvidence(target)
+  expect(page.items).toHaveLength(2)
+  expect(service.matters.workEvidence({ kind: 'line', id: line.id }).items).toHaveLength(2)
+  expect(page.items.map(item => service.matters.readEvidence(item.reference, target).inputs[0]!.identity.provider).sort()).toEqual(['feishu', 'wechat'])
+  const one = service.matters.workEvidence(target, undefined, 1)
+  expect(service.matters.workEvidence(target, one.next_offset!, 1).items[0]!.reference).not.toBe(one.items[0]!.reference)
+  expect(() => service.matters.readEvidence(page.items[0]!.reference, { kind: 'ticket', id: 'another-task' })).toThrow('not associated')
+  const restricted = new TriageMatters(store, trigger => trigger.meta.provider === 'feishu' ? undefined : evidence(trigger))
+  const restrictedPage = restricted.workEvidence(target)
+  expect(restrictedPage.items.filter(item => item.redacted)).toHaveLength(1)
+  expect(() => restricted.readEvidence(restrictedPage.items.find(item => item.redacted)!.reference, target)).toThrow('access changed')
+  expect(JSON.parse(JSON.stringify(page))).toEqual(page)
+})
+
+it('rolls back the association and context note together when delivery fails', async () => {
+  commit(await next('a'))
+  add('owner', 'owner-chat', true)
+  const ticketId = engine.decide('owner', { kind: 'accept', title: 'Review', scope: 'Read evidence', name: 'review', reason: 'Owner request', acknowledgement: 'Received' }).ticketId!
+  const matter = service.matters.overview().groups[0]!, before = structuredClone(store.tickets.get(ticketId))
+  expect(() => service.matters.handoff(matter.id, matter.revision, { kind: 'ticket', id: ticketId }, 'Evidence', () => {
+    engine.note(ticketId, 'Context'); throw new Error('Interrupted')
+  })).toThrow('Interrupted')
+  expect(store.tickets.get(ticketId)).toEqual(before)
+  expect(service.matters.overview().groups[0]).toMatchObject({ revision: matter.revision })
+  expect(service.matters.overview().groups[0]!.handoff).toBeUndefined()
+})
+
+it('can cite readable partial evidence for continuation while keeping no-further-action evidence complete', async () => {
+  const first = commit(await next('a'))
+  const normal = native
+  native = id => { const reader = normal(id); return { ...reader, async read(...args) {
+    const page = await reader.read(...args); page.anchor!.partial = true; return page
+  } } }
+  const update = await next('b'); prior(update.batch, first)
+  const proposal = link(update, first)
+  expect(() => commit(update, [{ ...proposal, assessment: 'no_further_action_suggested' }])).toThrow()
+  expect(commit(update, [{ ...proposal, assessment: 'informational' }]).state).toBe('completed')
+  expect(service.matters.overview().groups[0]!.memberCount).toBe(2)
+})
+
 it('uses actual main production consumer to continue same goal across batches with immutable receipts and no business effects', async () => {
   const a = await next('a'); const first = commit(a), receipt = JSON.stringify(first)
   const b = await next('b'); expect(b.batch.priorMatters.groups[0]?.memberCount).toBe(1); const proposal = link(b, first)

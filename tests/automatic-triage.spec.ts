@@ -1,5 +1,6 @@
 /** Synthetic end-to-end intake, finite migration, fair accumulation and consumption. No real sources. */
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -66,6 +67,35 @@ it('holds debounce until quiet or maxwait, survives restart, and honors UTF8 bud
   for (let n = 0; n < 5; n++) automatic.receive(make(`unicode${n}`, 'unicode', { text }))
   expect(automatic.status().owners.filter(owner => owner.messages === 4)).toHaveLength(1)
   expect(automatic.status().owners.filter(owner => owner.messages === 1)).toHaveLength(1)
+})
+
+it('keeps accumulating passive messages across unrelated settings changes', async () => {
+  automatic.receive(make('a'))
+  store.saveSettings({ ...store.settings(), executor: { ...store.settings().executor, maxWorkers: 7 },
+    sources: { ...store.settings().sources, unrelated: { enabled: true, config: { pollSeconds: 300 } } } })
+  automatic.receive(make('b')); advance(); automatic.maintain(); await drain()
+  expect(rows()).toHaveLength(1)
+  expect(rows()[0]!.inputs.map(input => input.triggerId)).toEqual(['a', 'b'])
+  expect(rows()[0]!.state).toBe('awaiting')
+})
+
+it('continues a legacy full-settings group and upgrades its fingerprint when appending', async () => {
+  automatic.receive(make('a'))
+  const owner = automatic.status().owners[0]!.owner, groupKey = `automatic-triage-group:${owner}`
+  const group = store.get<{ ids: string[]; fingerprint: string; fingerprintVersion?: 2 }>(groupKey)!
+  delete group.fingerprintVersion
+  group.fingerprint = createHash('sha256').update(JSON.stringify({ settings: { ...store.settings(), paused: false },
+    policy: policyVersion, prompt: 'prompt', inputs: group.ids.map(id => {
+      const trigger = store.triggers.get(id)!; return { trigger, evidence: evidence(trigger) }
+    }) })).digest('hex')
+  store.set(groupKey, group)
+  store.saveSettings({ ...store.settings(), executor: { ...store.settings().executor, maxWorkers: 7 } })
+  restartAutomatic()
+  automatic.receive(make('b'))
+  expect(store.get<{ fingerprintVersion: number }>(groupKey)!.fingerprintVersion).toBe(2)
+  store.saveSettings({ ...store.settings(), executor: { ...store.settings().executor, maxWorkers: 7 } })
+  advance(); automatic.maintain(); await drain()
+  expect(rows()[0]!.inputs.map(input => input.triggerId)).toEqual(['a', 'b'])
 })
 
 it('age bound seals continuing low-volume chatter and out-of-order windows stay valid', async () => {

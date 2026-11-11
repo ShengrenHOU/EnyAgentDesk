@@ -44,8 +44,10 @@ export interface Api {
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
+  'GET tickets/:id/evidence': { query?: { before?: number }; response: ReturnType<TriageMatters['workEvidence']> }
   'GET lines': { response: LinesView }
   'GET lines/:id': { response: LineDetail }
+  'GET lines/:id/evidence': { query?: { before?: number }; response: ReturnType<TriageMatters['workEvidence']> }
   'POST lines/:id/membership': { body: { ticketId: string; targetLineId: string | null; evidence: string }; response: { changed: boolean } }
   'PUT tickets/:id/management': { body: ManagementPatch; response: ReturnType<typeof updateTicketManagement> }
   'POST tickets/:id/executor': { body: ExecutorTransfer; response: { changed: boolean; executor: 'codex' | 'dsh' } }

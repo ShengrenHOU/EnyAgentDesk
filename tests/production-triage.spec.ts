@@ -13,6 +13,7 @@ import { ProductionTriage, productionOverview, type ProductionBatch } from '../s
 import { Engine, type Policy, type Trigger } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import type { ImContextReader } from '../src/sources/im-context.ts'
+import { ImContextReadError } from '../src/sources/im-context.ts'
 import type { ImMessageHeader } from '../src/sources/kind.ts'
 let directory: string, store: Store, engine: Engine, handoffs: TriageHandoffs, service: ProductionTriage, effects: Effects
 let provider: string
@@ -42,7 +43,7 @@ const drain = async () => { effects.start(); await effects.idle('triageAssessmen
 const consume = (batch: ProductionBatch) => {
   for (const input of batch.inputs) { let offset: number | null = 0; do { offset = service.context(batch.id, batch.generation, input.triggerId, offset).next_offset } while (offset !== null) }
 }
-const result = (batch: ProductionBatch, kind: 'informational' | 'unknown' = 'informational') => ({ model: 'reported-model',
+const result = (batch: ProductionBatch, kind: 'informational' | 'suggested_action' | 'unknown' = 'informational') => ({ model: 'reported-model',
   items: batch.inputs.map(input => ({ triggerId: input.triggerId, kind, reason: 'A shared reference', context: (() => { try { const context = service.read(batch.id).contexts[input.triggerId]; return { revision: context?.revision ?? 1, hash: context?.hash ?? 'x'.repeat(64) } } catch { return { revision: 1, hash: 'x'.repeat(64) } } })(), matterIds: [] as string[] })), matters: [] })
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'production-triage-')); store = new Store(join(directory, 'state.sqlite'))
@@ -107,9 +108,17 @@ it('requires exact exhaustive/bidirectional coverage and exact current context b
   expect(completed.result!.matters).toHaveLength(1)
 })
 
-it.each(['settings', 'policy', 'prompt', 'source', 'configuration', 'trigger'] as const)('rejects %s changes before committing and redacts revoked content', async change => {
+it('keeps a retained batch valid after unrelated executor or source settings change', async () => {
+  add('a'); const [batch] = start(); await drain(); consume(batch!)
+  const live = service.read(batch!.id)
+  store.saveSettings({ ...store.settings(), executor: { ...store.settings().executor, maxWorkers: 15 },
+    sources: { ...store.settings().sources, unrelated: { enabled: true, config: { pollSeconds: 300 } } } })
+  expect(service.read(live.id).binding).toBe(live.binding)
+  expect(service.submit(live.id, 1, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it.each(['policy', 'prompt', 'source', 'configuration', 'trigger'] as const)('rejects %s changes before committing and redacts revoked content', async change => {
   add('a'); const [batch] = start(); await drain(); consume(batch!); const live = service.read(batch!.id)
-  if (change === 'settings') store.saveSettings({ ...store.settings(), executor: { ...store.settings().executor, maxWorkers: 15 } })
   if (change === 'policy') version = 'policy2'
   if (change === 'prompt') prompt = 'prompt2'
   if (change === 'source') source = false
@@ -126,11 +135,14 @@ it('redacts completed semantic content when source permission/config changes', a
   expect(view.groups[0]!.conversation).toBeUndefined(); expect(() => service.read(live.id)).toThrow()
 })
 
-it('retains incomplete anchor as unknown while live pagination alone allows information', async () => {
+it.each(['informational', 'suggested_action'] as const)('accepts %s from matched partial evidence while preserving its gaps', async kind => {
   const normal = native; native = id => { const reader = normal(id); return { ...reader, async read(...args) { const page = await reader.read(...args); page.anchor!.partial = true; return page } } }
   add('a'); const [batch] = start(); await drain(); consume(batch!); const live = service.read(batch!.id)
-  expect(() => service.submit(live.id, 1, live.binding!, result(batch!))).toThrow('partial')
-  expect(service.submit(live.id, 1, live.binding!, result(batch!, 'unknown')).state).toBe('completed')
+  expect(live.contexts.a!.gaps).toContain('partial_content_or_attachment')
+  const completed = service.submit(live.id, 1, live.binding!, result(batch!, kind))
+  expect(completed.state).toBe('completed')
+  expect(completed.contexts.a!.manifest.anchor.observed?.partial).toBe(true)
+  expect(store.db.prepare('SELECT COUNT(*) AS n FROM ticket').get()!.n).toBe(0)
 })
 
 it('retries only unknown inputs of mixed completed receipts without reopening information', async () => {
@@ -207,6 +219,37 @@ it('blocks native read failures once and permits explicit source-configuration r
   expect(() => service.retry(batch!.id, 2)).toThrow('Immutable')
 })
 
+it('retries a transient read through Effects and preserves the attempt limit across restart', async () => {
+  const normal = native
+  native = () => ({ assertActive() {}, async read() { throw new ImContextReadError(true) } })
+  add('a'); const [batch] = start(); await drain()
+  expect(service.read(batch!.id)).toMatchObject({ state: 'queued', automaticRetries: 1 })
+  expect(effects.pending('triageAssessment', batch!.id)).toBe(true)
+  await effects.drain(); store.close(); store = new Store(join(directory, 'state.sqlite')); setup()
+  for (const expected of ['queued', 'blocked']) {
+    store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'triageAssessment'").run()
+    await drain()
+    expect(service.read(batch!.id).state).toBe(expected)
+  }
+  expect(service.read(batch!.id).automaticRetries).toBe(2)
+  expect(effects.pending('triageAssessment', batch!.id)).toBe(false)
+  native = normal
+  const retried = service.retry(batch!.id, 1)
+  expect(retried.automaticRetries).toBeUndefined()
+  await drain()
+  expect(service.read(batch!.id).state).toBe('awaiting')
+})
+
+it('retries an exhausted read deadline when no native anchor was obtained', async () => {
+  native = () => ({ assertActive() {}, async read(request) {
+    return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
+      start: request.start, end: request.end, consistency: 'live_paginated', gaps: ['time_budget'], messages: [] }
+  } })
+  add('a'); const [batch] = start(); await drain()
+  expect(service.read(batch!.id)).toMatchObject({ state: 'queued', automaticRetries: 1 })
+  expect(deliver).not.toHaveBeenCalled()
+})
+
 it('allows WeChat-style local-sync informational judgment with explicit version/history gaps, never proven none', async () => {
   const normal = native; native = id => { const reader = normal(id); return { ...reader, async read(...args) {
     const page = await reader.read(...args); delete page.anchor!.version; delete page.messages[0]!.version
@@ -261,16 +304,22 @@ it('tool mutation receipts never reveal raw evidence after revocation and cancel
   expect(() => service.context(retry.id, retry.generation, 'a')).toThrow()
 })
 
-it('starts a durable deadline only after consumed evidence, suspends it during pause and parks expiry without requeue', async () => {
+it('suspends consumed deadlines during pause and bounds automatic judgment retries', async () => {
   add('a'); const [batch] = start(); await drain()
   expect(service.read(batch!.id)).toMatchObject({ consumedAt: now, deadline: '2026-11-10T01:05:00.000Z' })
   now = '2026-11-10T01:02:00.000Z'; paused = true; service.maintain()
   now = '2026-11-10T02:02:00.000Z'; service.maintain(); paused = false; service.maintain()
   expect(service.read(batch!.id).deadline).toBe('2026-11-10T02:05:00.000Z')
   now = '2026-11-10T02:06:00.000Z'; service.maintain()
+  expect(service.read(batch!.id)).toMatchObject({ state: 'queued', generation: 2, automaticRetries: 1 })
+  await drain()
+  now = '2026-11-10T02:12:00.000Z'; service.maintain()
+  expect(service.read(batch!.id)).toMatchObject({ state: 'queued', generation: 3, automaticRetries: 2 })
+  await drain()
+  now = '2026-11-10T02:18:00.000Z'; service.maintain()
   expect(service.read(batch!.id)).toMatchObject({ state: 'blocked', problem: expect.stringContaining('timed out') })
   expect(service.activeCount()).toBe(0); expect(store.threads.get('im:chat')!.pending).toEqual([])
-  const retried = service.retry(batch!.id, 1); expect(retried.consumedAt).toBeUndefined(); expect(retried.deadline).toBeUndefined()
+  const retried = service.retry(batch!.id, 3); expect(retried.consumedAt).toBeUndefined(); expect(retried.deadline).toBeUndefined()
 })
 
 it('preserves a preparing attempt across a pause during native reads and does not rewrite unchanged maintenance', async () => {
@@ -329,8 +378,8 @@ it('real Runtime settings pause/resume preserves unconsumed production attempt d
 it('refuses a deadline-expired result even before the next periodic pass', async () => {
   add('a'); const [batch] = start(); await drain(); consume(batch!); const live = service.read(batch!.id), value = result(batch!)
   now = '2026-11-10T01:05:00.001Z'
-  expect(() => service.submit(live.id, 1, live.binding!, value)).toThrow('not awaiting')
-  expect(service.read(live.id).state).toBe('blocked'); expect(service.activeCount()).toBe(0)
+  expect(() => service.submit(live.id, 1, live.binding!, value)).toThrow('Stale')
+  expect(service.read(live.id)).toMatchObject({ state: 'queued', generation: 2 }); expect(service.activeCount()).toBe(0)
 })
 
 
@@ -372,6 +421,29 @@ it('shares the context-message budget across a full batch instead of rereading f
   expect(manifests.every(manifest => manifest.anchor.contentMatch)).toBe(true)
 })
 
+
+it('fits eight large native anchors into the batch budget with explicit truncation gaps', async () => {
+  const text = 'details '.repeat(3000)
+  native = id => ({ anchorText: text, assertActive() {}, async read(request) {
+    return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
+      start: request.start, end: request.end, consistency: 'live_paginated', gaps: [], messages: [],
+      anchor: { id, text, version: 'v1', createdAt: now } }
+  } })
+  const ids = Array.from({ length: 8 }, (_, i) => `large-${i}`)
+  ids.forEach(id => add(id)); const [created] = start(ids); await drain()
+  const batch = service.read(created!.id)
+  expect(batch.state).toBe('awaiting')
+  const saved = store.get<ProductionBatch>(`triage-production:${batch.id}`)!
+  const manifests = Object.values(saved.contexts).map(value => value.manifest)
+  expect(manifests).toHaveLength(8)
+  expect(manifests.reduce((sum, manifest) => sum + JSON.stringify(manifest).length, 0)).toBeLessThanOrEqual(64_000)
+  for (const manifest of manifests) {
+    expect(manifest.anchor.contentMatch).toBe(true)
+    expect(manifest.anchor.observed?.partial).toBe(true)
+    expect(manifest.gaps).toContain('batch_context_budget')
+    expect(manifest.covered).toBeNull()
+  }
+})
 
 it('returns lossless JSON metadata when the current anchor is missing', async () => {
   add('a')

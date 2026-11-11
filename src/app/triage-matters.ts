@@ -3,10 +3,11 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { family } from '../kv.ts'
 import type { Trigger } from '../core/index.ts'
-import type { ImEvidence } from '../sources/kind.ts'
+import type { ImEvidence, ImMessageHeader } from '../sources/kind.ts'
 import type { Store } from './store.ts'
 import type { ProductionBatch } from './production-triage.ts'
 import { evidenceRevision, imScope } from './im-evidence-revisions.ts'
+import { findLineOf, readLine } from './lines.ts'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const Id = z.string().min(1).max(200)
 export const MatterEvidenceSchema = z.discriminatedUnion('kind', [
@@ -21,12 +22,15 @@ export const MatterProposalSchema = z.object({ localMatterId: Id, relation: z.en
   reason: z.string().trim().min(1).max(700), evidence: z.array(MatterEvidenceSchema).min(1).max(32),
 }).strict()
 type Proposal = z.infer<typeof MatterProposalSchema>
+export interface MatterTarget { kind: 'ticket' | 'line'; id: string }
+export interface MatterHandoffReceipt { matterId: string; revision: number; target: MatterTarget; reused: boolean; inputId?: string }
 interface Matter {
   id: string; scope: string; revision: number; title: string; reason: string; assessment: Proposal['assessment']
   anchorBatchId: string; observedRevision?: number; createdAt: string; updatedAt: string; related?: string
+  handoff?: MatterTarget & { at: string; reason: string; inputId?: string }
 }
 export interface Member { id: string; batchId: string; generation: number; localMatterId: string; matterId: string; originId: string }
-export interface Event { id: string; matterId: string; revision: number; kind: 'new' | 'continue' | 'related' | 'split' | 'retract_related'; at: string; memberId: string; reason: string; evidence: Evidence[]; dependencies?: string[] }
+export interface Event { id: string; matterId: string; revision: number; kind: 'new' | 'continue' | 'related' | 'split' | 'retract_related' | 'handoff'; at: string; memberId: string; reason: string; evidence: Evidence[]; dependencies?: string[]; handoff?: MatterTarget & { inputId?: string } }
 interface Reads { dependencies?: Record<string, true>; candidates: Record<string, number>; contexts: Record<string, { hash: string; revision: number; next: number | null }> }
 const matters = family<Matter>('triage-matter:')
 const members = family<Member>('triage-matter-member:')
@@ -37,10 +41,18 @@ const corrections = family<{ original: string; separated: string }>('triage-matt
 const key = (batch: ProductionBatch) => `${batch.id}:${batch.generation}`
 const memberId = (batch: ProductionBatch, local: string) => hash([batch.id, batch.generation, local])
 const canonicalId = (id: string) => hash(['semantic-matter-v1', id])
+const workMatch = "EXISTS (SELECT 1 FROM json_each(?) work WHERE json_extract(work.value, '$.kind') = json_extract(kv.value, '$.handoff.kind') AND json_extract(work.value, '$.id') = json_extract(kv.value, '$.handoff.id'))"
 type EvidenceResolver = (trigger: Trigger) => (ImEvidence & { configuration: string }) | undefined
 /** Application-owned canonical read projection with immutable provenance and reversible semantic links. */
 export class TriageMatters {
-  constructor(private readonly store: Store, private readonly evidence: EvidenceResolver) {}
+  constructor(private readonly store: Store, private readonly evidence: EvidenceResolver, private readonly header?: (trigger: Trigger) => ImMessageHeader) {}
+  private workTargets(target: MatterTarget): MatterTarget[] {
+    if (target.kind === 'ticket') {
+      const line = findLineOf(this.store, target.id)
+      return line ? [target, { kind: 'line', id: line.id }] : [target]
+    }
+    return [target, ...(readLine(this.store, target.id)?.tickets ?? []).map(id => ({ kind: 'ticket' as const, id }))]
+  }
   private batch(id: string) { const batch = this.store.get<ProductionBatch>(`triage-production:${id}`); if (!batch) throw new Error('Unknown evidence receipt'); return batch }
   private scope(batch: ProductionBatch) { if (!batch.inputs[0]) throw new Error('Empty evidence receipt'); return imScope(batch.inputs[0].identity) }
   private readable(batch: ProductionBatch) {
@@ -85,10 +97,12 @@ export class TriageMatters {
   }
   private view(matter: Matter, cache = new Map<string, boolean>()) {
     const readable = this.isReadable(matter, cache), batch = this.batch(matter.anchorBatchId), linked = this.membership(matter.id)
+    const target = readable && matter.handoff && (matter.handoff.kind === 'ticket' ? this.store.tickets.get(matter.handoff.id) : readLine(this.store, matter.handoff.id))
     return { id: matter.id, revision: matter.revision, createdAt: matter.createdAt, updatedAt: matter.updatedAt,
       redacted: !readable, stale: matter.observedRevision === undefined || evidenceRevision(this.store, batch.inputs[0]!.identity) > matter.observedRevision,
       ...(readable ? { title: matter.title, reason: matter.reason, assessment: matter.assessment,
-        conversation: batch.inputs[0]!.identity.conversation, ...(matter.related !== undefined ? { related: matter.related } : {}) } : {}),
+        conversation: batch.inputs[0]!.identity.conversation, ...(matter.related !== undefined ? { related: matter.related } : {}),
+        ...(matter.handoff ? { handoff: { ...matter.handoff, ...(target ? { title: target.title } : {}) } } : {}) } : {}),
       memberCount: linked.length, members: readable ? linked.slice(0, 25).map(member => {
         const local = this.batch(member.batchId).result?.matters.find(local => local.id === member.localMatterId)
         return { ...member, ...(local ? { local } : {}), contexts: this.contextWarnings(member) }
@@ -96,11 +110,12 @@ export class TriageMatters {
       warning: 'Evidence-based suggestion only. Sender identity and authority are not established; no business obligation resolved.' }
   }
   /** Full-history keyset pagination. Archived empty projections remain available in history. */
-  overview(page: { before?: number; limit?: number; scope?: string; active?: boolean } = {}) {
+  overview(page: { before?: number; limit?: number; scope?: string; active?: boolean; target?: MatterTarget } = {}) {
     const limit = page.limit ?? 25, before = page.before ?? Number.MAX_SAFE_INTEGER
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(before) || before < 1) throw new Error('Invalid matter page')
     const clauses = ["key LIKE 'triage-matter:%'"], args: (string | number)[] = []
     if (page.scope) { clauses.push("json_extract(value, '$.scope') = ?"); args.push(page.scope) }
+    if (page.target) { clauses.push(workMatch); args.push(JSON.stringify(this.workTargets(page.target))) }
     if (page.active) clauses.push("EXISTS (SELECT 1 FROM kv m WHERE m.key LIKE 'triage-matter-member:%' AND json_extract(m.value, '$.matterId') = json_extract(kv.value, '$.id'))")
     const where = clauses.join(' AND ')
     const rows = this.store.db.prepare(`SELECT rowid AS cursor, value FROM kv WHERE ${where} AND rowid < ? ORDER BY rowid DESC LIMIT ?`).all(...args, before, limit + 1)
@@ -150,7 +165,7 @@ export class TriageMatters {
       return { batchId, generation: source.generation, triggerId, revision: context.revision, hash: context.manifest.hash, text: text.slice(offset, offset + 8000), next_offset: next }
     })
   }
-  private validateEvidence(batch: ProductionBatch, refs: Evidence[], cache: Map<string, boolean>) {
+  private validateEvidence(batch: ProductionBatch, refs: Evidence[], cache: Map<string, boolean>, complete: boolean) {
     const ledger = this.ledger(batch)
     for (const ref of refs) {
       const source = this.batch(ref.batchId), input = source.inputs.find(input => input.triggerId === ref.triggerId), context = source.contexts[ref.triggerId]
@@ -158,11 +173,12 @@ export class TriageMatters {
       if (source.generation !== ref.generation || this.scope(source) !== this.scope(batch) || !input || !context || (source.id !== batch.id && source.state !== 'completed')) throw new Error('Foreign or stale matter evidence')
       const read = source.id === batch.id ? batch.reads?.[ref.triggerId] : ledger.contexts[`${source.id}:${source.generation}:${ref.triggerId}`]
       if (!read || read.next !== null || read.hash !== context.manifest.hash || read.revision !== context.revision) throw new Error('Read exact matter evidence before linking')
-      if (ref.kind === 'trigger') { if (ref.version !== input.identity.version || input.partial || !['matched', 'unverified'].includes(context.manifest.anchor.status) || !context.manifest.anchor.contentMatch || context.manifest.anchor.observed?.partial) throw new Error('Invalid, changed or partial trigger citation') }
+      if (ref.kind === 'trigger') { if (ref.version !== input.identity.version || !['matched', 'unverified'].includes(context.manifest.anchor.status) || !context.manifest.anchor.contentMatch
+        || complete && (input.identity.partial || context.manifest.anchor.observed?.partial)) throw new Error('Invalid, changed or insufficient trigger citation') }
       else {
         const message = context.manifest.messages.find(message => message.id === ref.messageId && message.version === ref.version)
           ?? (context.manifest.anchor.observed?.id === ref.messageId && context.manifest.anchor.observed.version === ref.version ? context.manifest.anchor.observed : undefined)
-        if (ref.hash !== context.manifest.hash || ref.revision !== context.revision || !message || message.partial || message.deleted || !message.text.trim()) throw new Error('Citation is not exact readable positive message evidence')
+        if (ref.hash !== context.manifest.hash || ref.revision !== context.revision || !message || complete && message.partial || message.deleted || !message.text.trim()) throw new Error('Citation is not exact readable positive message evidence')
       }
     }
   }
@@ -196,7 +212,7 @@ export class TriageMatters {
       const own = canonicalId(id), relation = proposal?.relation ?? 'new'
       let target: Matter | undefined
       if (proposal) {
-        this.validateEvidence(batch, refs, readable)
+        this.validateEvidence(batch, refs, readable, proposal.assessment === 'no_further_action_suggested')
         if (!refs.some(ref => ref.batchId === batch.id && item.triggerIds.includes(ref.triggerId))) throw new Error('Proposal requires current local matter evidence')
         if (relation !== 'new') {
           if (!proposal.targetId || !proposal.expectedRevision) throw new Error('Target and expected revision required')
@@ -257,6 +273,68 @@ export class TriageMatters {
       const event: Event = { id: operation, matterId: id, revision: matter.revision, kind: 'retract_related', at: matter.updatedAt, memberId: '', reason, dependencies, evidence: [...new Map(this.history(id).flatMap(event => event.evidence).map(ref => [JSON.stringify(ref), ref])).values()] }
       this.store.set(matters(id), matter); this.store.set(events(operation), event); this.store.set(corrections(operation), { original: id, separated: id })
       return this.view(matter)
+    })
+  }
+  /** Keyset-page the immutable source receipts associated with work, across native conversation scopes. */
+  workEvidence(target: MatterTarget, before = Number.MAX_SAFE_INTEGER, limit = 20) {
+    if (!Number.isSafeInteger(before) || before < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid evidence page')
+    const rows = this.store.db.prepare(`SELECT member.rowid AS cursor, member.value AS member, kv.value AS matter FROM kv AS member
+      JOIN kv ON kv.key = 'triage-matter:' || json_extract(member.value, '$.matterId')
+      WHERE member.key LIKE 'triage-matter-member:%' AND ${workMatch} AND member.rowid < ? ORDER BY member.rowid DESC LIMIT ?`)
+      .all(JSON.stringify(this.workTargets(target)), before, limit + 1)
+    const access = new Map<string, boolean>()
+    return { items: rows.slice(0, limit).map(row => {
+      const member = JSON.parse(String(row.member)) as Member, matter = JSON.parse(String(row.matter)) as Matter
+      if (!access.has(matter.id)) access.set(matter.id, this.isReadable(matter))
+      const readable = access.get(matter.id)!
+      const batch = readable ? this.batch(member.batchId) : undefined
+      const local = batch?.result?.matters.find(item => item.id === member.localMatterId)
+      const input = batch?.inputs.find(item => local?.triggerIds.includes(item.triggerId))
+      const trigger = input && this.store.triggers.get(input.triggerId)
+      const anchor = input && batch?.contexts[input.triggerId]?.manifest.anchor
+      return { reference: member.id, matterId: matter.id, revision: matter.revision, redacted: !readable,
+        ...(readable ? { title: matter.title, assessment: matter.assessment } : {}),
+        ...(input && trigger ? { provider: input.identity.provider, header: this.header?.(trigger) ?? { at: trigger.at },
+          partial: input.partial || !!anchor?.observed?.partial, ...(anchor ? { anchorStatus: anchor.status } : {}),
+          ...(anchor?.observed?.text ? { excerpt: anchor.observed.text.slice(0, 500) } : {}), ...(trigger.url ? { url: trigger.url } : {}) } : {}) }
+    }), next_offset: rows.length > limit ? Number(rows[limit - 1]!.cursor) : null }
+  }
+  /** Read an immutable receipt after rechecking current Source access and its work association. */
+  readEvidence(reference: string, target?: MatterTarget) {
+    const member = this.store.get(members(reference))
+    if (!member) throw new Error('Unknown evidence reference')
+    const matter = this.get(member.matterId)
+    if (!this.isReadable(matter)) throw new Error('Evidence Source access changed')
+    if (target && !this.workTargets(target).some(work => work.kind === matter.handoff?.kind && work.id === matter.handoff.id)) throw new Error('Evidence is not associated with this work')
+    const batch = this.batch(member.batchId), local = batch.result?.matters.find(item => item.id === member.localMatterId)
+    if (batch.state !== 'completed' || batch.generation !== member.generation || !local) throw new Error('Evidence receipt changed')
+    return { reference, batchId: batch.id, generation: batch.generation, recordedAt: batch.updatedAt,
+      inputs: local.triggerIds.map(id => {
+        const input = batch.inputs.find(item => item.triggerId === id), trigger = this.store.triggers.get(id), context = batch.contexts[id]
+        if (!input || !trigger || !context) throw new Error('Evidence receipt is incomplete')
+        return { triggerId: id, identity: input.identity, text: input.text, partial: input.partial,
+          header: this.header?.(trigger) ?? { at: trigger.at }, ...(trigger.url ? { url: trigger.url } : {}), context: context.manifest }
+      }) }
+  }
+  /** Atomically associate readable evidence and, for a Ticket, save its context note once. */
+  handoff(id: string, revision: number, target: MatterTarget, reason: string, deliver?: () => string): MatterHandoffReceipt {
+    return this.store.atomic(() => {
+      const matter = this.get(id)
+      if (!this.isReadable(matter) || !this.membership(id).length) throw new Error('Matter evidence is unavailable')
+      if (!reason.trim() || reason.length > 2000) throw new Error('Provide a bounded handoff reason')
+      const destination = target.kind === 'ticket' ? this.store.tickets.get(target.id) : readLine(this.store, target.id)
+      if (!destination) throw new Error('Unknown handoff destination')
+      const operation = hash(['handoff', id, revision, target.kind, target.id, reason]), previous = this.store.get(events(operation))
+      if (previous?.handoff) return { matterId: id, revision: previous.revision, target, reused: true,
+        ...(previous.handoff.inputId ? { inputId: previous.handoff.inputId } : {}) }
+      if (matter.revision !== revision) throw new Error('Read the current matter revision before handoff')
+      const inputId = deliver?.(), at = new Date().toISOString()
+      matter.handoff = { ...target, at, reason, ...(inputId ? { inputId } : {}) }
+      matter.revision++; matter.updatedAt = at
+      this.store.set(matters(id), matter)
+      this.store.set(events(operation), { id: operation, matterId: id, revision: matter.revision, kind: 'handoff', at,
+        memberId: '', reason, evidence: [], handoff: { ...target, ...(inputId ? { inputId } : {}) } })
+      return { matterId: id, revision: matter.revision, target, reused: false, ...(inputId ? { inputId } : {}) }
     })
   }
   detail(batch: ProductionBatch, id: string, before?: number) {

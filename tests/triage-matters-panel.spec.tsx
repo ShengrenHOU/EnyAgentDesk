@@ -17,18 +17,31 @@ const page = (title = 'A shared matter', nextBefore: number | null = null): View
       { contexts: [], local: undefined, id: 'member-2', batchId: 'receipt-2', generation: 1, localMatterId: 'local-2', matterId: 'canonical', originId: 'canonical' }] }] })
 it('renders cross-receipt grouping, bounded no-action advice, and conservative freshness without business controls', () => {
   const html = renderToStaticMarkup(<CanonicalMatters t={t} view={page()} />)
-  for (const text of ['A shared matter', 'receipt-1', 'receipt-2', 'Local receipt title', 'Local receipt reason', 'bounded observed evidence only', 'not business obligations or owner confirmation',
+  for (const text of ['A shared matter', 'receipt-1', 'receipt-2', 'Local receipt title', 'Local receipt reason', 'bounded observed evidence only', 'existing Ticket authorization',
     'not verified as current', 'Model no longer suggests action based on these citations', 'Active suggestions awaiting review', '7', '2026-10-02', '51', '2026-10-01']) expect(html).toContain(text)
   expect(html).not.toContain('<button'); expect(html).not.toContain('<input')
 })
 it('suppresses every source field even if a redacted fixture still contains them', () => {
-  const view = page('PRIVATE TITLE'); Object.assign(view.groups[0]!, { redacted: true, reason: 'PRIVATE REASON', conversation: 'PRIVATE CONVERSATION', related: 'PRIVATE RELATED' })
+  const view = page('PRIVATE TITLE'); Object.assign(view.groups[0]!, { redacted: true, reason: 'PRIVATE REASON', conversation: 'PRIVATE CONVERSATION', related: 'PRIVATE RELATED',
+    handoff: { kind: 'ticket', id: 'PRIVATE-TICKET', title: 'PRIVATE TARGET', at: '2026-11-11', reason: 'PRIVATE LINK' } })
   const html = renderToStaticMarkup(<CanonicalMatters t={t} view={view} />)
   expect(html).toContain('Content hidden'); expect(html).not.toContain('PRIVATE'); expect(html).not.toContain('receipt-1')
   expect(html).not.toContain('no_further_action_suggested'); expect(html).not.toContain('Local receipt title'); expect(html).not.toContain('Local receipt reason')
 })
 it('adds no empty dashboard placeholder', () => {
   expect(renderToStaticMarkup(<CanonicalMatters t={t} view={{ total: 0, oldestAt: null, nextBefore: null, groups: [], unresolved: { total: 0, oldestAt: null } }} />)).toBe('')
+})
+
+it('opens associated work while describing only the saved context receipt', async () => {
+  const element = document.createElement('div'), root = createRoot(element), openWork = vi.fn()
+  const view = page()
+  view.groups[0]!.handoff = { kind: 'ticket', id: 'ticket-one', title: 'Deployment review', at: '2026-11-11', reason: 'Same goal', inputId: 'note-one' }
+  try {
+    await act(async () => root.render(<CanonicalMatters t={t} view={view} openWork={openWork} />))
+    await act(async () => element.querySelector<HTMLButtonElement>('.pw-title-button')!.click())
+    expect(openWork).toHaveBeenCalledWith('ticket', 'ticket-one')
+    expect(element.textContent).toContain('Saved in Ticket context')
+  } finally { await act(async () => root.unmount()) }
 })
 it('uses Older/Latest cursors and hides cached pages while refresh is pending or fails', async () => {
   const element = document.createElement('div'), root = createRoot(element)

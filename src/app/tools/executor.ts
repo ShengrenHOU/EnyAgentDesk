@@ -124,8 +124,9 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         }).strict()).max(20).optional()
           .describe('Skills actually loaded for this result. A ready report must list every required skill the assignment names.'),
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
-        pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github?.login ?? 'the configured GitHub account'} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
+        pr_number: z.number().int().positive().nullish().describe('Source PR, a ticket-branch PR, or an existing owned PR with pr_adoption_reason.'),
         pr_repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).optional().describe('Repository of pr_number. Required for multi-repository work without a GitHub origin.'),
+        pr_adoption_reason: z.string().trim().min(1).max(500).optional().describe('Why this existing PR belongs to the accepted goal.'),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
       }).strict(),
       execute: async (args, signal) => {
@@ -136,6 +137,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         if (!assignmentId) throw new UserError('unknownAssignment')
         if (args.pr_number != null && !host.github.deployment.github) throw new Error('This installation has no GitHub account; report the task result without pr_number')
         if (args.pr_repository && args.pr_number == null) throw new Error('pr_repository requires pr_number')
+        if (args.pr_adoption_reason && args.pr_number == null) throw new Error('pr_adoption_reason requires pr_number')
         const skills = args.skills?.length ? reportedSkills(args.skills, current.execution?.directory ?? process.cwd()) : undefined
         const origin = host.github.triggers.get(current.origin.triggerId)
         const repository = args.pr_repository ?? (typeof origin?.meta.repository === 'string' ? origin.meta.repository : undefined)
@@ -157,7 +159,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           if ((args.state === 'ready' || args.state === 'dropped') && ticketFollowups(pending).length) {
             throw new Error('The scheduled follow-up is pending. End the turn to wait, or cancel the follow-up before reporting ready or dropped.')
           }
-          const refused = pull && claimPull(github, ticketId, pull)
+          const refused = pull && claimPull(github, ticketId, pull, args.pr_adoption_reason)
           if (refused) throw new Error(refused)
           if ((args.recommendation || args.recommendation_reason || args.risk || args.draft) && !args.human_action) {
             throw new Error('recommendation, recommendation_reason, risk and draft require human_action')

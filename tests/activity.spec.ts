@@ -429,6 +429,8 @@ it('projects native message headers without changing evidence identity, and fenc
   expect(renamed.id).toBe(trigger.id)
   expect(sources.imEvidence(renamed)).toEqual(sources.imEvidence(trigger))
   expect(sources.imHeader(activityTrigger(event(), selected))).toEqual({ at: original.at })
+  const otherOwner = createActivityKind({ ...bindings, lark: { ...bindings.lark, expectedUserId: 'ou_different_owner' } }, tools)
+  expect(otherOwner.imEvidence?.(trigger, selected)).toBeUndefined()
   saveConfig(selected, false)
   expect(() => sources.imHeader(trigger)).toThrow('outside scope')
 })

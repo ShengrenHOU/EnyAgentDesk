@@ -271,6 +271,8 @@ export class CodexExecutor {
     this.host.beforeLaunch?.(ticketId)
     this.slots.reserve(ticketId, 'launch')
     try {
+      await this.host.guardExecution?.(ticket)
+      if (!this.current(ticketId, assignmentId)) return
       const worker = await this.connect(ticket, assignmentId)
       await this.reconcile(ticket, worker)
       if (!this.current(ticketId, assignmentId)) return

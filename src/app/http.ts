@@ -179,6 +179,7 @@ const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().no
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
+  const matterViews = new TriageMatters(store, trigger => runtime.sources.imEvidence(trigger), trigger => runtime.sources.imHeader(trigger))
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
@@ -187,7 +188,7 @@ function routes(runtime: HttpHost): Routes {
     'GET followups/automations': () => runtime.followups.automations(),
     'GET production-triage': ({ query }) => productionOverview(store, trigger => runtime.sources.imEvidence(trigger),
       z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(50, 100) }).parse(query)),
-    'GET triage-matters': ({ query }) => new TriageMatters(store, trigger => runtime.sources.imEvidence(trigger)).overview(
+    'GET triage-matters': ({ query }) => matterViews.overview(
       z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(25, 100),
         active: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
@@ -226,7 +227,17 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
+    'GET tickets/:id/evidence': ({ params, query }) => {
+      if (!store.tickets.get(params.id)) throw new RouteError(404, 'Ticket not found')
+      const { before } = z.object({ before: z.coerce.number().int().positive().optional() }).parse(query)
+      return matterViews.workEvidence({ kind: 'ticket', id: params.id }, before)
+    },
     'GET lines': () => linesView(store),
+    'GET lines/:id/evidence': ({ params, query }) => {
+      if (!lineDetail(store, params.id)) throw new RouteError(404, 'Line not found')
+      const { before } = z.object({ before: z.coerce.number().int().positive().optional() }).parse(query)
+      return matterViews.workEvidence({ kind: 'line', id: params.id }, before)
+    },
     'GET lines/:id': ({ params }) => {
       const line = lineDetail(store, params.id)
       if (!line) throw new RouteError(404, 'Line not found')

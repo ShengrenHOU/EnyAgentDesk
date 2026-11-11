@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { KV } from '../src/kv.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
@@ -7,6 +8,17 @@ import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 let host: Host
 beforeEach(async () => { host = await startRuntime() })
 afterEach(async () => { vi.useRealTimers(); await host.stop() })
+
+it('checks execution ownership before creating a workspace or worker and resumes after handoff', async () => {
+  const guard = vi.spyOn(host.runtime.sources, 'guardExecution').mockRejectedValue(new Error('External executor owns this object'))
+  const { ticket, sessionId } = await host.acceptedTicket(feishu('1', 'Continue the existing task'))
+  expect(host.agents.has(sessionId)).toBe(false)
+  expect(existsSync(ticket.execution!.directory)).toBe(false)
+  expect(host.runtime.store.tickets.get(ticket.id)?.assignments.at(-1)?.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('External executor') })
+  guard.mockResolvedValue(undefined)
+  host.runtime.engine.retryTicket(ticket.id); await host.runtime.idle()
+  expect(host.agents.has(sessionId)).toBe(true)
+})
 
 it('holds a transient DSH retry while its ticket is paused and resumes it once', async () => {
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', 'Read the document'))

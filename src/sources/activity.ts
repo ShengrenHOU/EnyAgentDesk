@@ -162,6 +162,7 @@ export function createActivityKind(bindings: ActivitySourceBindings, tools: Acti
     imEvidence: (trigger, config) => {
       const event = EventSchema.parse(trigger.meta.activity)
       if (!enabled(config, event.provider) || event.provider === 'feishu-documents') return undefined
+      if (event.provider === 'feishu-messages' && event.accountId !== bindings.lark.expectedUserId) return undefined
       return { provider: event.provider, account: event.accountId, conversation: event.objectId,
         message: event.locator.provider === 'wechat' ? event.locator.messageRef : event.id, version: event.version,
         ...(event.senderId ? { sender: event.senderId } : {}), partial: event.contentPartial ?? false,

@@ -1,6 +1,8 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger, Ticket, Deliverable } from '../core/index.ts'
 import type { ImContextReader } from './im-context.ts'
+import { ImContextReadError } from './im-context.ts'
+import { CliError } from '../infra/commands.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
@@ -126,6 +128,19 @@ export class SourceRegistry implements SourceScope {
     const evidence = kind.imEvidence(trigger, instance.config)
     return evidence ? { ...evidence, configuration: JSON.stringify(instance.config) } : undefined
   }
+  /** Check live execution ownership while keeping account/configuration changes fenced. */
+  async guardExecution(trigger: Trigger | undefined, commands: Commands, ticket?: Ticket): Promise<void> {
+    for (const kind of this.kinds.values()) {
+      if (!kind.guardExecution || (trigger?.source !== kind.kind && !ticket?.follows?.some(follow => follow.thread.startsWith(`${kind.kind}:`)))) continue
+      const instance = this.resolve(kind, this.settings().sources[kind.kind])
+      if (!instance.enabled) throw new Error('Execution Source is disabled')
+      await kind.guardExecution(commands, trigger, instance.config, ticket)
+      const current = this.resolve(kind, this.settings().sources[kind.kind])
+      if (this.kinds.get(kind.kind) !== kind || !current.enabled || JSON.stringify(current.config) !== JSON.stringify(instance.config)) {
+        throw new Error('Execution Source changed during preflight')
+      }
+    }
+  }
   /** Read display context only while the native evidence remains in current scope. */
   imHeader(trigger: Trigger) {
     if (!this.imEvidence(trigger)) throw new Error('IM header source is unavailable or outside scope')
@@ -154,10 +169,12 @@ export class SourceRegistry implements SourceScope {
         const page = await kind.imContext(commands.withSignal(signal), request, cursor, config, signal)
         assertActive(); signal.throwIfAborted()
         return page
-      } catch {
+      } catch (error) {
         assertActive(); signal.throwIfAborted()
         // Never return previously read private text or persist CLI stderr after a permission/read failure.
-        throw new Error('IM context read failed or permission is unavailable; no context was attached')
+        const retryable = error instanceof ImContextReadError ? error.retryable
+          : error instanceof CliError && (error.code === undefined || error.code === 408 || error.code === 429 || error.code >= 500 && error.code <= 599)
+        throw new ImContextReadError(retryable)
       }
     } }
   }

@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { collectImContext, IM_CONTEXT_LIMITS, type ImContextRequest, type ImContextPage, type ImContextReader } from '../src/sources/im-context.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
-import { Commands } from '../src/infra/commands.ts'
+import { CliError, Commands } from '../src/infra/commands.ts'
 import type { Trigger } from '../src/core/index.ts'
 
 const request: ImContextRequest = { anchor: { provider: 'test', account: 'owner', conversation: 'chat', message: 'a', version: 'v1', partial: false },
@@ -132,4 +132,14 @@ it('sanitizes permission/read failures instead of attaching partial evidence or 
   const commands = { withSignal: () => commands } as unknown as Commands
   await expect(collectImContext(registry.imContext({ source: 'third-party', meta: {} } as Trigger, commands), request))
     .rejects.toThrow('IM context read failed or permission is unavailable; no context was attached')
+})
+
+it.each([[503, true], [429, true], [403, false], [232011, false], [undefined, true]] as const)('retains safe retry classification for native CLI code %s', async (code, retryable) => {
+  const registry = new SourceRegistry(() => SettingsSchema.parse({}))
+  registry.register({ kind: 'third-party', title: { en: 'IM', zh: 'IM' }, description: { en: 'IM', zh: 'IM' },
+    schema: z.object({}), fields: [], health: [], imEvidence: () => request.anchor,
+    imContext: async () => { throw new CliError('SECRET_STDERR', code) } })
+  const commands = { withSignal: () => commands } as unknown as Commands
+  await expect(collectImContext(registry.imContext({ source: 'third-party', meta: {} } as Trigger, commands), request))
+    .rejects.toMatchObject({ retryable, message: 'IM context read failed or permission is unavailable; no context was attached' })
 })

@@ -2,7 +2,7 @@ name: verify-snapshot
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-candidate/**']
 
 permissions:
   contents: read
@@ -29,7 +29,11 @@ jobs:
           fi
           git log -1 --format=%B | grep -Eq '^Upstream-Commit: [0-9a-f]{40}$'
           version=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')
-          test "$(git rev-parse "refs/tags/v$version^{commit}")" = "$(git rev-parse HEAD)"
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            test "$(git rev-parse "refs/tags/v$version^{commit}")" = "$(git rev-parse HEAD)"
+          else
+            test "$(git rev-parse HEAD^)" = "$(git rev-parse origin/main)"
+          fi
           for path in GOAL.md docs/open-source docs/010-owner-pilot.md docs/011-development-principles.md; do
             if [ -e "$path" ]; then
               echo "forbidden path present: $path"

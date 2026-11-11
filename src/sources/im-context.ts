@@ -3,6 +3,11 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { ImEvidence } from './kind.ts'
 
+/** Sanitized native read failure, retaining only the recovery decision at the Source boundary. */
+export class ImContextReadError extends Error {
+  constructor(readonly retryable: boolean) { super('IM context read failed or permission is unavailable; no context was attached') }
+}
+
 export interface ImContextRequest { anchor: ImEvidence; anchorText: string; start: string; end: string }
 export interface ImContextMessage {
   id: string; text: string; version?: string; versionBasis?: 'native' | 'source_digest'; nativeVersion?: string

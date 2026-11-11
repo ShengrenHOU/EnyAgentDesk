@@ -1,7 +1,8 @@
 /** Automatic read-only IM ownership, bounded accumulation and restart-safe legacy capture. */
 import { createHash } from 'node:crypto'
 import type { Engine, Trigger } from '../core/index.ts'
-import { family, record } from '../kv.ts'
+import { family, record, KV } from '../kv.ts'
+import { SettingsSchema, type Settings } from '../policy.ts'
 import type { ImEvidence } from '../sources/kind.ts'
 import type { Store } from './store.ts'
 import type { TriageHandoffs } from './triage-handoffs.ts'
@@ -12,6 +13,7 @@ type Lane = 'live' | 'historical'
 interface Group {
   owner: string; scope: string; source: string; lane: Lane; state: 'open' | 'sealed' | 'transferred' | 'blocked' | 'released'
   ids: string[]; firstAt: string; lastAt: string; oldestAt: string; newestAt: string; chars: number; fingerprint: string; problem?: string
+  fingerprintVersion?: 2
 }
 interface Scan { highwater: number; nextHighwater?: number; cursor: number; scanned: number; captured: number; skipped: Record<string, number>; completedAt?: string; nextSweep?: string }
 const scanKey = record<Scan>('automatic-triage-scan')
@@ -38,9 +40,19 @@ export class AutomaticTriage {
     })
   }
   private now() { return this.host.now?.() ?? new Date().toISOString() }
-  private snapshot(ids: string[]) {
-    return hash({ settings: { ...this.host.store.settings(), paused: false }, policy: this.host.policy(), prompt: this.host.prompt(),
+  private snapshot(ids: string[], settings?: Settings) {
+    return hash({ ...(settings ? { settings: { ...settings, paused: false } } : {}), policy: this.host.policy(), prompt: this.host.prompt(),
       inputs: ids.map(id => { const trigger = this.host.store.triggers.get(id); return { trigger, evidence: trigger && this.host.evidence(trigger) } }) })
+  }
+  private matchesSnapshot(group: Group) {
+    const current = this.snapshot(group.ids)
+    if (group.fingerprintVersion === 2) return group.fingerprint === current
+    // Match retained settings against current evidence before narrowing a legacy fence.
+    const settings = [this.host.store.settings(), SettingsSchema.parse({}),
+      ...this.host.store.keys(KV.settings.version).reverse().flatMap(key => this.host.store.get(key)?.settings ?? [])]
+    if (!settings.some(value => group.fingerprint === this.snapshot(group.ids, value))) return false
+    group.fingerprint = current; group.fingerprintVersion = 2
+    return true
   }
   /** Called inside receive's Store transaction, before Passes can synchronously request an Eval. */
   receive(trigger: Trigger) {
@@ -71,7 +83,7 @@ export class AutomaticTriage {
     const scope = imScope(evidence), source = hash([evidence.provider, evidence.account]), now = this.now()
     const row = store.db.prepare("SELECT value FROM kv WHERE key LIKE 'automatic-triage-group:%' AND value ->> '$.scope' = ? AND value ->> '$.lane' = ? AND value ->> '$.state' = 'open' ORDER BY rowid LIMIT 1").get(scope, lane)
     let group = row ? JSON.parse(String(row.value)) as Group : undefined
-    if (group && (group.fingerprint !== this.snapshot(group.ids) || handoffs.read(group.owner).state !== 'held')) {
+    if (group && (!this.matchesSnapshot(group) || handoffs.read(group.owner).state !== 'held')) {
       group.state = handoffs.read(group.owner).state === 'released' ? 'released' : 'blocked'; group.problem = 'Source, settings, policy, prompt or ownership changed; explicit recovery required'
       store.set(groups(group.owner), group); group = undefined
     }
@@ -83,11 +95,11 @@ export class AutomaticTriage {
     if (!group) {
       const owner = `auto_${hash([id, preview.fingerprint])}`
       handoffs.adopt(owner, [id], preview.fingerprint)
-      group = { owner, scope, source, lane, state: 'open', ids: [id], firstAt: now, lastAt: now, oldestAt: trigger.at, newestAt: trigger.at, chars, fingerprint: this.snapshot([id]) }
+      group = { owner, scope, source, lane, state: 'open', ids: [id], firstAt: now, lastAt: now, oldestAt: trigger.at, newestAt: trigger.at, chars, fingerprint: this.snapshot([id]), fingerprintVersion: 2 }
     } else {
       handoffs.append(group.owner, [id], preview.fingerprint); group.ids.push(id); group.chars += chars
       group.oldestAt = [group.oldestAt, trigger.at].sort()[0]!; group.newestAt = [group.newestAt, trigger.at].sort()[1]!
-      group.lastAt = now; group.fingerprint = this.snapshot(group.ids)
+      group.lastAt = now; group.fingerprint = this.snapshot(group.ids); group.fingerprintVersion = 2
     }
     if (group.ids.length >= MAX_INPUTS || group.chars >= MAX_CHARS) group.state = 'sealed'
     store.set(claimed(id), group.owner)
@@ -144,7 +156,7 @@ export class AutomaticTriage {
       if (!row) return
       const group = JSON.parse(String(row.value)) as Group
       if (handoffs.read(group.owner).state === 'released') { group.state = 'released'; store.set(groups(group.owner), group); return }
-      if (group.fingerprint !== this.snapshot(group.ids)) {
+      if (!this.matchesSnapshot(group)) {
         group.state = 'blocked'; group.problem = 'Source, settings, policy or prompt changed; held evidence retained for explicit recovery'
         store.set(groups(group.owner), group); return
       }
@@ -168,7 +180,7 @@ export class AutomaticTriage {
           const trigger = store.triggers.get(id), marker = store.triggers.disposition(id)?.triage
           if (!trigger || !this.host.evidence(trigger) || marker?.owner !== owner || marker.generation !== generation || marker.phase) throw new Error('Source or exclusive owner is unavailable')
         }
-        group.fingerprint = this.snapshot(group.ids); group.state = 'sealed'; delete group.problem
+        group.fingerprint = this.snapshot(group.ids); group.fingerprintVersion = 2; group.state = 'sealed'; delete group.problem
       }
       store.set(groups(owner), group)
       return { owner, generation, state: group.state, messages: group.ids.length }

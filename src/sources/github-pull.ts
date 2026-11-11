@@ -5,11 +5,12 @@ import { key, liveTicket, type Follow, type OutboundMessage, type ThreadFact, ty
 import { githubAccount, type Deployment } from '../deployment.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
-import { githubPage, SOURCE, UserSchema } from './github-trigger.ts'
+import { externalExecution, GithubLabelsSchema, githubPage, SOURCE, UserSchema } from './github-trigger.ts'
 
 const PullSchema = z.looseObject({
   title: z.string().optional(), state: z.string(), html_url: z.string(), user: UserSchema,
   body: z.string().nullish(), created_at: z.string().optional(),
+  labels: GithubLabelsSchema.optional(),
   merged: z.boolean().optional(), merged_at: z.string().nullish(), closed_at: z.string().nullish(), auto_merge: z.unknown().optional(),
   head: z.looseObject({ sha: z.string(), ref: z.string(), repo: z.looseObject({ full_name: z.string() }).nullish() }),
 })
@@ -33,20 +34,23 @@ const AUTO_MERGE_ON: ThreadFact = { label: { zh: '自动合并', en: 'Auto-merge
  * Validates and binds an open PR to a ticket when the PR is either the ticket's origin PR or an agent-authored PR on the ticket's branch, enforcing that one PR binds to at most one open ticket.
  * Returns an error message when binding is rejected, or undefined when the PR is bound or when the PR is not open (which is not an error).
  */
-export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): string | undefined {
+export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull, adoptionReason?: string): string | undefined {
   const ticket = ctx.tickets.get(ticketId)
   if (!ticket || !liveTicket(ticket)) return 'Ticket ended because its PR was closed'
+  if (externalExecution(pr)) return 'PR is held by an external executor; wait for an explicit handoff'
   const source = ctx.triggers.get(ticket.origin.triggerId)
   const started = source?.source === SOURCE && source.meta.isPr === true && source.meta.number === pr.number && (!scopedRepository(ctx) || source.meta.repository === scopedRepository(ctx))
   const opened = agentPull(pr, ctx.deployment) && ticketBranch(ticket, pr.head.ref)
-  if (!started && !opened) {
+  const adopted = !!adoptionReason?.trim() && agentPull(pr, ctx.deployment)
+  if (!started && !opened && !adopted) {
     const { login } = githubAccount(ctx.deployment)
-    return `PR does not belong to this ticket: use the source PR or a PR by ${login} from a branch whose last path segment is DSH_SUPERAGENT_NAME; omit pr_number when no PR exists`
+    return `PR does not belong to this ticket: report its source PR, a ticket branch PR by ${login}, or give pr_adoption_reason for an existing owned PR under the same goal. Preserve existing branch and PR identities.`
   }
   const owner = ctx.tickets.open().find(item => pullsOf(item, true, scopedRepository(ctx)).includes(pr.number))
   if (owner && owner.id !== ticketId) return 'PR already belongs to another active ticket'
   const follow = ticket.follows?.find(item => item.thread === githubThreadKey(ctx, pr.number))
   if (pr.state === 'open' && (!follow || follow.closed || (opened && !follow.own))) bind(ctx, ticketId, pr, opened)
+  if (adopted && !follow) ctx.threads.patch(githubThreadKey(ctx, pr.number), { adoption: { ticketId, reason: adoptionReason!.trim() } })
   return undefined
 }
 /**

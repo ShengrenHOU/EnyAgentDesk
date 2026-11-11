@@ -1,5 +1,6 @@
 /** Today: the owner's decision queue, with the work that still runs below it; detailed discussion stays in the main Session. */
 import { CanonicalMatters } from './triage-matters.tsx'
+import { WorkEvidence } from './work-evidence.tsx'
 import { ProductionJudgments } from './production-triage.tsx'
 import { useEffect, useRef, useState } from 'react'
 import type { readFocus } from '../sources/workbench-focus.ts'
@@ -318,6 +319,7 @@ export function Workbench(props: Props) {
       <p>{lineView.latestJudgement.evidence}</p>
       {membershipTrail(lineView.latestJudgement)}
     </div>}
+    <WorkEvidence key={lineView.id} t={t} load={before => call('GET lines/:id/evidence', { id: lineView.id, query: { before } })} />
     <div className="pw-section-title"><h3>{t('lineTickets')}</h3><span>{lineView.tickets.length}</span></div>
     {lineView.tickets.length ? <ul className="pw-plain-list pw-line-tickets">{lineView.tickets.map(ticket => <li key={ticket.id}>
       <button type="button" className="dt-open" onClick={() => { setSelectedLine(undefined); setSelected(ticket.id) }}>{ticket.title}</button>
@@ -372,7 +374,8 @@ export function Workbench(props: Props) {
       {state && !ready && <p className="pw-muted" role="status">{t('masterNotReady')}</p>}
       {!chatOpen && failure && <p className="dt-error" role="alert">{failure}</p>}
       {notice && <p className="pw-notice" role="status">{notice}</p>}
-      {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })} />}
+      {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
+        openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
       {data?.productionTriage && <ProductionJudgments view={data.productionTriage} t={t} loadPage={before => call('GET production-triage', { query: { before } })} />}
       {preview && <section className="pw-preview" ref={previewPanel} tabIndex={-1} aria-label={preview.title}>
         <div className="pw-section-title"><h2>{preview.title}</h2>

@@ -47,6 +47,22 @@ it('reads later replies and outgoing messages in a fixed snapshot without increm
   expect(native.schemas).not.toHaveBeenCalled()
 })
 
+it('marks an unavailable native read transport for bounded retry without exposing diagnostics', async () => {
+  const native = mock()
+  native.execute.mockRejectedValueOnce(new Error('PRIVATE_RPC_DIAGNOSTICS'))
+  await expect(readWechatImContext(native.tools, binding, request, undefined, signal()))
+    .rejects.toMatchObject({ retryable: true, message: 'IM context read failed or permission is unavailable; no context was attached' })
+  expect(native.execute).toHaveBeenCalledTimes(1)
+})
+
+it.each([['Selected MCP unavailable', true], ['Request timed out', true], ['HTTP 503', true],
+  ['Permission unavailable', false], ['Forbidden (403)', false], ['Invalid input', false]])('classifies native error-valued reads: %s', async (message, retryable) => {
+  const native = mock()
+  native.execute.mockResolvedValueOnce({ isError: true, error: { message } })
+  await expect(readWechatImContext(native.tools, binding, request, undefined, signal()))
+    .rejects.toMatchObject({ retryable, message: 'IM context read failed or permission is unavailable; no context was attached' })
+})
+
 it.each(['incoming', 'outgoing', 'unknown-native-value', ''])('retains native direction %j with an unknown sender through the host collector', async direction => {
   const native = mock(page([original('anchor', 0, { sender: null, direction, text: request.anchorText })]))
   const result = await collectImContext({ assertActive() {},
