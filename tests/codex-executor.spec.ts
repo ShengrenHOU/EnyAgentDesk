@@ -330,7 +330,10 @@ describe('Codex executor integration with upstream Engine and Effects', () => {
       await vi.waitFor(() => expect(c.call.mock.calls.filter(([method]) => method === 'thread/read')).toHaveLength(1))
       expect(c.call.mock.calls.some(([method]) => method === 'turn/steer')).toBe(false)
     } finally { gate.resolve() }
-    await vi.waitFor(() => expect(h.runtime.store.get(KV.codex.stages(ticket.id))?.turns).toHaveLength(1))
+    // The queued input can already have started its next turn by the time the receipt is observed.
+    await vi.waitFor(() => expect(h.runtime.store.get(KV.codex.stages(ticket.id))?.turns.map(turn => turn.turnId)).toEqual(['turn-1', 'turn-2']))
+    expect(c.call.mock.calls.filter(([method]) => method === 'thread/read')).toHaveLength(1)
+    expect(c.call.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(2)
   })
   it('retains a pending stage while a human decision is required', async () => {
     const { host: h, connections } = await fixture()

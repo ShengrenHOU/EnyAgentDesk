@@ -94,7 +94,7 @@ export class Effects {
   kick(): void {
     if (this.scheduled) return
     this.scheduled = true
-    queueMicrotask(() => { this.scheduled = false; this.dispatch() })
+    setImmediate(() => { this.scheduled = false; this.dispatch() })
   }
   /** Resolves once no effect of `kind` (or of any kind) is running and none can start because none is due or `limit()` has no room. */
   async idle(kind?: EffectKind): Promise<void> {

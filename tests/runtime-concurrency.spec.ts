@@ -565,7 +565,7 @@ describe('a worker whose work runs in the background', () => {
       text: `Your background jobs ran 30 minutes after your turn ended and were killed: ${job} (pnpm test).` })] }))
     // Stopping its subagent would wake it with the end, in the Assignment it was just reported waiting in.
     expect(h.subagents.live(child)).toBe(true)
-    expect(h.relays(h.runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'waiting' })
+    await vi.waitFor(() => expect(h.relays(h.runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', state: 'waiting' }))
   })
   it('says a worker\'s subagents still run when only they ran 30 minutes after the turn ended', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))

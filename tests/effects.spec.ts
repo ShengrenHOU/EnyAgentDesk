@@ -26,6 +26,20 @@ beforeEach(() => {
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
 const relay = (text: string) => ({ text })
 
+it('yields to I/O when delayed retries become due while other rows are processed', async () => {
+  let attempts = 0, finish = false
+  effects.handle('relay', async () => {
+    attempts++; clock += 3000
+    if (!finish && attempts < 200) throw new Later('Capacity occupied')
+  })
+  for (const key of ['a', 'b', 'c']) effects.enqueue('relay', key, relay(key))
+  await new Promise<void>(resolve => setImmediate(resolve))
+  const beforeIo = attempts
+  finish = true; await effects.idle()
+  expect(beforeIo).toBeGreaterThan(0)
+  expect(beforeIo).toBeLessThan(200)
+})
+
 it('runs an effect queued inside a transaction once it commits, and none from a transaction that rolled back', async () => {
   const run = vi.fn(async () => {})
   effects.handle('relay', run)
