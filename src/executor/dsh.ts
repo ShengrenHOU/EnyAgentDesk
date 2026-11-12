@@ -317,12 +317,12 @@ export class DshExecutor implements Executor {
    * stops immediately if the ticket ended or another assignment took over.
    */
   private async deliverQueued(ticketId: string): Promise<void> {
-    if (this.host.ticketPaused?.(ticketId)) throw new Later('Ticket is paused')
     // A stop of the worker's background work ends with a cancel, which would drop what is delivered meanwhile.
     await this.stopped(ticketId)
     const first = this.host.store.tickets.get(ticketId)
     const target = first && liveTicket(first) ? runningAssignment(first) : undefined
     if (!first || !target || !first.undelivered.length) return
+    if (this.host.ticketPaused?.(ticketId)) throw new Later('Ticket is paused')
     let woken = false
     try {
       for (;;) {

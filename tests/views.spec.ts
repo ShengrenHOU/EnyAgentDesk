@@ -9,7 +9,8 @@ import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
 import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
 import { basisFacts, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
-import { threadDetail } from '../src/app/views/threads.ts'
+import { threadDetail, search } from '../src/app/views/threads.ts'
+import { attach, close, detail, open } from '../src/app/lines.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
 import { overview } from '../src/app/views/overview.ts'
 import { markdown, plain } from '../src/app/views/text.ts'
@@ -82,6 +83,30 @@ it('orders the original work views by priority and deadline and retains delivera
   expect(board.working[0]?.id).toBe('urgent')
   expect(board.waiting[0]?.followup?.reason).toBe('Check external reply')
   expect(board.delivered[0]?.deliverables).toEqual([{ title: 'Note', url: 'https://example.com/note' }])
+})
+
+it('adds bounded Line results to the panel search while its Ticket, Thread and Trigger results stay unchanged', () => {
+  const host = views()
+  live('t1')
+  store.tickets.save({ ...store.tickets.get('t1')!, title: '检查材料' })
+  const goal = open(store, { title: '跨阶段目标 Alpha', evidence: '本人确认的目标' }).line
+  attach(store, { lineId: goal.id, ticketId: 't1', evidence: '检查材料属于同一目标' })
+  const twin = open(store, { title: '跨阶段目标 Alpha', evidence: '同名但独立的目标' }).line
+  const closed = open(store, { title: '旧目标 Beta', evidence: '已经结束的目标' }).line
+  close(store, { lineId: closed.id, evidence: '目标已经完成' })
+  const noLinks = { entries: () => new Map<string, string>().entries() }
+
+  // The goal name is not in any Ticket, Thread or Trigger: only the Line results recall it.
+  const found = search(host, '跨阶段目标 Alpha', noLinks)
+  expect(found.lines.map(line => line.id)).toEqual(expect.arrayContaining([goal.id, twin.id]))
+  expect(found.lines.find(line => line.id === goal.id)).toMatchObject({ status: 'open', ticketCount: 1, openCount: 1 })
+  expect(found.lines.find(line => line.id === twin.id)).toMatchObject({ ticketCount: 0, openCount: 0 })
+  expect([found.tickets, found.threads, found.items]).toEqual([[], [], []])
+  // A closed goal is recalled with its status and stays closed; the Ticket search still works on its own.
+  expect(search(host, '旧目标 Beta', noLinks).lines).toEqual([expect.objectContaining({ id: closed.id, status: 'closed' })])
+  expect(search(host, '检查材料', noLinks)).toMatchObject({ lines: [], tickets: [expect.objectContaining({ id: 't1' })] })
+  expect(store.tickets.list()).toHaveLength(1)
+  expect(detail(store, goal.id)!.tickets.map(ticket => ticket.id)).toEqual(['t1'])
 })
 
 it('projects the current DSH owner while retaining earlier Codex bindings and handoff evidence', () => {

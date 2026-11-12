@@ -97,7 +97,8 @@ export interface PanelServer {
   lines: ApiResponse<'GET lines'>; lineDetails: Record<string, LinePageView>
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
-  person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
+  person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'> & { lines?: ApiResponse<'GET search'>['lines'] }
+  history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
@@ -323,7 +324,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
-    return { tickets: [], threads: server.search.threads, items: server.search.items.filter(item => item.preview.includes(q)) }
+    return { lines: (server.search.lines ?? []).filter(line => line.title.includes(q)), tickets: [], threads: server.search.threads,
+      items: server.search.items.filter(item => item.preview.includes(q)) }
   } },
   'GET sources': { answer: sourceStatuses },
   'GET settings': { answer: settingsView },
@@ -440,11 +442,12 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return ticket.actions.retry ? { retried: true } : refuse(400, 'Only an open ticket can be retried, and only when its worker last reported failed or blocked and no person has sent a message since, or when delivering an Input to its worker failed',
       { code: 'notRetryable', values: {} })
   } },
-  'POST tickets/:id/stop': { answer: ({ params }) => {
+  'POST tickets/:id/stop': { body: true, answer: ({ params, body }) => {
     const ticket = ticketOf(params.id)
     if (!ticket) return refuse(404, 'Ticket not found')
     const stopped = { state: 'ended', stage: 'ended', attention: undefined, followup: undefined,
-      actions: { retry: false, stop: false }, ended: { at: new Date().toISOString(), by: 'human', outcome: 'stopped' } } as const
+      actions: { retry: false, stop: false }, ended: { at: new Date().toISOString(), by: 'human', outcome: 'stopped',
+        ...body.reason ? { reason: body.reason } : {} } } as const
     Object.assign(ticket, stopped)
     const detail = server.ticketDetails[params.id]
     if (detail) Object.assign(detail, stopped)

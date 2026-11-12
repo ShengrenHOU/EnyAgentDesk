@@ -1,6 +1,6 @@
 /** Work lines: one long-lived goal grouping Tickets, its search evidence, and closure that never reopens unlinked. */
 import { afterEach, expect, it, vi } from 'vitest'
-import { attach, close, detail, linesView, open, reassign, reopen, search, unlinkedTickets } from '../src/app/lines.ts'
+import { attach, close, detail, linesView, open, reassign, reopen, search, searchTitles, unlinkedTickets } from '../src/app/lines.ts'
 import { relatedLines } from '../src/app/cards.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -45,6 +45,38 @@ it('groups Tickets for one goal, searches them, and keeps the whole line in stag
   expect(page.tickets.map(ticket => ticket.title)).toEqual(['申昊战略入股：飞书文档盘点', '申昊战略入股：进展与推进步骤'])
   expect(page.judgements.map(item => item.action)).toEqual(['opened', 'attached', 'attached'])
   expect(page.tickets.every(ticket => ticket.stage === 'working' || ticket.stage === 'idle')).toBe(true)
+})
+
+it('recalls a line by its goal title for the panel search, bounded and without changing its work', async () => {
+  h = await startRuntime()
+  const store = h.runtime.store
+  const alpha = open(store, { title: '跨阶段目标 Alpha', evidence: '本人确认的目标', at: now() }).line
+  const twin = open(store, { title: '跨阶段目标 Alpha', evidence: '同名但独立的目标', at: now() }).line
+  expect(twin.id).not.toBe(alpha.id)
+  const member = await h.acceptedTicket(feishu('501', '检查材料'))
+  attach(store, { lineId: alpha.id, ticketId: member.ticket.id, evidence: '检查材料是同一目标的准备阶段', at: now() })
+  const closed = open(store, { title: '旧目标 Beta', evidence: '已经结束的目标', at: now() }).line
+  close(store, { lineId: closed.id, evidence: '目标已经完成', at: now() })
+  const before = store.tickets.list().map(ticket => ticket.id)
+
+  // A goal name finds both same-titled lines as separate goals, and a member Ticket keeps its own membership.
+  expect(searchTitles(store, '跨阶段目标 alpha').map(line => line.id)).toEqual(expect.arrayContaining([alpha.id, twin.id]))
+  expect(searchTitles(store, '跨阶段目标 Alpha').find(line => line.id === alpha.id))
+    .toMatchObject({ status: 'open', ticketCount: 1, openCount: 1 })
+  // A line with no member Ticket is still found; a Ticket title alone is not line evidence.
+  expect(searchTitles(store, '跨阶段目标 Alpha').find(line => line.id === twin.id)).toMatchObject({ ticketCount: 0, openCount: 0 })
+  expect(searchTitles(store, '检查材料')).toEqual([])
+  // Closed goals remain recallable with their status, and the search does not reopen them.
+  expect(searchTitles(store, '旧目标 Beta')).toEqual([expect.objectContaining({ id: closed.id, status: 'closed',
+    closedAt: expect.any(String) })])
+  expect(detail(store, closed.id)).toMatchObject({ status: 'closed' })
+  // The result is bounded, and an empty query recalls no line.
+  for (let index = 0; index < 6; index++) open(store, { title: `扩展目标 ${index}`, evidence: '同一类目标', at: now() })
+  expect(searchTitles(store, '扩展目标', 3)).toHaveLength(3)
+  expect(searchTitles(store, '', 3)).toEqual([])
+  // Searching is read-only: no Ticket is created and no membership changes.
+  expect(store.tickets.list().map(ticket => ticket.id)).toEqual(before)
+  expect(detail(store, alpha.id)!.tickets.map(ticket => ticket.id)).toEqual([member.ticket.id])
 })
 
 it('lists only open Tickets on no line, newest first and bounded', async () => {

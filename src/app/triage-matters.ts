@@ -31,7 +31,7 @@ interface Matter {
 }
 export interface Member { id: string; batchId: string; generation: number; localMatterId: string; matterId: string; originId: string }
 export interface Event { id: string; matterId: string; revision: number; kind: 'new' | 'continue' | 'related' | 'split' | 'retract_related' | 'handoff'; at: string; memberId: string; reason: string; evidence: Evidence[]; dependencies?: string[]; handoff?: MatterTarget & { inputId?: string } }
-interface Reads { dependencies?: Record<string, true>; candidates: Record<string, number>; contexts: Record<string, { hash: string; revision: number; next: number | null }> }
+interface Reads { dependencies?: Record<string, true>; candidates: Record<string, number>; contexts: Record<string, { hash: string; revision: number; next: number | null; complete?: boolean }> }
 const matters = family<Matter>('triage-matter:')
 const members = family<Member>('triage-matter-member:')
 const events = family<Event>('triage-matter-event:')
@@ -160,8 +160,10 @@ export class TriageMatters {
       const ledger = this.ledger(batch), identity = `${source.id}:${source.generation}:${triggerId}`, previous = ledger.contexts[identity]
       if (!Number.isSafeInteger(offset) || offset < 0 || (offset !== 0 && (previous?.next !== offset || previous.hash !== context.manifest.hash || previous.revision !== context.revision))) throw new Error('Read matter evidence pages in order')
       const text = JSON.stringify(context.manifest), next = offset + 8000 < text.length ? offset + 8000 : null
+      const same = !!previous && previous.hash === context.manifest.hash && previous.revision === context.revision
+      const complete = same ? previous!.complete === true || previous!.next === null || next === null : next === null
       ledger.dependencies ??= {}; ledger.dependencies[source.id] = true
-      ledger.contexts[identity] = { hash: context.manifest.hash, revision: context.revision, next }; this.store.set(reads(key(batch)), ledger)
+      ledger.contexts[identity] = { hash: context.manifest.hash, revision: context.revision, next, complete }; this.store.set(reads(key(batch)), ledger)
       return { batchId, generation: source.generation, triggerId, revision: context.revision, hash: context.manifest.hash, text: text.slice(offset, offset + 8000), next_offset: next }
     })
   }
@@ -172,7 +174,7 @@ export class TriageMatters {
       this.assertReadable(source, cache)
       if (source.generation !== ref.generation || this.scope(source) !== this.scope(batch) || !input || !context || (source.id !== batch.id && source.state !== 'completed')) throw new Error('Foreign or stale matter evidence')
       const read = source.id === batch.id ? batch.reads?.[ref.triggerId] : ledger.contexts[`${source.id}:${source.generation}:${ref.triggerId}`]
-      if (!read || read.next !== null || read.hash !== context.manifest.hash || read.revision !== context.revision) throw new Error('Read exact matter evidence before linking')
+      if (!read || !(read.complete === true || read.next === null) || read.hash !== context.manifest.hash || read.revision !== context.revision) throw new Error('Read exact matter evidence before linking')
       if (ref.kind === 'trigger') { if (ref.version !== input.identity.version || !['matched', 'unverified'].includes(context.manifest.anchor.status) || !context.manifest.anchor.contentMatch
         || complete && (input.identity.partial || context.manifest.anchor.observed?.partial)) throw new Error('Invalid, changed or insufficient trigger citation') }
       else {

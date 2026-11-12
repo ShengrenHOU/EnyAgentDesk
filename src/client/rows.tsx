@@ -106,7 +106,7 @@ export function TicketLine({ ticket, question, onChanged, context }: {
         {ticket.actions.retry && ticket.sessionId && <SessionButton variant="outline" sessionId={ticket.sessionId} />}
         {ticket.actions.stop && <ConfirmButton variant="outline" icon="stop" label={t('stop')} title={t('stopConfirmTitle')}
           message={t('stopConfirm', { title: ticket.title })}
-          onConfirm={() => after(call('POST tickets/:id/stop', { id: ticket.id }))} />}
+          onConfirm={() => after(call('POST tickets/:id/stop', { id: ticket.id, body: {} }))} />}
       </>}</div>
     </div>
   </li>

@@ -581,6 +581,22 @@ it('relaunches running assignments after a restart with a recovery note', async 
   expect(relays(`worker-${ticket.id}`)).toEqual([{ ticket_id: ticket.id, assignment: 2 }, { text: expect.stringContaining('host restarted') }])
 })
 
+it('retires a persisted delivery for an ended paused Ticket after SQLite restart', async () => {
+  await runtime.idle()
+  const { ticket } = await acceptedTicket()
+  await runtime.idle()
+  runtime.store.tickets.save({ ...runtime.store.tickets.get(ticket.id)!, paused: true })
+  runtime.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id })
+  runtime.store.db.prepare("UPDATE effect SET due = ? WHERE kind = 'delivery' AND key = ?").run(Date.now() + 60_000, ticket.id)
+  runtime.engine.stopTicket(ticket.id, 'Owner stopped the task')
+  const next = await restart()
+  await next.ready
+  next.store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'delivery' AND key = ?").run(ticket.id)
+  await next.idle()
+  expect(next.effects.pending('delivery', ticket.id)).toBe(false)
+  expect(next.store.tickets.get(ticket.id)?.ended?.outcome).toBe('stopped')
+})
+
 it('projects read models for the management page and removes thread subscriptions from the Web surface', async () => {
   const { ticket, trigger } = await acceptedTicket()
   const threadKeyValue = `feishu:${CHAT}:om_1`

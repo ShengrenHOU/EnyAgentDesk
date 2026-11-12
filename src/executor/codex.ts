@@ -62,9 +62,9 @@ export class CodexExecutor {
     host.effects.handle('launch', payload => this.launch(payload.ticketId, payload.assignmentId),
       { limit: () => host.paused() ? 0 : this.slots.launches(), retry: [5000, 300_000] })
     host.effects.handle('codexStage', async payload => {
-      if (host.ticketPaused?.(payload.ticketId)) throw new Later('Ticket is paused')
       const ticket = this.current(payload.ticketId, payload.assignmentId)
       if (!ticket) return
+      if (host.ticketPaused?.(payload.ticketId)) throw new Later('Ticket is paused')
       if (waitsForPerson(ticket) || ticket.attention) throw new Later('Stage handoff awaits a person')
       this.slots.reserve(ticket.id, 'launch')
       try {
@@ -349,11 +349,11 @@ export class CodexExecutor {
     } else throw new Error('Unconfirmed Codex input delivery; inspect thread history before retrying')
   }
   private async deliverQueued(ticketId: string): Promise<void> {
-    if (this.host.ticketPaused?.(ticketId)) throw new Later('Ticket is paused')
     await this.stopping.get(ticketId)
     let ticket = this.current(ticketId)
     const assignment = ticket && runningAssignment(ticket)
     if (!ticket || !assignment || !ticket.undelivered.length) return
+    if (this.host.ticketPaused?.(ticketId)) throw new Later('Ticket is paused')
     const worker = await this.connect(ticket, assignment.id)
     if (worker.launching || worker.completing) throw new Later('Codex turn is starting or completing')
     try {

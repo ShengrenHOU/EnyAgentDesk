@@ -9,6 +9,18 @@ let host: Host
 beforeEach(async () => { host = await startRuntime() })
 afterEach(async () => { vi.useRealTimers(); await host.stop() })
 
+it('retires delivery for an ended paused DSH Ticket instead of deferring forever', async () => {
+  const { ticket, sessionId } = await host.acceptedTicket(feishu('1', 'Read the document'))
+  await host.runTool(host.runtime.masterId, 'orchestrator_ticket_manage', { ticket_id: ticket.id, change: { paused: true } })
+  host.runtime.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id })
+  host.runtime.engine.stopTicket(ticket.id, 'Owner stopped the task')
+  const sent = host.deliveries.mock.calls.filter(([m]) => m.sessionId === sessionId).length
+  await host.runtime.idle()
+  expect(host.runtime.effects.pending('delivery', ticket.id)).toBe(false)
+  expect(host.deliveries.mock.calls.filter(([m]) => m.sessionId === sessionId)).toHaveLength(sent)
+  expect(host.runtime.store.tickets.get(ticket.id)?.ended?.outcome).toBe('stopped')
+})
+
 it('checks execution ownership before creating a workspace or worker and resumes after handoff', async () => {
   const guard = vi.spyOn(host.runtime.sources, 'guardExecution').mockRejectedValue(new Error('External executor owns this object'))
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', 'Continue the existing task'))

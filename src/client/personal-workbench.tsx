@@ -1,18 +1,19 @@
-/** Today: the owner's decision queue, with the work that still runs below it; detailed discussion stays in the main Session. */
+/** Personal workspace: the open Lines lead, then the decision queue and the work that still runs; detailed discussion stays in the main Session. */
 import { CanonicalMatters } from './triage-matters.tsx'
-import { WorkEvidence } from './work-evidence.tsx'
 import { ProductionJudgments } from './production-triage.tsx'
 import { useEffect, useRef, useState } from 'react'
 import type { readFocus } from '../sources/workbench-focus.ts'
-import { answerAttention, usePoll, type LinePageView, type LineRow, type TicketRow } from './api.ts'
+import { answerAttention, usePoll, type LineRow, type TicketRow } from './api.ts'
 import { Button, Icon, Tag } from './controls.tsx'
 import { ticketMark } from './marks.ts'
 import { ProblemList } from './overview.tsx'
+import { LineDetail } from './line.tsx'
 import { usePanel, usePanelData } from './provider.tsx'
 import { ReplyForm } from './reply-form.tsx'
+import { replyDraftKey, useReplyDrafts } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, localized, valueLabel, when, type T } from './text.ts'
-import { ConfirmButton, ExternalLink, LoadState, MarkdownLite } from './widgets.tsx'
+import { CloseTicketButton, ConfirmButton, ExternalLink, LoadState, MarkdownLite } from './widgets.tsx'
 
 interface QueueAdvice { summary: string; reason?: string; risk?: string; draft?: string }
 interface QueueItem {
@@ -25,6 +26,8 @@ interface QueueView {
   ignored: (QueueItem & { ignoredAt: string; reason: string })[]
   counts: { open: number; deferred: number; ignored: number }
 }
+/** The fields a failed or blocked Ticket needs for its close action, shared by list rows and their detail. */
+type CloseTarget = { id: string; title: string; actions: { retry: boolean; stop: boolean }; stage: string; action?: string }
 interface Props {
   t: T
   send(id: string, text: string): Promise<void>
@@ -55,9 +58,9 @@ export function Workbench(props: Props) {
   const [chatOpen, setChatOpen] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [selectedLine, setSelectedLine] = useState<string>()
-  const [membership, setMembership] = useState<{ lineId: string; ticketId: string; targetLineId: string; evidence: string }>()
   const [reply, setReply] = useState<ReplyTarget>()
   const [instruction, setInstruction] = useState('')
+  const drafts = useReplyDrafts()
   const [ignoring, setIgnoring] = useState<string>()
   const [ignoreReason, setIgnoreReason] = useState('')
   const [busy, setBusy] = useState(false)
@@ -110,17 +113,51 @@ export function Workbench(props: Props) {
     if (!await send(text) || !state?.masterId) return
     await props.openSession(state.masterId).catch(error => setFailure(errorText(error)))
   }
-  const respond = (target: ReplyTarget, prefilled = '') => {
-    // All entry points share one editor, so a pending action must settle before replacing its target.
-    if (busy) return
-    setReply(target); setInstruction(prefilled); setNotice(''); setPreview(undefined); setChatOpen(true)
+  /** The exact Question the host now shows for a Ticket, so a draft left on an earlier one can warn instead of failing. */
+  const liveAttention = (ticketId: string): { id: string; question: string } | undefined => {
+    const decision = queue.data && [...queue.data.items, ...queue.data.deferred].find(item => item.ticketId === ticketId)
+    if (decision) return { id: decision.attentionId, question: decision.question }
+    const row = [...(data?.person ?? []), ...(data?.work?.working ?? []), ...(data?.work?.waiting ?? []),
+      ...(data?.work?.delivered ?? [])].find(ticket => ticket.id === ticketId)
+    if (row?.attention) return { id: row.attention.id, question: row.attention.question }
+    const shown = detail.data?.id === ticketId ? detail.data : undefined
+    return shown?.attention ? { id: shown.attention.id, question: shown.attention.question } : undefined
   }
+  const respond = (target: ReplyTarget, prefilled = '') => {
+    // A pending action owns the editor; the same destination keeps typed text, and a different one restores its own draft.
+    if (busy) return
+    if (reply) {
+      // Reopening the same destination, or a Question replaced on the same Ticket, keeps the editor and its text; only
+      // the explicit "use for the new question" action binds the draft to the replacement.
+      const kept = replyDraftKey(reply) === replyDraftKey(target) || (reply.ticketId === target.ticketId
+        && !!reply.attentionId && !!target.attentionId && reply.attentionId !== target.attentionId)
+      if (kept) { setNotice(''); setPreview(undefined); setChatOpen(true); return }
+      drafts.write(reply, instruction)
+    }
+    setReply(target); setInstruction(drafts.read(target) ?? prefilled); setNotice(''); setPreview(undefined); setChatOpen(true)
+  }
+  const adoptAttention = (question: { id: string; question: string }) => {
+    // An in-flight answer owns the editor until it settles, so its target cannot move to another Question meanwhile.
+    if (!reply || busy) return
+    drafts.forget(reply)
+    const target = { ...reply, attentionId: question.id, question: question.question }
+    drafts.write(target, instruction)
+    setReply(target)
+  }
+  /** A Question that replaced the edited one on the same Ticket; the draft is kept until the owner moves or discards it. */
+  const replacedQuestion = (() => {
+    if (!reply?.attentionId) return undefined
+    const live = liveAttention(reply.ticketId)
+    return live && live.id !== reply.attentionId ? live : undefined
+  })()
   const submitReply = async () => {
     if (!reply || !instruction.trim() || busy) return
     const target = reply
     if (!target.attentionId) {
       // Keep the folded record until the correction actually leaves: cancelling or a failed send must not erase it.
-      if (await send(`请继续已有工单 ${target.ticketId}。本人补充或修改要求如下。\n\n${instruction.trim()}`) && target.forgetAttentionId) {
+      if (!await send(`请继续已有工单 ${target.ticketId}。本人补充或修改要求如下。\n\n${instruction.trim()}`)) return
+      drafts.forget(target)
+      if (target.forgetAttentionId) {
         try {
           await read('queue/action', { method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ action: 'forget', ticketId: target.ticketId, attentionId: target.forgetAttentionId }) })
@@ -132,6 +169,7 @@ export function Workbench(props: Props) {
     setBusy(true); setFailure(undefined)
     try {
       await answerAttention(t, target.ticketId, target.attentionId, instruction.trim())
+      drafts.forget(target)
       setNotice(t('ticketAnswerSent')); setReply(undefined); setInstruction(''); setChatOpen(false)
       await change()
     } catch (error) { setFailure(errorText(error)) }
@@ -178,8 +216,8 @@ export function Workbench(props: Props) {
     respond({ ticketId: item.ticketId, title: item.title, forgetAttentionId: item.attentionId })
   }
   const stop = async (ticket: Pick<TicketRow, 'id' | 'title'>) => {
-    await call('POST tickets/:id/stop', { id: ticket.id })
-    if (reply?.ticketId === ticket.id) { setReply(undefined); setInstruction('') }
+    await call('POST tickets/:id/stop', { id: ticket.id, body: {} })
+    if (reply?.ticketId === ticket.id) { drafts.forget(reply); setReply(undefined); setInstruction('') }
     setSelected(ticket.id)
     setNotice(t('homeStopped', { title: ticket.title }))
     await change()
@@ -187,6 +225,15 @@ export function Workbench(props: Props) {
   const stopButton = (ticket: Pick<TicketRow, 'id' | 'title' | 'actions'>) => ticket.actions.stop && <ConfirmButton
     label={t('homeStopMatter')} title={t('homeStopTitle')} message={t('homeStopConfirm', { title: ticket.title })}
     icon="stop" onConfirm={() => stop(ticket)} />
+  /** Failed or blocked work leaves the owner-facing panel only by an explicit close, which can record why. */
+  const closeButton = (ticket: CloseTarget) => ticket.actions.stop
+    && ticket.stage === 'person' && (ticket.action === 'failed' || ticket.action === 'blocked') && <CloseTicketButton
+      ticket={ticket} onStopped={async () => {
+        if (reply?.ticketId === ticket.id) { drafts.forget(reply); setReply(undefined); setInstruction('') }
+        setSelected(ticket.id)
+        setNotice(t('closeTicketDone', { title: ticket.title }))
+        await change()
+      }} />
   const workingLine = (working: NonNullable<TicketRow['working']>) => {
     const minutes = Math.max(1, Math.round((Date.now() - Date.parse(working.since)) / 60_000))
     return working.step ? t('workbenchWorkingStep', { step: working.step, minutes }) : t('workbenchWorkingWait', { minutes })
@@ -218,7 +265,7 @@ export function Workbench(props: Props) {
           await call('POST tickets/:id/retry', { id: ticket.id })
           setNotice(t('queueRetried')); await change()
         }} />}
-      {stopButton(ticket)}
+      {closeButton(ticket) || stopButton(ticket)}
       <Button size="sm" variant="ghost" onClick={() => props.openManagement(ticket.id)}>{t('ticketAllActions')}</Button>
       {ticket.deliverables?.map(item => {
         const url = new URL(item.url, location.href)
@@ -277,7 +324,7 @@ export function Workbench(props: Props) {
   const domains = focus.data?.domains?.filter(domain => domain.state === 'active') ?? []
   const selectedDomain = domains.find(domain => domain.id === domainId)
   const suggestions = focus.data?.focus?.items.filter(item => !selectedDomain || item.domainId === selectedDomain.id) ?? []
-  const lineTicketMark = (ticket: NonNullable<LineRow['active']> | LinePageView['tickets'][number]) =>
+  const lineTicketMark = (ticket: NonNullable<LineRow['active']>) =>
     ticketMark(t, ticket as Parameters<typeof ticketMark>[1])
   /** One line is one long-lived goal; Tickets are its stages, and a completed stage remains as evidence. */
   const lineCard = (line: LineRow) => <article className="pw-line" key={line.id}>
@@ -295,78 +342,23 @@ export function Workbench(props: Props) {
   </article>
   /** The whole line: goal, recorded judgements, and every stage in order. */
   const lineView = lineDetail.data && lineDetail.data.id === selectedLine ? lineDetail.data : undefined
-  const saveMembership = async () => {
-    if (!membership || busy || !membership.evidence.trim() || membership.targetLineId === membership.lineId) return
-    setBusy(true); setFailure(undefined); setNotice('')
-    try {
-      await call('POST lines/:id/membership', { id: membership.lineId, body: { ticketId: membership.ticketId,
-        targetLineId: membership.targetLineId || null, evidence: membership.evidence.trim() } })
-      await change(); setMembership(undefined); setNotice(t('lineMembershipSaved'))
-    } catch (error) { setFailure(errorText(error)) }
-    finally { setBusy(false) }
-  }
-  const membershipTrail = (item: LinePageView['judgements'][number]) => item.fromLine && <p className="pw-muted">
-    {item.fromLine.title} → {item.toLine?.title ?? t('lineDetached')}{item.by ? ` · ${t(`lineActor.${item.by}`)}` : ''}</p>
-  const lineSection = lineView ? <section className="pw-section pw-line-detail">
-    <Button size="sm" variant="ghost" onClick={() => setSelectedLine(undefined)} icon={<Icon name="chevron-left" />}>{t('homeBack')}</Button>
-    <div className="pw-line-head"><h2>{lineView.title}</h2><Tag tone={lineView.status === 'open' ? 'info' : 'quiet'}>
-      {t(lineView.status === 'open' ? 'lineOpen' : 'lineClosed')}</Tag></div>
-    <p className="pw-muted">{t('lineDetailHint', { count: lineView.ticketCount })}</p>
-    {lineView.status === 'closed' && lineView.openCount > 0 && <p className="pw-muted" role="status">{t('lineClosedOpen')}</p>}
-    {lineView.latestJudgement && <div className="pw-line-evidence">
-      <p className="pw-advice-label">{t('lineLatestJudgement')}</p>
-      <p className="pw-muted">{t(`lineAction.${lineView.latestJudgement.action}`)} · {when(lineView.latestJudgement.at, t('lang'))}</p>
-      <p>{lineView.latestJudgement.evidence}</p>
-      {membershipTrail(lineView.latestJudgement)}
-    </div>}
-    <WorkEvidence key={lineView.id} t={t} load={before => call('GET lines/:id/evidence', { id: lineView.id, query: { before } })} />
-    <div className="pw-section-title"><h3>{t('lineTickets')}</h3><span>{lineView.tickets.length}</span></div>
-    {lineView.tickets.length ? <ul className="pw-plain-list pw-line-tickets">{lineView.tickets.map(ticket => <li key={ticket.id}>
-      <button type="button" className="dt-open" onClick={() => { setSelectedLine(undefined); setSelected(ticket.id) }}>{ticket.title}</button>
-      <Tag tone="quiet">{lineTicketMark(ticket).label}</Tag>
-      <Button size="sm" variant="ghost" disabled={busy} onClick={() => setMembership({ lineId: lineView.id,
-        ticketId: ticket.id, targetLineId: lineView.id, evidence: '' })}>{t('lineCorrectMembership')}</Button>
-      {ticket.report && <p className="pw-clamp">{ticket.report.summary}</p>}
-      {membership?.lineId === lineView.id && membership.ticketId === ticket.id && <form className="pw-membership"
-        onSubmit={event => { event.preventDefault(); void saveMembership() }}>
-        <label>{t('lineDestination')}<select aria-label={t('lineDestination')} disabled={busy} value={membership.targetLineId}
-          onChange={event => setMembership({ ...membership, targetLineId: event.target.value })}>
-          <option value={lineView.id}>{t('lineKeepMembership')}</option>
-          <option value="">{t('lineDetached')}</option>
-          {(lines.data?.open ?? []).filter(line => line.id !== lineView.id).map(line =>
-            <option key={line.id} value={line.id}>{line.title}</option>)}
-        </select></label>
-        <LoadState error={lines.error} loading={!lines.data} />
-        <label>{t('lineMembershipReason')}<textarea aria-label={t('lineMembershipReason')} required maxLength={1000}
-          disabled={busy} value={membership.evidence} onChange={event => setMembership({ ...membership, evidence: event.target.value })} /></label>
-        <div className="pw-actions"><Button size="sm" type="submit" disabled={busy || !membership.evidence.trim()
-          || membership.targetLineId === membership.lineId}>{t('save')}</Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setMembership(undefined)}>{t('cancel')}</Button></div>
-      </form>}
-    </li>)}</ul> : <p className="pw-muted">{t('lineNoTickets')}</p>}
-    <details className="pw-queue-fold"><summary>{t('lineJudgements')}</summary>
-      <ul className="pw-plain-list">{lineView.judgements.map((item, index) => <li key={`${item.at}-${index}`}>
-        <strong>{t(`lineAction.${item.action}`)}</strong> <span className="pw-muted">{when(item.at, t('lang'))}</span>
-        <p>{item.evidence}</p>
-        {membershipTrail(item)}
-        {item.ticketId && <span className="pw-muted">{item.ticketId}</span>}
-      </li>)}</ul></details>
-  </section> : <section className="pw-section"><Button size="sm" variant="ghost" onClick={() => setSelectedLine(undefined)}
-    icon={<Icon name="chevron-left" />}>{t('homeBack')}</Button><LoadState error={lineDetail.error} loading /></section>
-  const lineList = lines.data && (lines.data.open.length || lines.data.closed.length) ? <section className="pw-section pw-lines">
-    <div className="pw-section-title"><h2>{t('lineTitle')}</h2><span>{lines.data.open.length}</span></div>
-    {lines.data.open.length ? <div className="pw-task-grid pw-line-grid">{lines.data.open.map(lineCard)}</div>
-      : <p className="pw-muted">{t('lineEmpty')}</p>}
-    {lines.data.closed.length > 0 && <details className="pw-queue-fold">
+  const lineList = <section className="pw-section pw-lines">
+    <div className="pw-section-title"><h2>{t('lineTitle')}</h2><span>{lines.data?.open.length ?? '…'}</span></div>
+    {lines.error && <div role="alert"><LoadState error={lines.error} loading={false} />
+      <Button size="sm" variant="outline" onClick={() => void lines.reload()}>{t('retry')}</Button></div>}
+    {!lines.data && !lines.error && <LoadState loading />}
+    {lines.data && (lines.data.open.length ? <div className="pw-task-grid pw-line-grid">{lines.data.open.map(lineCard)}</div>
+      : <p className="pw-muted">{t('lineEmpty')}</p>)}
+    {lines.data && lines.data.closed.length > 0 && <details className="pw-queue-fold">
       <summary>{t('lineClosedTitle', { count: lines.data.closed.length })}</summary>
       <ul className="pw-plain-list">{lines.data.closed.map(line => <li key={line.id}>
         <button type="button" className="dt-open" onClick={() => setSelectedLine(line.id)}>{line.title}</button>
         <span className="pw-muted">{line.closedAt ? when(line.closedAt, t('lang')) : ''}{line.openCount > 0 ? ` · ${t('lineClosedOpen')}` : ''}</span>
       </li>)}</ul></details>}
-  </section> : null
+  </section>
   return <div className="pw-shell" data-chat={chatOpen}>
     <div className="pw-layout"><main className="pw-main">
-      <header className="pw-daily-heading"><div><h2>{t('queueTitle')}</h2><p>{t('queueHint')}</p></div>
+      <header className="pw-daily-heading"><div><h2>{t('homeTitle')}</h2></div>
         <Button variant="primary" disabled={!ready} icon={<Icon name="message" size={17} />}
           title={ready ? undefined : t('masterNotReady')}
           onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('mainConversationEntry')}</Button></header>
@@ -374,25 +366,25 @@ export function Workbench(props: Props) {
       {state && !ready && <p className="pw-muted" role="status">{t('masterNotReady')}</p>}
       {!chatOpen && failure && <p className="dt-error" role="alert">{failure}</p>}
       {notice && <p className="pw-notice" role="status">{notice}</p>}
-      {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
-        openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
-      {data?.productionTriage && <ProductionJudgments view={data.productionTriage} t={t} loadPage={before => call('GET production-triage', { query: { before } })} />}
       {preview && <section className="pw-preview" ref={previewPanel} tabIndex={-1} aria-label={preview.title}>
         <div className="pw-section-title"><h2>{preview.title}</h2>
         <div className="pw-actions"><ExternalLink href={preview.url}>{t('details')}</ExternalLink><Button size="sm" variant="ghost" onClick={closePreview}>{t('close')}</Button></div></div>
         <iframe title={preview.title} src={preview.url} sandbox="" /></section>}
-      {selectedLine ? lineSection : selected ? <section className="pw-section"><Button size="sm" variant="ghost" onClick={() => setSelected(undefined)} icon={<Icon name="chevron-left" />}>{t('homeBack')}</Button>
+      {selectedLine ? <LineDetail key={selectedLine} line={lineView} error={lineDetail.error} destinations={lines.data?.open}
+        destinationsError={lines.error} backLabel={t('homeBack')} onBack={() => setSelectedLine(undefined)}
+        onOpenTicket={id => { setSelectedLine(undefined); setSelected(id) }} onChanged={change} /> : selected ? <section className="pw-section"><Button size="sm" variant="ghost" onClick={() => setSelected(undefined)} icon={<Icon name="chevron-left" />}>{t('homeBack')}</Button>
         {detail.data?.id === selected ? <><h2>{detail.data.title}</h2><Tag>{ticketMark(t, detail.data).label}</Tag><MarkdownLite text={detail.data.attention?.question ?? detail.data.summary} />
           <div className="pw-actions">{detail.data.ended?.by !== 'human' && <Button variant="primary" disabled={busy}
             title={busy ? t('workbenchSubmitting') : undefined} onClick={() => respond({ ticketId: detail.data!.id,
             title: detail.data!.title, ...(detail.data!.attention ? { attentionId: detail.data!.attention.id, question: detail.data!.attention.question } : {}) })}>
             {t(detail.data.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>}
-            {stopButton(detail.data)}
+            {closeButton(detail.data) || stopButton(detail.data)}
             <Button variant="ghost" onClick={() => props.openManagement(selected)}>{t('homeFullRecord')}</Button></div>
           {detail.data.deliverables?.map(item => <ExternalLink key={item.url} href={item.url}>{item.title}</ExternalLink>)}
         </> : <LoadState error={detail.error} loading />}</section>
-      : <>{!queue.data ? <LoadState loading error={queue.error} /> : <>
+      : <>{lineList}{!queue.data ? <LoadState loading error={queue.error} /> : <>
         <section className="pw-queue" aria-label={t('queueTitle')}>
+          <div className="pw-section-title"><h2>{t('queueTitle')}</h2></div><p className="pw-muted">{t('queueHint')}</p>
           {queue.error && queue.data && <div className="pw-stale" role="status">
             <p>{t('queueStaleNotice', { at: queue.updatedAt ? fullTime(new Date(queue.updatedAt).toISOString(), t('lang')) : t('empty') })}</p>
             <Button size="sm" variant="outline" onClick={() => void queue.reload()}>{t('retry')}</Button>
@@ -423,7 +415,12 @@ export function Workbench(props: Props) {
         <div className="pw-task-grid">{stalled.map(card)}</div>
       </section>}
       {queue.data && !queue.data.items.length && !stalled.length && <p className="pw-muted">{t('queueSilence')}</p>}
-        {lineList}
+      {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
+        openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
+      {data?.productionTriage && <ProductionJudgments view={data.productionTriage} t={t}
+        loadPage={(before, unresolved) => call('GET production-triage', { query: { before, unresolved } })}
+        discussionDisabled={busy || !ready || !!reply && !!instruction.trim()}
+        onDiscuss={(id, generation) => void discuss(`请用 orchestrator_read 读取 triage/receipt/${id}/${generation}，只读核对这组信息及原始来源。说明当前判断、未完成原因和已有工作线关联，结合证据建议下一步；已有事项沿原工作线继续讨论。若回执已变更，先读取 triage/receipts 获取当前引用。此请求用于核对与讨论，执行动作沿已有授权。`)} />}
         <PendingFollowups openTicket={setSelected} />
         <div className="pw-section-title"><h2>{t('homeProgress')}</h2><span>{(data?.work?.workingTotal ?? 0) + (data?.work?.waitingTotal ?? 0)}</span>
           <button type="button" className="dt-textlink" onClick={() => props.openWorkList('open')}>{t('homeAllWork')}</button></div>
@@ -477,11 +474,16 @@ export function Workbench(props: Props) {
           {busy ? <Button variant="ghost" size="sm" disabled>{t('cancel')}</Button>
             : instruction.trim()
               ? <ConfirmButton label={t('homeDiscardDraft')} title={t('homeDiscardDraftTitle')} message={t('homeDiscardDraftConfirm')}
-                onConfirm={async () => { setReply(undefined); setInstruction(''); setChatOpen(false) }} />
-              : <Button variant="ghost" size="sm" onClick={() => { setReply(undefined); setChatOpen(false) }}>{t('cancel')}</Button>}</div>
+                onConfirm={async () => { drafts.forget(reply); setReply(undefined); setInstruction(''); setChatOpen(false) }} />
+              : <Button variant="ghost" size="sm" onClick={() => { drafts.forget(reply); setReply(undefined); setChatOpen(false) }}>{t('cancel')}</Button>}</div>
         {reply.question && <MarkdownLite text={reply.question} />}
-        <ReplyForm autoFocus value={instruction} onChange={setInstruction} maxLength={16000} busy={busy} disabled={!ready}
-          onSubmit={() => void submitReply()} />
+        {replacedQuestion && <div className="pw-actions">
+          <p className="dt-hint" role="status">{t('homeDraftAttentionChanged')}</p>
+          <Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
+            onClick={() => adoptAttention(replacedQuestion)}>{t('homeDraftUseNewQuestion')}</Button>
+        </div>}
+        <ReplyForm autoFocus value={instruction} onChange={value => { setInstruction(value); drafts.write(reply, value) }}
+          maxLength={16000} busy={busy} disabled={!ready} onSubmit={() => void submitReply()} />
       </section> : <p className="pw-supplement-empty">{t('homeSupplementEmpty')}</p>}
     </aside></div>
   </div>

@@ -88,7 +88,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const judgement = store.read.flow(since)
   return {
     triageMatters: new TriageMatters(store, trigger => sources.imEvidence(trigger)).overview(),
-    productionTriage: productionOverview(store, trigger => sources.imEvidence(trigger)),
+    productionTriage: productionOverview(store, trigger => sources.imEvidence(trigger), {}, trigger => sources.imHeader(trigger)),
     problems,
     person,
     ...(personDeferred.length ? { personDeferred } : {}),

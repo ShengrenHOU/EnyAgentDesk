@@ -81,7 +81,10 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
     if (size > maxBytes) throw new RouteError(400, `Request exceeds ${maxBytes} bytes`)
     chunks.push(bytes)
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown }
+  const text = Buffer.concat(chunks).toString('utf8')
+  // An empty payload is no body, so a route whose body is optional can accept it; a malformed non-empty body is still 400.
+  if (!text.trim()) return undefined
+  try { return JSON.parse(text) as unknown }
   catch { throw new RouteError(400, 'The request body is not JSON') }
 }
 function json(res: ServerResponse, status: number, value: unknown): void {
@@ -187,7 +190,9 @@ function routes(runtime: HttpHost): Routes {
     'GET followups': () => runtime.followups.pending(),
     'GET followups/automations': () => runtime.followups.automations(),
     'GET production-triage': ({ query }) => productionOverview(store, trigger => runtime.sources.imEvidence(trigger),
-      z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(50, 100) }).parse(query)),
+      z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(50, 100),
+        unresolved: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query),
+      trigger => runtime.sources.imHeader(trigger)),
     'GET triage-matters': ({ query }) => matterViews.overview(
       z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(25, 100),
         active: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
@@ -285,7 +290,14 @@ function routes(runtime: HttpHost): Routes {
       const request = z.object({ instruction: z.string().trim().min(1).max(20000) }).strict().parse(await body())
       return runtime.continueStopped(ticket(params.id), request.instruction)
     },
-    'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    'POST tickets/:id/stop': async ({ params, body }) => {
+      const input = await body()
+      // The stop route predates the close reason, so an absent body still stops the Ticket.
+      const { reason } = input === undefined ? {} : z.object({ reason: z.string().max(500).optional() }).strict().parse(input)
+      const id = ticket(params.id)
+      runtime.engine.stopTicket(id, reason?.trim() || undefined)
+      return { stopped: true }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)

@@ -184,6 +184,19 @@ function ticketHaystack(ticket: Ticket): string {
   return [ticket.title, report?.summary ?? '', ...(report?.deliverables ?? []).map(item => item.title)]
     .join('\n').normalize('NFKC').toLocaleLowerCase()
 }
+const bounded = (limit: number) => Math.max(1, Math.min(limit, 20))
+/**
+ * Bounded title matches for the panel's global search: a goal name recalls its lines, and nothing else is read as
+ * evidence. Same-titled goals stay separate by id, and the result never creates a Ticket or changes a line.
+ */
+export function searchTitles(repo: LineReadRepo, query: string, limit = 5, now = new Date()): LineSummary[] {
+  const words = tokens(query)
+  if (!words.length) return []
+  return allLines(repo).filter(line => matches(line.title.normalize('NFKC').toLocaleLowerCase(), words))
+    .map(line => summary(repo, line, now))
+    .sort((a, b) => (a.status === b.status ? 0 : a.status === 'open' ? -1 : 1) || b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, bounded(limit))
+}
 /**
  * Finds lines and Tickets that may continue the goal described by `query`. The main Session reads this evidence before
  * deciding; the query terms are matched against titles, recorded judgement evidence, report summaries and deliverables.
@@ -195,7 +208,7 @@ export function search(repo: LineReadRepo, query: string, limit = 8, now = new D
     : summaries.filter(item => item.summary.status === 'open'))
     .map(item => item.summary)
     .sort((a, b) => (a.status === b.status ? 0 : a.status === 'open' ? -1 : 1) || b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, Math.max(1, Math.min(limit, 20)))
+    .slice(0, bounded(limit))
   const tickets = words.length ? repo.tickets.list().filter(ticket => matches(ticketHaystack(ticket), words))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10).map(ticket => ticketView(repo, ticket)) : []
   return { query, lines, tickets }

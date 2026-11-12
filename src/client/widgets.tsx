@@ -91,6 +91,46 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
       </>} />
   </>
 }
+/**
+ * Ends a Ticket as stopped, with an optional reason. The confirmation says what closing does and that pausing is not
+ * closing, so a failed or blocked Ticket can leave the owner-facing panel without losing its history and results.
+ */
+export function CloseTicketButton({ ticket, onStopped }: {
+  ticket: { id: string; title: string }; onStopped?: () => Promise<unknown> | void
+}) {
+  const { t, call } = usePanel()
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState<string>()
+  const close = () => { if (!busy) { setOpen(false); setFailure(undefined) } }
+  const stop = async () => {
+    if (busy) return
+    setBusy(true); setFailure(undefined)
+    try {
+      await call('POST tickets/:id/stop', { id: ticket.id, body: { reason: reason.trim() || undefined } })
+      setOpen(false); setReason('')
+      await onStopped?.()
+    } catch (error) { setFailure(errorText(error)) }
+    finally { setBusy(false) }
+  }
+  return <>
+    <Button variant="outline" size="sm" icon={<Icon name="stop" size={14} />} onClick={() => setOpen(true)}>
+      {t('closeTicket')}</Button>
+    <Modal open={open} onClose={close} title={t('closeTicketTitle', { title: ticket.title })} closeLabel={t('close')}
+      description={t('closeTicketDescription')}
+      footer={<>
+        <Button variant="ghost" disabled={busy} onClick={close}>{t('cancel')}</Button>
+        <Button variant="primary" disabled={busy} onClick={() => void stop()}>{t(busy ? 'confirming' : 'closeTicketConfirm')}</Button>
+      </>}>
+      <label className="dt-field">{t('closeTicketReason')}
+        <textarea className="dt-textarea" maxLength={500} value={reason} disabled={busy} aria-label={t('closeTicketReason')}
+          placeholder={t('closeTicketReasonHint')} onChange={event => setReason(event.target.value)} />
+      </label>
+      {failure && <p role="alert" className="dt-error">{failure}</p>}
+    </Modal>
+  </>
+}
 export function SessionButton({ sessionId, label,
   variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
   const { t, openSession, notify } = usePanel()

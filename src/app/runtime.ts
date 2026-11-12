@@ -25,7 +25,7 @@ import { ExecutorRouter } from '../executor/router.ts'
 import { reportExcerpt, ticketCard } from './cards.ts'
 import { AutomaticTriage } from './automatic-triage.ts'
 import { automaticTriageTools } from './tools/automatic-triage.ts'
-import { ProductionTriage } from './production-triage.ts'
+import { ProductionTriage, productionOverview } from './production-triage.ts'
 import { productionTriageTools } from './tools/production-triage.ts'
 import { ShadowTriage } from './triage.ts'
 import { TriageHandoffs } from './triage-handoffs.ts'
@@ -144,6 +144,7 @@ export class Runtime extends Service implements SourceHost {
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, masterId, context: ctx,
+        productionOverview: page => productionOverview(store, trigger => sources.imEvidence(trigger), page, trigger => sources.imHeader(trigger)),
         get matters() { return runtime.productionTriage?.matters },
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }

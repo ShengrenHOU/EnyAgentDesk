@@ -24,6 +24,7 @@ import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { TriageMatters } from './triage-matters.ts'
+import type { productionOverview } from './production-triage.ts'
 
 /** Resource descriptors exposed via orchestrator_read, marking which resources worker sessions may also read for their own ticket. */
 export const RESOURCES: readonly { name: string; holds: string; executor?: true }[] = [
@@ -38,6 +39,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'line/<id>', holds: 'one line\'s Tickets and judgements' },
   { name: 'triage/matters', holds: 'readable message suggestions, current revisions and evidence references' },
   { name: 'triage/evidence/<id>', holds: 'one source receipt' },
+  { name: 'triage/receipts', holds: 'pending receipts' },
   { name: 'line/<id>/evidence', holds: 'source receipt references linked to a line and its Tickets' },
   { name: 'ticket/<id>', holds: 'card, origin, threads, required skills, recent assignments, report excerpts and inputs', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
@@ -73,6 +75,7 @@ export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(r
 
 export interface ResourceHost {
   readonly matters?: Pick<TriageMatters, 'overview' | 'workEvidence' | 'readEvidence'>
+  readonly productionOverview?: (page: Parameters<typeof productionOverview>[2]) => ReturnType<typeof productionOverview>
   readonly store: Pick<Store, 'get' | 'keys' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
@@ -218,6 +221,28 @@ const ROUTES: readonly Route[] = [
     const page = host.matters.overview({ before: read.offset || undefined, limit: Math.min(read.limit ?? 5, 25), active: true })
     return { ...page, groups: page.groups.map(({ members, ...group }) => ({ ...group,
       references: members.map(member => ({ reference: member.id, read: `triage/evidence/${member.id}` })) })), next_offset: page.nextBefore }
+  }],
+  ['triage/receipts', read => {
+    const host = main(read)
+    if (!host.productionOverview) throw new Error('Information receipts are unavailable')
+    const page = host.productionOverview({ unresolved: true, before: read.offset || undefined, limit: Math.min(read.limit ?? 5, 25) })
+    // Match the HTTP projection's JSON boundary before native tool transport validates the value.
+    return JSON.parse(JSON.stringify({ ...page, groups: page.groups.map(group => ({ ...group,
+      read: `triage/receipt/${group.id}/${group.generation}` })), next_offset: page.nextBefore }))
+  }],
+  ['triage/receipt/', read => {
+    const host = main(read), [id, generation, ...extra] = read.rest.split('/')
+    if (!id || !generation || !/^[1-9]\d*$/.test(generation) || extra.length) throw new Error('Unknown information receipt')
+    if (!host.productionOverview) throw new Error('Information receipts are unavailable')
+    const group = host.productionOverview({ id }).groups[0]
+    if (!group) throw new Error('Unknown information receipt')
+    if (group.generation !== Number(generation)) throw new Error('Receipt changed; read triage/receipts for its current reference')
+    if (read.offset > 0 && group.redacted) throw new Error('Source access changed; read this receipt from offset 0 again')
+    return sourcePage(read, 'information receipt', async () => {
+      const inputs = group.redacted ? [] : group.items.map(item => ({ triggerId: item.triggerId,
+        text: host.store.triggers.get(item.triggerId)?.text }))
+      return { ...group, inputs }
+    })
   }],
   ['triage/evidence/', read => {
     const host = main(read)

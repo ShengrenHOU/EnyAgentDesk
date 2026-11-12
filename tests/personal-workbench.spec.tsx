@@ -47,6 +47,31 @@ async function mount(focus: object | null = null, requested: object | null = nul
   return { send, openSession, refresh, actions, openManagement, openDomainSettings, openGithubSettings, openWorkList }
 }
 
+it('leads the home page with Lines and keeps their empty state ahead of the decision queue', async () => {
+  await mount()
+  const lines = document.querySelector('.pw-lines')!
+  expect(lines).not.toBeNull()
+  expect(lines.textContent).toContain(zh.lineEmpty)
+  const queue = document.querySelector('.pw-queue')!
+  expect(lines.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+it('keeps the Lines section when the optional queue endpoint fails', async () => {
+  await mount(null, null, [], { down: true })
+  expect(document.querySelector('.pw-lines')?.textContent).toContain(zh.lineEmpty)
+  expect(document.body.textContent).toContain('Native workbench is disabled')
+})
+
+it('shows a Lines read failure with a retry instead of an empty goal list', async () => {
+  await mount()
+  const original = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => /\/lines(?:\?|$)/.test(url)
+    ? Response.json({ error: 'Line service unavailable' }, { status: 503 }) : original(url, init)))
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  expect(document.querySelector('.pw-lines')?.textContent).toContain('Line service unavailable')
+  expect(document.querySelector('.pw-lines button')?.textContent).toBe(zh.retry)
+})
+
 it('shows the agent recommendation and accepts its draft with one click', async () => {
   const original = globalThis.fetch
   const answers: Record<string, unknown>[] = []
@@ -120,6 +145,130 @@ it.each([true, false])('keeps the Today reply target across card and detail navi
   expect(document.querySelector('.pw-supplement')?.textContent).toContain('另一件事')
 })
 
+it('keeps an edited reply when the same decision is reopened instead of restoring its prefill', async () => {
+  const advice = { summary: '应用蓝色', draft: '蓝色已经应用，请复核。' }
+  await mount(null, null, [], { items: [{ id: 'q1', ticketId: 't1', attentionId: 'q1', title: '修复回归',
+    question: '需要确认按钮颜色', advice, source: 'feishu', at: '2026-09-23T00:00:00Z' }], counts: { open: 1, deferred: 0, ignored: 0 } })
+  await click(zh.queueRevise)
+  const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  expect(editor().value).toBe(advice.draft)
+  await type(editor(), '合成的新答复')
+  await click(zh.queueRevise)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('修复回归')
+  expect(editor().value).toBe('合成的新答复')
+})
+
+it('restores each edited reply across Tickets and discards only the named draft', async () => {
+  const other = ticketSummary({ id: 't2', title: '另一件事' })
+  server.work = { working: [other], workingTotal: 1, waiting: [], waitingTotal: 0, delivered: [], deliveredTotal: 0 }
+  server.ticketDetails.t2 = { ...server.ticketDetails.t1!, id: 't2', title: '另一件事', attention: undefined }
+  await mount()
+  const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  const otherEntry = () => [...document.querySelectorAll<HTMLElement>('.pw-task')]
+    .find(card => card.querySelector('.pw-title-button')?.textContent === '另一件事')!
+    .querySelector<HTMLButtonElement>('.pw-actions button')!
+  await click(zh.queueRevise)
+  await type(editor(), '工单 A 的草稿')
+  await click(otherEntry())
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('另一件事')
+  expect(editor().value).toBe('')
+  await type(editor(), '工单 B 的草稿')
+  // A→B→A restores A's own text instead of clearing it or reapplying the advice prefill.
+  await click(zh.queueRevise)
+  expect(editor().value).toBe('工单 A 的草稿')
+  await click(otherEntry())
+  expect(editor().value).toBe('工单 B 的草稿')
+  await click(zh.homeDiscardDraft)
+  await click(zh.confirm)
+  expect(document.querySelector('.pw-supplement')).toBeNull()
+  await click(zh.queueRevise)
+  expect(editor().value).toBe('工单 A 的草稿')
+  await click(otherEntry())
+  expect(editor().value).toBe('')
+})
+
+it('keeps a failed reply for retry when its own entry is reopened', async () => {
+  const original = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => url.endsWith('/answer')
+    ? Response.json({ error: 'offline' }, { status: 500 })
+    : original(url, init)))
+  await mount()
+  const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  await click(zh.queueRevise)
+  await type(editor(), '待重试的答复')
+  await click(zh.workbenchSendUpdate)
+  expect(editor().value).toBe('待重试的答复')
+  await click(zh.queueRevise)
+  expect(editor().value).toBe('待重试的答复')
+})
+
+it('keeps a reply on its own Question when a poll replaces it, and rebinds only on request', async () => {
+  const original = globalThis.fetch
+  const answers: unknown[] = []
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/answer')) { answers.push(JSON.parse(String(init?.body))); return Response.json({ saved: true }) }
+    return original(url, init)
+  }))
+  const queue: Queue = { items: [{ id: 'q1', ticketId: 't1', attentionId: 'q1', title: '修复回归',
+    question: '需要确认按钮颜色', source: 'feishu', at: '2026-09-23T00:00:00Z' }], deferred: [], ignored: [],
+  counts: { open: 1, deferred: 0, ignored: 0 } }
+  await mount(null, null, [], queue)
+  const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  await click(zh.queueRevise)
+  await type(editor(), '针对原问题的答复')
+  // The host replaces the Question on the same Ticket while the owner is still writing.
+  queue.items[0]!.attentionId = 'q2'; queue.items[0]!.question = '需要确认新的按钮颜色'
+  server.person[0]!.attention = { id: 'q2', question: '需要确认新的按钮颜色' }
+  server.ticketDetails.t1!.attention = { id: 'q2', question: '需要确认新的按钮颜色' }
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain(zh.homeDraftAttentionChanged)
+  expect(editor().value).toBe('针对原问题的答复')
+  // Reopening the refreshed Question still shows the draft on the original one, so nothing binds silently.
+  await click(zh.queueRevise)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('需要确认按钮颜色')
+  expect(editor().value).toBe('针对原问题的答复')
+  await click(zh.homeDraftUseNewQuestion)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('需要确认新的按钮颜色')
+  expect(editor().value).toBe('针对原问题的答复')
+  await click(zh.workbenchSendUpdate)
+  expect(answers).toEqual([expect.objectContaining({ ticketId: 't1', attentionId: 'q2', instruction: '针对原问题的答复' })])
+})
+
+it('cannot move a reply to a replacement Question while its answer is in flight', async () => {
+  const original = globalThis.fetch
+  let finish!: (response: Response) => void
+  const pending = new Promise<Response>(resolve => { finish = resolve })
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/answer')) return pending
+    return original(url, init)
+  }))
+  const queue: Queue = { items: [{ id: 'q1', ticketId: 't1', attentionId: 'q1', title: '修复回归',
+    question: '需要确认按钮颜色', source: 'feishu', at: '2026-09-23T00:00:00Z' }], deferred: [], ignored: [],
+  counts: { open: 1, deferred: 0, ignored: 0 } }
+  await mount(null, null, [], queue)
+  const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
+  await click(zh.queueRevise)
+  await type(editor(), '针对原问题的答复')
+  const submit = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .find(button => button.textContent === zh.workbenchSendUpdate)!
+  await act(async () => { submit.click() })
+  queue.items[0]!.attentionId = 'q2'; queue.items[0]!.question = '需要确认新的按钮颜色'
+  server.person[0]!.attention = { id: 'q2', question: '需要确认新的按钮颜色' }
+  server.ticketDetails.t1!.attention = { id: 'q2', question: '需要确认新的按钮颜色' }
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  const adopt = [...document.querySelectorAll<HTMLButtonElement>('.pw-supplement button')]
+    .find(button => button.textContent === zh.homeDraftUseNewQuestion)!
+  // The pending answer still owns the editor, so the replacement cannot take its text meanwhile.
+  expect(adopt.disabled).toBe(true)
+  await act(async () => { finish(Response.json({ saved: true })) })
+  await settle()
+  expect(document.querySelector('.pw-supplement')).toBeNull()
+  // Reopening the new Question starts without the earlier draft.
+  await click(zh.queueRevise)
+  expect(document.querySelector('.pw-supplement')?.textContent).toContain('需要确认新的按钮颜色')
+  expect(editor().value).toBe('')
+})
+
 it('defers one decision and records a reversible “no action needed” decision', async () => {
   const { actions } = await mount()
   await click(zh.queueDefer)
@@ -162,6 +311,21 @@ it('keeps a failed Ticket without a Question visible for recovery, retry or stop
   await click(retry)
   await click(zh.confirm)
   expect(server.requests).toContainEqual(expect.objectContaining({ method: 'POST', path: 'tickets/t4/retry' }))
+})
+
+it('closes a failed Ticket from the recovery list with an optional reason', async () => {
+  server.person = [ticketSummary({ id: 't4', title: '截图工具', actions: { retry: true, stop: true }, summary: 'LlmError: no adapter registered' },
+    { stage: 'person', action: 'failed' })]
+  await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
+  await click(zh.closeTicket)
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+  expect(dialog.textContent).toContain(zh.closeTicketDescription)
+  await type(dialog.querySelector('textarea')!, '已过期，不再需要')
+  await click(zh.closeTicketConfirm)
+  expect(server.requests).toContainEqual({ path: 'tickets/t4/stop', method: 'POST', body: { reason: '已过期，不再需要' } })
+  expect(document.body.textContent).toContain(zh.closeTicketDone.replace('{title}', '截图工具'))
+  await click(zh.homeBack)
+  expect(document.querySelector('.pw-recovery')).toBeNull()
 })
 
 it('renders the independent overview sections when the optional workbench queue is unavailable', async () => {

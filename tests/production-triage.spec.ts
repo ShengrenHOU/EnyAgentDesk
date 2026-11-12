@@ -45,6 +45,12 @@ const consume = (batch: ProductionBatch) => {
 }
 const result = (batch: ProductionBatch, kind: 'informational' | 'suggested_action' | 'unknown' = 'informational') => ({ model: 'reported-model',
   items: batch.inputs.map(input => ({ triggerId: input.triggerId, kind, reason: 'A shared reference', context: (() => { try { const context = service.read(batch.id).contexts[input.triggerId]; return { revision: context?.revision ?? 1, hash: context?.hash ?? 'x'.repeat(64) } } catch { return { revision: 1, hash: 'x'.repeat(64) } } })(), matterIds: [] as string[] })), matters: [] })
+const longContext = (id: string, text = 'context '): ImContextReader => ({ assertActive() {}, async read(request) {
+  const anchor = { id, text: `private ${id}`, version: 'v1', createdAt: '2026-11-10T00:00:00.000Z' }
+  return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
+    start: request.start, end: request.end, consistency: 'live_paginated', gaps: [], anchor,
+    messages: [0, 1, 2].map(index => ({ ...anchor, id: `${id}-history-${index}`, text: text.repeat(500) })) }
+} })
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'production-triage-')); store = new Store(join(directory, 'state.sqlite'))
   provider = 'test'; enabled = true; paused = false; source = true; configuration = 'first'; version = 'policy1'; prompt = 'prompt1'; now = '2026-11-10T01:00:00.000Z'; deliver.mockClear()
@@ -75,6 +81,40 @@ it('passes Source-owned reading headers through the native production read tool'
   const output = await tool.execute({ id: created!.id }, new AbortController().signal)
   expect(output).toMatchObject({ inputs: [{ header: { at: now, conversationLabel: 'Synthetic operations', senderType: 'app', parent: 'parent-message' } }] })
   expect(JSON.parse(JSON.stringify(output))).toEqual(output)
+})
+
+it('finds old unresolved groups independently of recent history and preserves source access checks', () => {
+  add('a', 'waiting-chat'); add('b', 'other-chat')
+  const batches = start(['a', 'b'])
+  const waiting = batches.find(batch => batch.inputs[0]!.triggerId === 'a')!
+  const superseded = batches.find(batch => batch.inputs[0]!.triggerId === 'b')!
+  store.set(`triage-production:${waiting.id}`, { ...waiting, state: 'blocked', problem: 'Retained pending judgment' })
+  const disposition = store.triggers.disposition('b')!
+  disposition.triage!.batchId = 'successor'; store.triggers.saveDisposition('b', disposition)
+  for (let index = 0; index < 3; index++) store.set(`triage-production:history-${index}`, {
+    ...waiting, id: `history-${index}`, state: 'completed', inputs: [], result: { model: 'test', items: [], matters: [] },
+  })
+  const header = (trigger: Trigger) => ({ at: trigger.at, conversationLabel: 'Named source', senderLabel: 'Named person' })
+  const before = store.get(`triage-production:${waiting.id}`)
+  expect(productionOverview(store, evidence, { limit: 1 }).groups[0]!.id).toBe('history-2')
+  const pending = productionOverview(store, evidence, { limit: 1, unresolved: true }, header)
+  expect(pending.total).toBe(1); expect(pending.nextBefore).toBeNull()
+  expect(pending.groups).toMatchObject([{ id: waiting.id, state: 'blocked', header: { conversationLabel: 'Named source' },
+    items: [{ header: { senderLabel: 'Named person' }, provider: 'test', sender: undefined }] }])
+  expect(pending.groups.some(group => group.id === superseded.id)).toBe(false)
+  expect(store.get(`triage-production:${waiting.id}`)).toEqual(before)
+  disposition.triage!.batchId = superseded.id; store.triggers.saveDisposition('b', disposition)
+  const firstPage = productionOverview(store, evidence, { limit: 1, unresolved: true }, header)
+  expect(firstPage.total).toBe(2); expect(firstPage.nextBefore).not.toBeNull()
+  const secondPage = productionOverview(store, evidence, { limit: 1, unresolved: true, before: firstPage.nextBefore! }, header)
+  expect(new Set([...firstPage.groups, ...secondPage.groups].map(group => group.id))).toEqual(new Set([waiting.id, superseded.id]))
+  expect(secondPage.nextBefore).toBeNull()
+  source = false
+  const hidden = productionOverview(store, evidence, { unresolved: true }, header)
+  expect(hidden.groups[0]!.redacted).toBe(true)
+  expect(JSON.stringify(hidden)).not.toContain('Named source')
+  expect(JSON.stringify(hidden)).not.toContain('Named person')
+  expect(JSON.stringify(hidden)).not.toContain('private a')
 })
 
 it('delivers a real durable production assessment and completes information without legacy Eval, Ticket, ACK or reply', async () => {
@@ -381,6 +421,52 @@ it('refuses a deadline-expired result even before the next periodic pass', async
   expect(() => service.submit(live.id, 1, live.binding!, value)).toThrow('Stale')
   expect(service.read(live.id)).toMatchObject({ state: 'queued', generation: 2 }); expect(service.activeCount()).toBe(0)
 })
+
+it('keeps completed reads across an automatic retry when the collected content is unchanged', async () => {
+  native = id => longContext(id)
+  add('a'); const [batch] = start(); await drain(); consume(batch!)
+  now = '2026-11-10T01:06:00.000Z'; service.maintain()
+  expect(service.read(batch!.id)).toMatchObject({ state: 'queued', generation: 2 })
+  await drain()
+  const live = service.read(batch!.id)
+  expect(live.state).toBe('awaiting'); expect(live.generation).toBe(2)
+  expect(live.reads!.a).toMatchObject({ generation: 2, next: null, complete: true })
+  // The generator was re-collected with new read timestamps but identical content, so no page re-read is required.
+  expect(service.submit(live.id, live.generation, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it('keeps completed coverage when a fully read context is read again', async () => {
+  native = id => longContext(id)
+  add('a'); const [batch] = start(); await drain(); consume(batch!)
+  const live = service.read(batch!.id)
+  expect(service.context(live.id, live.generation, 'a', 0).next_offset).toBe(8000)
+  expect(service.submit(live.id, live.generation, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it('resumes partial page progress after a generation retry instead of restarting from zero', async () => {
+  native = id => longContext(id)
+  add('a'); const [batch] = start(); await drain()
+  const first = service.read(batch!.id), page = service.context(first.id, first.generation, 'a', 0)
+  expect(page.next_offset).toBe(8000)
+  now = '2026-11-10T01:06:00.000Z'; service.maintain(); await drain()
+  const live = service.read(batch!.id)
+  expect(live.reads!.a).toMatchObject({ generation: 2, next: 8000, complete: false })
+  let offset = page.next_offset
+  while (offset !== null) offset = service.context(live.id, live.generation, 'a', offset).next_offset
+  expect(service.submit(live.id, live.generation, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it('drops carried reads when a retried generation collects different content', async () => {
+  native = id => longContext(id, 'before ')
+  add('a'); const [batch] = start(); await drain(); consume(batch!)
+  now = '2026-11-10T01:06:00.000Z'; service.maintain()
+  native = id => longContext(id, 'after ')
+  await drain()
+  const live = service.read(batch!.id)
+  expect(live.state).toBe('awaiting')
+  expect(() => service.submit(live.id, live.generation, live.binding!, result(batch!))).toThrow('Read every')
+})
+
 
 
 it('uses the reader native anchor text instead of collected presentation text', async () => {

@@ -1,25 +1,16 @@
 /** Cross-receipt model suggestions are a read-only projection, never business obligation state. */
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { ApiResponse } from '../app/api.ts'
+import { useHistoryPage } from './api.ts'
 import type { T } from './text.ts'
 type View = ApiResponse<'GET triage-matters'>
 export function CanonicalMatters({ view, t, loadPage, openWork }: { view: View; t: T; loadPage?: (before: number) => Promise<View>;
   openWork?: (kind: 'ticket' | 'line', id: string) => void }) {
   const [before, setBefore] = useState<number>()
-  const [loaded, setLoaded] = useState<{ base: View; before: number; page: View }>()
-  const [error, setError] = useState('')
-  const current = before !== undefined && loaded?.base === view && loaded.before === before ? loaded.page : undefined
-  // Match receipt pagination: hide cached source content on refresh, then revalidate the selected page.
-  useEffect(() => {
-    if (before === undefined || !loadPage) return
-    let cancelled = false
-    setError('')
-    void loadPage(before).then(page => { if (!cancelled) setLoaded({ base: view, before, page }) },
-      failure => { if (!cancelled) setError(String(failure)) })
-    return () => { cancelled = true }
-  }, [view, before])
-  const busy = before !== undefined && !current
-  const shown = before === undefined ? view : current ?? { ...view, groups: [], nextBefore: null }
+  // The selected page refreshes on its own cursor-scoped schedule; latest overview changes no longer gate its freshness.
+  const { page, error, reload } = useHistoryPage(before, loadPage)
+  const busy = before !== undefined && !page && !error
+  const shown = before === undefined ? view : page ?? { ...view, groups: [], nextBefore: null }
   if (!shown.groups.length && !shown.total && before === undefined) return null
   const zh = t('lang').startsWith('zh')
   const label = (en: string, cn: string) => zh ? cn : en
@@ -64,8 +55,9 @@ export function CanonicalMatters({ view, t, loadPage, openWork }: { view: View; 
       <p className="pw-muted">{label('Read-only evidence does not identify the owner or confer authority. Sender identity and authority are not established; no business obligation resolved.', '只读证据不能确认责任人或赋予权限。发送者身份及权限未经确认，不代表业务义务已解决。')}</p>
     </details>)}
     {shown.nextBefore !== null && loadPage && <button type="button" disabled={busy} onClick={() => setBefore(shown.nextBefore!)}>{label('Older matters', '更早事项')}</button>}
-    {before !== undefined && <button type="button" onClick={() => { setBefore(undefined); setError('') }}>{label('Latest matters', '最新事项')}</button>}
+    {before !== undefined && <button type="button" onClick={() => setBefore(undefined)}>{label('Latest matters', '最新事项')}</button>}
     {busy && !error && <p role="status">{label('Refreshing matters…', '正在刷新事项…')}</p>}
-    {error && <p role="alert">{error}</p>}
+    {error && <><p role="alert">{label('Matters could not be refreshed; the selected page stays hidden until it is verified again.', '事项刷新失败，重新核验前不展示所选页面。')} {error}</p>
+      <button type="button" onClick={() => void reload()}>{label('Retry matters', '重试事项')}</button></>}
   </section>
 }

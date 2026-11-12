@@ -1,10 +1,13 @@
 /** Thread list, timeline detail, cross-entity search, and decision list views. */
 import { threadKey, type Thread, type Ticket, type Trigger } from '../../core/index.ts'
+import { searchTitles } from '../lines.ts'
 import type { ThreadFilter } from '../api.ts'
 import type { TextCache } from '../cache.ts'
 import { awaitingEval, channelLink, dayAgo, decisionView, newestFirst, page, snapshot, threadSummary, threadTitle, ticketLine,
   ticketSummary, triggerView, type ViewHost } from './records.ts'
 import { attribute } from './text.ts'
+/** Bounded Line results in the panel's global search, kept separate from its Ticket, Thread and Trigger results. */
+const LINE_RESULTS = 5
 
 export function threadList(host: ViewHost, filter: ThreadFilter, offset: number, limit: number) {
   const { store } = host
@@ -53,14 +56,16 @@ export function threadDetail(host: ViewHost, key: string, before: string | undef
 }
 export type ThreadDetailView = NonNullable<ReturnType<typeof threadDetail>>
 /**
- * Searches triggers, threads, and tickets by text, ID, source-extracted references (e.g., `#N`, URLs), or cached Feishu AppLinks.
+ * Searches triggers, threads, tickets and lines by text, ID, source-extracted references (e.g., `#N`, URLs), or cached
+ * Feishu AppLinks. Line results match their goal title only and are bounded; they never merge same-titled goals.
  * @param links - Feishu message AppLinks cached since startup, keyed by chat and message ID.
  */
 export function search(host: ViewHost, query: string, links: Pick<TextCache, 'entries'>) {
   const { store, sources } = host
   const value = query.trim()
-  if (!value) return { tickets: [], items: [], threads: [] }
+  if (!value) return { lines: [], tickets: [], items: [], threads: [] }
   const view = snapshot(host)
+  const lines = searchTitles(store, value, LINE_RESULTS)
   const named = sources.find(value)
   const terms = new Set([value, ...named.terms])
   for (const [name, url] of links.entries()) if (url === value) terms.add(name.split(':').at(-1)!)
@@ -84,7 +89,7 @@ export function search(host: ViewHost, query: string, links: Pick<TextCache, 'en
     return { ...row, threadTitle: home ? threadTitle(store, home) : undefined, ...filtered }
   }
   const items = [...found.values()].filter(trigger => trigger.human || !shownThreads.has(threadKey(trigger.threads[0]!)))
-  return { tickets, items: items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 20).map(item), threads }
+  return { lines, tickets, items: items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 20).map(item), threads }
 }
 export type SearchView = ReturnType<typeof search>
 export function decisionList(host: ViewHost, kinds: string[], offset: number, limit: number, since = '') {

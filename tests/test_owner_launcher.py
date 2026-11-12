@@ -24,6 +24,62 @@ class OwnerLauncherTest(unittest.TestCase):
         self.config = {'runtime': str(self.root), 'port': 3083, 'repository': 'owner/lab', 'node': 'node',
                        'broker': 'broker', 'python': sys.executable}
         self.ready = {'setup': {'accounts': {'repository': 'owner/lab'}}, 'health': {'runtime': {'state': 'ready'}}}
+        self.credential_probe = patch.object(launcher, 'check_start_credential')
+        self.mock_credential_probe = self.credential_probe.start()
+        self.addCleanup(self.credential_probe.stop)
+
+    def test_activation_refuses_a_broken_credential_consumer_before_other_probes(self):
+        config = launcher.validate_config(self.platform_config())
+        self.mock_credential_probe.side_effect = RuntimeError('Credential consumer preflight failed')
+        with patch.object(launcher, 'state', return_value=self.ready), patch.object(launcher.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'Credential consumer'):
+                launcher.activation_preflight(config)
+        run.assert_not_called()
+        self.assertFalse((self.root / config['stopMarker']).exists())
+
+    def test_start_credential_probe_checks_the_real_consumer_and_sanitizes_failure(self):
+        self.credential_probe.stop()
+        with patch.object(launcher.subprocess, 'run') as run:
+            launcher.check_start_credential(self.config)
+        self.assertEqual(run.call_args.args[0][:6], ['broker', 'run', '--map', 'DEEPSEEK_API_KEY=DEEPSEEK_API_KEY', '--', sys.executable])
+        self.assertTrue(run.call_args.kwargs['check'])
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+        failure = subprocess.CalledProcessError(103, ['broker'], stderr=b'SYNTHETIC_PRIVATE_VALUE')
+        with patch.object(launcher.subprocess, 'run', side_effect=failure):
+            with self.assertRaises(RuntimeError) as caught:
+                launcher.check_start_credential(self.config)
+        self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', str(caught.exception))
+
+    def test_dependency_consumer_failure_keeps_activation_and_start_from_spawning(self):
+        config = launcher.validate_config(self.platform_config(
+            preflightCommands=[[sys.executable, '-c', 'raise SystemExit(1)']]))
+        failure = subprocess.CalledProcessError(1, ['private-probe'], stderr=b'SYNTHETIC_PRIVATE_VALUE')
+        receipt = self.root / config['receiptName']
+        receipt.write_text('{"pid":123}', encoding='utf-8')
+        with patch.object(launcher, 'state', return_value=self.ready), \
+                patch.object(launcher.subprocess, 'run', side_effect=failure), \
+                patch.object(launcher.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'Dependency consumer 1') as caught:
+                launcher.activation_preflight(config)
+            with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'synthetic-test-key'}), \
+                    self.assertRaisesRegex(RuntimeError, 'Dependency consumer 1'):
+                launcher.spawn(config)
+        spawn.assert_not_called()
+        self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', str(caught.exception))
+        self.assertEqual(receipt.read_text(), '{"pid":123}')
+        self.assertFalse((self.root / config['stopMarker']).exists())
+
+    def test_dependency_checks_use_argument_arrays_and_the_startup_environment(self):
+        config = self.platform_config(preflightCommands=[[sys.executable, '-c', 'import mcp']])
+        with patch.object(launcher.subprocess, 'run') as run:
+            launcher.check_start_dependencies(config)
+        self.assertEqual(run.call_args.args[0], config['preflightCommands'][0])
+        self.assertEqual(run.call_args.kwargs['env']['DSH_HOME'], str(self.root / 'native-home'))
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+        self.assertFalse(run.call_args.kwargs.get('shell', False))
+        for commands in ['shell command', [[]], [['relative-program']], [[sys.executable, 1]]]:
+            with self.subTest(commands=commands), self.assertRaises(ValueError):
+                launcher.validate_config(self.platform_config(preflightCommands=commands))
 
     @unittest.skipUnless(sys.platform == 'win32', 'Windows scheduled-task wrapper')
     def test_supervisor_uses_launcher_stop_semantics_and_reports_failure_without_secrets(self):

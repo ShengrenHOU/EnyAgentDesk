@@ -14,6 +14,11 @@ import { TriageMatters, MatterProposalSchema } from './triage-matters.ts'
 const VERSION = 'im-production-v1', MAX_INPUTS = 8, MAX_TEXT = 32_000
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const unique = (items: string[]) => new Set(items).size === items.length
+/** Read time is collection metadata, not evidence identity; the same window and content keep one read receipt. */
+const contextSignature = (manifest: ImContextManifest) => {
+  const { readStartedAt: _startedAt, readEndedAt: _endedAt, hash: _hash, ...content } = manifest
+  return hash(content)
+}
 const Id = z.string().min(1).max(200)
 export const ProductionResultSchema = z.object({
   model: z.string().min(1).max(200),
@@ -31,7 +36,8 @@ export interface ProductionBatch {
   createdAt: string; updatedAt: string; window: { start: string; end: string }; inputs: Input[]
   settingsRevision: number; settingsFingerprint: string; policy: string; prompt: string
   contexts: Record<string, { revision: number; manifest: ImContextManifest }>
-  reads?: Record<string, { revision: number; hash: string; next: number | null }>
+  /** Read receipts are scoped to one batch record and reconciled to the current generation when content is unchanged. */
+  reads?: Record<string, { generation: number; revision: number; hash: string; signature?: string; next: number | null; complete?: boolean }>
   consumedAt?: string; confirmedAt?: string; deadline?: string; pausedAt?: string
   previous?: string
   /** Local observed watermark, not complete provider history or a semantic matter revision. */
@@ -176,10 +182,18 @@ export class ProductionTriage {
             { ...batch.window, anchor: input.identity, anchorText: reader.anchorText ?? trigger.text }, signal, messagesPerInput)
           if (collected.anchor.status === 'missing' && collected.gaps.includes('time_budget')) throw new ImContextReadError(true)
           const manifest = this.boundContext(collected, Math.floor(64_000 / batch.inputs.length))
+          const signature = contextSignature(manifest)
           this.host.store.atomic(() => {
             const current = this.validate(id, generation); reader.assertActive()
             if (current.state !== 'preparing') throw new Error('Context attempt replaced')
             current.contexts[input.triggerId] = { revision: (current.contexts[input.triggerId]?.revision ?? 0) + 1, manifest }
+            // Re-collection (automatic retry or a new attempt) keeps page progress only for identical content.
+            const read = current.reads?.[input.triggerId]
+            if (read) {
+              const same = read.signature !== undefined ? read.signature === signature : read.hash === manifest.hash
+              if (same) current.reads![input.triggerId] = { ...read, generation, revision: current.contexts[input.triggerId]!.revision, hash: manifest.hash, signature }
+              else delete current.reads![input.triggerId]
+            }
             this.host.store.set(batches(id), current)
           })
         }
@@ -271,10 +285,13 @@ export class ProductionTriage {
     return this.host.store.atomic(() => {
       const batch = this.validate(id, generation), context = batch.contexts[triggerId]
       if (batch.state !== 'awaiting' || !context) throw new Error('Context is not ready for this exact input')
-      const read = batch.reads?.[triggerId]
-      if (!Number.isSafeInteger(offset) || offset < 0 || (offset !== 0 && (read?.next !== offset || read.revision !== context.revision || read.hash !== context.manifest.hash))) throw new Error('Read context pages in order from offset zero')
+      const read = batch.reads?.[triggerId], signature = contextSignature(context.manifest)
+      const same = !!read && (read.signature !== undefined ? read.signature === signature : read.hash === context.manifest.hash)
+      if (!Number.isSafeInteger(offset) || offset < 0 || (offset !== 0 && (!same || read!.next !== offset || read!.revision !== context.revision || read!.hash !== context.manifest.hash))) throw new Error('Read context pages in order from offset zero')
       const text = JSON.stringify(context.manifest), next = offset + 8000 < text.length ? offset + 8000 : null
-      batch.reads ??= {}; batch.reads[triggerId] = { revision: context.revision, hash: context.manifest.hash, next }
+      // A repeated read may restart paging; completed coverage for identical content stays completed.
+      const complete = same ? read!.complete === true || read!.next === null || next === null : next === null
+      batch.reads ??= {}; batch.reads[triggerId] = { generation, revision: context.revision, hash: context.manifest.hash, signature, next, complete }
       this.host.store.set(batches(id), batch)
       return { triggerId, generation, revision: context.revision, hash: context.manifest.hash, text: text.slice(offset, offset + 8000), next_offset: next }
     })
@@ -293,7 +310,8 @@ export class ProductionTriage {
       if (batch.state !== 'awaiting') throw new Error('Production judgment is not awaiting a result')
       for (const input of batch.inputs) {
         const context = batch.contexts[input.triggerId], read = batch.reads?.[input.triggerId]
-        if (!context || !read || read.next !== null || read.revision !== context.revision || read.hash !== context.manifest.hash) throw new Error('Read every exact per-input context before submitting')
+        if (!context || !read || !(read.complete === true || read.next === null) || read.revision !== context.revision || read.hash !== context.manifest.hash
+          || read.signature !== undefined && read.signature !== contextSignature(context.manifest)) throw new Error('Read every exact per-input context before submitting')
       }
       const ids = new Set(batch.inputs.map(input => input.triggerId))
       if (result.items.length !== ids.size || !unique(result.items.map(item => item.triggerId)) || result.items.some(item => !ids.has(item.triggerId))) throw new Error('Exact exhaustive coverage required')
@@ -354,7 +372,7 @@ export class ProductionTriage {
         return current
       }); batch.generation++
       batch.settingsRevision = this.revision(); batch.settingsFingerprint = this.settingsFingerprint(); batch.policy = this.host.policy(); batch.prompt = this.host.prompt()
-      batch.contexts = {}; delete batch.matterProvenance; delete batch.consumedAt; delete batch.confirmedAt; delete batch.deadline; delete batch.pausedAt; delete batch.reads; delete batch.binding; delete batch.result; delete batch.problem
+      batch.contexts = {}; delete batch.matterProvenance; delete batch.consumedAt; delete batch.confirmedAt; delete batch.deadline; delete batch.pausedAt; delete batch.binding; delete batch.result; delete batch.problem
       batch.state = 'queued'; batch.updatedAt = this.now()
       if (automatic) batch.automaticRetries = (batch.automaticRetries ?? 0) + 1
       else delete batch.automaticRetries
@@ -383,7 +401,7 @@ export class ProductionTriage {
   }
 }
 /** Read-only keyset-paginated judgments. Summary counts cover all current owners, not business completion. */
-export function productionOverview(store: Store, evidence?: Host['evidence'], page: { before?: number; limit?: number } = {}) {
+export function productionOverview(store: Store, evidence?: Host['evidence'], page: { id?: string; before?: number; limit?: number; unresolved?: boolean } = {}, header?: Host['header']) {
   const limit = Math.min(100, Math.max(1, Math.floor(page.limit ?? 50)))
   if (!Number.isFinite(limit) || (page.before !== undefined && (!Number.isSafeInteger(page.before) || page.before < 1))) throw new Error('Invalid production page')
   const current = (batch: Pick<ProductionBatch, 'id' | 'owner' | 'ownerGeneration'>, triggerId: string) => {
@@ -392,13 +410,15 @@ export function productionOverview(store: Store, evidence?: Host['evidence'], pa
   }
   const unresolved = { groups: 0, messages: 0, queued: 0, preparing: 0, awaiting: 0, blocked: 0, unknown: 0, suggested_action: 0,
     oldestAt: null as string | null }
+  const unresolvedIds = new Set<string>()
+  const receiptKey = page.id === undefined ? null : `triage-production:${page.id}`
   // Read only summary metadata across the complete history; never publish source text in aggregate diagnostics.
   const summaries = store.db.prepare(`SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.owner') AS owner,
     json_extract(value, '$.ownerGeneration') AS ownerGeneration, json_extract(value, '$.state') AS state,
     json_extract(value, '$.createdAt') AS createdAt,
     (SELECT json_group_array(json_extract(i.value, '$.triggerId')) FROM json_each(kv.value, '$.inputs') i) AS ids,
     (SELECT json_group_object(json_extract(i.value, '$.triggerId'), json_extract(i.value, '$.kind')) FROM json_each(kv.value, '$.result.items') i) AS kinds
-    FROM kv WHERE key LIKE 'triage-production:%'`).all()
+    FROM kv WHERE key LIKE 'triage-production:%' AND (? IS NULL OR key = ?)`).all(receiptKey, receiptKey)
   for (const row of summaries) {
     const owner = { id: String(row.id), owner: String(row.owner), ownerGeneration: Number(row.ownerGeneration) }
     const kinds = JSON.parse(String(row.kinds)) as Record<string, string>
@@ -411,13 +431,16 @@ export function productionOverview(store: Store, evidence?: Host['evidence'], pa
       const at = store.triggers.get(triggerId)?.at ?? String(row.createdAt)
       if (!unresolved.oldestAt || at < unresolved.oldestAt) unresolved.oldestAt = at
     }
-    if (count) unresolved.groups++
+    if (count) { unresolved.groups++; unresolvedIds.add(owner.id) }
   }
-  const rows = store.db.prepare("SELECT rowid AS cursor, value FROM kv WHERE key LIKE 'triage-production:%' AND rowid < ? ORDER BY rowid DESC LIMIT ?")
-    .all(page.before ?? Number.MAX_SAFE_INTEGER, limit + 1)
+  const filter = page.unresolved ? JSON.stringify([...unresolvedIds]) : null
+  const rows = store.db.prepare(`SELECT rowid AS cursor, value FROM kv WHERE key LIKE 'triage-production:%' AND rowid < ?
+    AND (? IS NULL OR key IN (SELECT 'triage-production:' || value FROM json_each(?)))
+    AND (? IS NULL OR key = ?) ORDER BY rowid DESC LIMIT ?`)
+    .all(page.before ?? Number.MAX_SAFE_INTEGER, filter, filter, receiptKey, receiptKey, limit + 1)
   const hasMore = rows.length > limit, selected = rows.slice(0, limit)
   const projection = new TriageMatters(store, evidence ?? (() => undefined)), readableReceipts = new Map<string, boolean>()
-  return { limited: hasMore, total: summaries.length, unresolved,
+  return { limited: hasMore, total: page.unresolved ? unresolvedIds.size : summaries.length, unresolved,
     nextBefore: hasMore ? Number(selected.at(-1)!.cursor) : null,
     groups: selected.map(row => {
     const batch = JSON.parse(String(row.value)) as ProductionBatch
@@ -426,16 +449,28 @@ export function productionOverview(store: Store, evidence?: Host['evidence'], pa
       return !!current && input.fingerprint === hash({ trigger, evidence: current })
     })
     const currentIds = new Set(batch.inputs.filter(input => current(batch, input.triggerId)).map(input => input.triggerId))
+    const readingHeader = (triggerId: string) => {
+      const trigger = readable && store.triggers.get(triggerId)
+      return trigger ? header?.(trigger) : undefined
+    }
+    const items = batch.inputs.map(input => {
+      const messageHeader = readingHeader(input.triggerId)
+      return { triggerId: input.triggerId, historical: !currentIds.has(input.triggerId),
+        ...(messageHeader ? { header: messageHeader } : {}),
+        ...(readable ? { sender: input.identity.sender, direction: input.identity.direction, provider: input.identity.provider } : {}),
+        kind: readable ? batch.result?.items.find(item => item.triggerId === input.triggerId)?.kind : undefined,
+        reason: readable ? batch.result?.items.find(item => item.triggerId === input.triggerId)?.reason : undefined,
+        contextHash: batch.contexts[input.triggerId]?.manifest.hash, gaps: readable ? batch.contexts[input.triggerId]?.manifest.gaps ?? [] : [] }
+    })
+    const firstHeader = items[0]?.header
     return { id: batch.id, owner: batch.owner, generation: batch.generation,
+      ...(firstHeader ? { header: firstHeader } : {}),
       state: batch.state, window: batch.window, at: batch.updatedAt, messages: currentIds.size,
       newerKnownEvidence: newerKnownEvidence(store, batch),
       redacted: !readable, historical: currentIds.size === 0, problem: readable ? batch.problem : undefined,
       conversation: readable ? batch.inputs[0]?.identity.conversation : undefined, matters: readable ? (batch.result?.matters ?? []).filter(matter => matter.triggerIds.some(id => currentIds.has(id))) : [],
       counts: Object.fromEntries(['none', 'informational', 'suggested_action', 'unknown'].map(kind => [kind, readable ? batch.result?.items.filter(item => currentIds.has(item.triggerId) && item.kind === kind).length ?? 0 : 0])),
-      items: batch.inputs.map(input => ({ triggerId: input.triggerId, historical: !currentIds.has(input.triggerId),
-        kind: readable ? batch.result?.items.find(item => item.triggerId === input.triggerId)?.kind : undefined,
-        reason: readable ? batch.result?.items.find(item => item.triggerId === input.triggerId)?.reason : undefined,
-        contextHash: batch.contexts[input.triggerId]?.manifest.hash, gaps: readable ? batch.contexts[input.triggerId]?.manifest.gaps ?? [] : [] })),
+      items,
     }
   }) }
 }

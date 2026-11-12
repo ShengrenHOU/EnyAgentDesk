@@ -5,6 +5,7 @@ import { Button, Dot, Icon, Input, Modal, SegmentedTabs, Tag } from './controls.
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
+import { LinePage } from './line.tsx'
 import { ticketMark } from './marks.ts'
 import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './locales.ts'
 import { OverviewPage } from './overview.tsx'
@@ -67,19 +68,28 @@ function Result({ name, open, children }: { name: ReactNode; open: (() => void) 
     <div className="dt-row-meta">{children}</div>
   </div></li>
 }
+/** Bounded result counts the host serves; reaching one means the answer is cut short and the hint says to narrow it. */
+const RESULT_LIMITS = { lines: 5, items: 20 } as const
 function SearchResults({ result, query, onClose }: { result: SearchView; query: string; onClose: () => void }) {
   const { t, navigate } = usePanel()
   const { setup } = usePanelData()
-  const empty = !result.items.length && !result.threads.length && !result.tickets.length
-  const counts = { tickets: result.tickets.length, threads: result.threads.length, items: result.items.length }
+  const empty = !result.items.length && !result.threads.length && !result.tickets.length && !result.lines.length
+  const counts = { lines: result.lines.length, tickets: result.tickets.length, threads: result.threads.length, items: result.items.length }
+  const capped = result.lines.length >= RESULT_LIMITS.lines || result.items.length >= RESULT_LIMITS.items
   const go = (route: Route) => () => { onClose(); navigate(route) }
   return <div className="dt-search-results" role="region" aria-label={t('searchLabel')}>
     <div className="dt-search-head">
       <span className="dt-hint">{empty ? t(setup?.accounts?.feishu ? 'searchNone' : 'searchNoneGithub')
-        : t(result.items.length >= 20 ? 'searchFoundCapped' : 'searchFound', counts)}</span>
+        : t(capped ? 'searchFoundCapped' : 'searchFound', counts)}</span>
       <Button variant="ghost" size="sm" icon={<Icon name="close" size={14} />} aria-label={t('close')} onClick={onClose} />
     </div>
     {!empty && <ul className="dt-list">
+      {/* The owner's goals lead: a Line is its own result kind, never merged with a same-titled or member Ticket. */}
+      {result.lines.map(line => <Result key={line.id} name={<Highlight text={line.title} query={query} />}
+        open={go({ page: 'line', id: line.id })}>
+        <span>{t('term.line')}</span><span>{t(line.status === 'open' ? 'lineOpen' : 'lineClosed')}</span>
+        <span>{t('lineTicketCount', { count: line.ticketCount })}</span><When at={line.updatedAt} />
+      </Result>)}
       {result.tickets.map(ticket => <Result key={ticket.id} name={<Highlight text={ticket.title} query={query} />}
         open={go({ page: 'execution', id: ticket.id })}>
         <span>{t('term.ticket')}</span><span>{ticket.stage === 'ended' ? t('ticket.ended') : ticketMark(t, ticket).label}</span>
@@ -169,6 +179,7 @@ export function RouteContent({ route, deploymentForm }: { route: Route; deployme
     switch (route.page) {
       case 'overview': return <OverviewPage />
       case 'source': return <SourceStatus />
+      case 'line': return <LinePage key={route.id} id={route.id} />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
         : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
       case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
@@ -187,7 +198,7 @@ function Pages({ route, openTab, deploymentForm, newDiscussion, home }: { route:
   useEffect(() => { document.getElementById(`dt-tab-${route.page}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) }, [route.page])
   const page = home && route.page === 'overview' ? home : <RouteContent route={route} deploymentForm={deploymentForm} />
   const tabs: readonly Tab[] = home ? ['overview', 'execution', 'source', 'settings'] : TABS
-  const selected = home && (route.page === 'trigger' || route.page === 'eval') ? 'source' : route.page
+  const selected = route.page === 'line' ? 'overview' : home && (route.page === 'trigger' || route.page === 'eval') ? 'source' : route.page
   return <div className="dt-page">
     <div className="dt-column">
       <Header masterId={state?.masterId} newDiscussion={newDiscussion} daily={!!home} />

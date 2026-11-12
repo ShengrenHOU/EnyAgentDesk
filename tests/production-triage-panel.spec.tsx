@@ -11,7 +11,8 @@ it('renders grouped matter review and nested coverage without action or resolved
     problem: undefined, conversation: 'chat', counts: { informational: 1, suggested_action: 1, unknown: 0, none: 0 },
     matters: [{ id: 'matter', title: 'Review shared plan', reason: 'Two related messages', triggerIds: ['a', 'b'] }],
     items: [{ triggerId: 'a', historical: false, kind: 'informational', reason: 'A reference', contextHash: 'abc', gaps: ['local_sync_only'] }] }] }} />)
-  expect(html).toContain('Review shared plan'); expect(html).toContain('Per-message audit'); expect(html).toContain('not resolved obligations')
+  expect(html).toContain('Review shared plan'); expect(html).toContain('Per-message audit')
+  expect(html).toContain('Judgment recorded'); expect(html).toContain('suggested follow-ups')
   expect(html).toContain('local_sync_only'); expect(html).not.toContain('<button'); expect(html).not.toContain('<input')
 })
 it('empty projection does not add a dashboard task or placeholder', () => {

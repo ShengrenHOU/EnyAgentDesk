@@ -8,6 +8,8 @@ import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
 import { RESOURCES } from '../src/app/resources.ts'
+import { createHash } from 'node:crypto'
+import type { ProductionBatch } from '../src/app/production-triage.ts'
 import { attach, open } from '../src/app/lines.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
@@ -34,6 +36,60 @@ it('continues stopped Codex responsibility with DSH while keeping the same ticke
 })
 const read = (resource: string, page: { offset?: number; limit?: number } = {}) =>
   h.runTool(h.runtime.masterId, 'orchestrator_read', { resource, ...page })
+
+it('reads a historical blocked information receipt through the main resource without restarting its judgment', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('worker-scope', 'An existing task'))
+  const trigger = feishu('retained-receipt', 'Retained private source message\n'.repeat(180))
+  h.runtime.store.triggers.save(trigger)
+  const evidence = { provider: 'feishu', account: 'test-owner', conversation: 'test-chat', message: trigger.id,
+    version: 'v1', partial: false, configuration: 'test-scope' }
+  const access = vi.spyOn(h.runtime.sources, 'imEvidence').mockReturnValue(evidence)
+  const { configuration: _configuration, ...identity } = evidence
+  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const batch: ProductionBatch = { id: 'historical-information', owner: 'retained-owner', ownerGeneration: 1, generation: 3,
+    state: 'blocked', version: 'earlier-version', createdAt: trigger.at, updatedAt: trigger.at,
+    window: { start: trigger.at, end: trigger.at }, settingsRevision: 1, settingsFingerprint: 'earlier-settings',
+    policy: 'earlier-policy', prompt: 'earlier-prompt', contexts: {}, problem: 'Judgment has not completed',
+    inputs: [{ triggerId: trigger.id, triggerFingerprint: hash(trigger), fingerprint: hash({ trigger, evidence }), identity, text: trigger.text, partial: false }] }
+  h.runtime.store.set(`triage-production:${batch.id}`, batch)
+  h.runtime.store.triggers.saveDisposition(trigger.id, { fanout: [], at: trigger.at,
+    triage: { owner: batch.owner, generation: 1, heldAt: trigger.at, phase: 'production', batchId: batch.id } })
+  const resource = `triage/receipt/${batch.id}/3`
+  const catalog = await read('triage/receipts')
+  expect(catalog).toMatchObject({ groups: [expect.objectContaining({ id: batch.id, read: resource, redacted: false })] })
+  expect(JSON.parse(JSON.stringify(catalog))).toStrictEqual(catalog)
+  expect((await read(resource, { limit: 8000 }) as { text: string }).text).toContain('Retained private source message')
+  expect(h.runtime.store.get(`triage-production:${batch.id}`)).toEqual(batch)
+  h.runtime.store.set(`triage-production:${batch.id}`, { ...batch, state: 'awaiting' })
+  type Chunk = { text: string; next_offset: number | null }
+  const completeBefore = await read(resource, { limit: 8000 }) as Chunk
+  expect(completeBefore.next_offset).toBeNull()
+  expect(completeBefore.text.length).toBeGreaterThan(4000)
+  const first = await read(resource, { limit: 1000 }) as Chunk
+  expect(first.next_offset).not.toBeNull()
+  expect(h.runtime.store.get<ProductionBatch>(`triage-production:${batch.id}`)?.state).toBe('awaiting')
+  h.runtime.store.set(`triage-production:${batch.id}`, { ...batch, state: 'completed',
+    result: { model: 'test-model', items: [{ triggerId: trigger.id, kind: 'informational', reason: 'A new judgment',
+      context: { revision: 1, hash: 'a'.repeat(64) }, matterIds: ['new-matter'] }],
+    matters: [{ id: 'new-matter', title: 'New judgment metadata', reason: 'Updated detail '.repeat(300), triggerIds: [trigger.id] }] } })
+  expect(h.runtime.store.get<ProductionBatch>(`triage-production:${batch.id}`)?.state).toBe('completed')
+  let combined = first.text, offset = first.next_offset
+  while (offset !== null) {
+    const page = await read(resource, { offset, limit: 1000 }) as Chunk
+    combined += page.text; offset = page.next_offset
+  }
+  expect(combined).toBe(completeBefore.text)
+  const snapshot = JSON.parse(combined)
+  expect(snapshot.state).toBe('awaiting')
+  expect(snapshot.inputs[0].text).toBe(trigger.text)
+  await expect(read(`triage/receipt/${batch.id}/2`)).rejects.toThrow('Receipt changed')
+  await expect(h.runTool(sessionId, 'orchestrator_read', { resource })).rejects.toThrow('main Session')
+  access.mockReturnValue(undefined)
+  await expect(read(resource, { offset: 1, limit: 8000 })).rejects.toThrow('Source access changed')
+  const revoked = await read(resource, { limit: 8000 }) as { text: string }
+  expect(revoked.text).not.toContain('Retained private source message')
+  expect(revoked.text).toContain('"redacted":true')
+})
 
 it('lets a reached worker page plugin context without adding provider-specific tools', async () => {
   const { trigger, sessionId } = await h.acceptedTicket(feishu('context', 'Read the original'))

@@ -26,6 +26,14 @@ def validate_config(config):
         raise ValueError('feishuBotConfigDir must be an existing absolute directory')
     if config.get('stateDir') and not Path(config['stateDir']).is_absolute():
         raise ValueError('stateDir must be an absolute path')
+    probes = config.get('preflightCommands', [])
+    if not isinstance(probes, list):
+        raise ValueError('preflightCommands must contain argument arrays')
+    for command in probes:
+        if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command):
+            raise ValueError('Each preflight command must be a nonempty string argument array')
+        if not Path(command[0]).is_absolute() or not Path(command[0]).is_file():
+            raise ValueError('Preflight executables must be existing absolute files')
     for key, default in {'profile': 'superagent', 'home': 'windows-home', 'logName': 'windows-server.log',
                          'receiptName': 'windows-launcher.json', 'stopMarker': 'owner-manually-stopped'}.items():
         value = config.get(key, default)
@@ -105,6 +113,25 @@ def launch_environment(config):
     return env
 
 
+def check_start_credential(config):
+    program = "import os; raise SystemExit(not os.environ.get('DEEPSEEK_API_KEY') or 'BWS_ACCESS_TOKEN' in os.environ)"
+    try:
+        subprocess.run([config['broker'], 'run', '--map', 'DEEPSEEK_API_KEY=DEEPSEEK_API_KEY', '--',
+                        config['python'], '-c', program], check=True, capture_output=True, timeout=45,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f'Credential consumer preflight failed ({type(error).__name__}); run enyq-secret doctor before activation') from None
+
+
+def check_start_dependencies(config):
+    for index, command in enumerate(config.get('preflightCommands', []), 1):
+        try:
+            subprocess.run(command, env=launch_environment(config), check=True, capture_output=True, timeout=45,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f'Dependency consumer {index} failed ({type(error).__name__}); inspect its private configuration') from None
+
+
 def activation_preflight(config):
     result = state(config)
     if not ready(result):
@@ -113,6 +140,8 @@ def activation_preflight(config):
         raise RuntimeError('Activation refused: the operator stop marker is present')
     if result.get('load', {}).get('running', 0) or (result.get('load', {}).get('queued', 0) and result.get('paused') is not True):
         raise RuntimeError('Activation refused: workers are running or the queue is not paused')
+    check_start_credential(config)
+    check_start_dependencies(config)
     account = (result['setup'].get('accounts') or {}).get('feishu')
     if not account:
         return
@@ -149,6 +178,7 @@ def spawn(config):
     root = Path(config['runtime'])
     if not os.environ.get('DEEPSEEK_API_KEY'):
         raise RuntimeError('Start through the secret broker')
+    check_start_dependencies(config)
     env = launch_environment(config)
     log_path = root / config.get('logName', 'windows-server.log')
     result = None

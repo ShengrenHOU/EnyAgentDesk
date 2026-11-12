@@ -7,9 +7,10 @@ import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { useStoredFlag } from './prefs.ts'
 import { QuickReply } from './quick-reply.tsx'
 import { ReplyForm } from './reply-form.tsx'
+import { replyDraftKey, useReplyDrafts, type ReplyDraftTarget } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, when, type T } from './text.ts'
-import { ExternalLink, MarkdownLite } from './widgets.tsx'
+import { CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite } from './widgets.tsx'
 
 interface Props {
   sessionId: string; t: T; send(text: string): Promise<void>; openTicket(id: string): void
@@ -18,6 +19,10 @@ type Group = 'person' | 'deferred' | 'working' | 'waiting' | 'delivered'
 /** A Ticket row in the desk; a deferred Question carries the time it returns to the immediate queue. */
 type DeskItem = TicketRow & { until?: string }
 
+/** A Ticket row's editor destination; its Question identity keeps a replacement from inheriting an earlier draft. */
+const draftTargetOf = (ticket: Pick<TicketRow, 'id' | 'attention'>): ReplyDraftTarget =>
+  ({ ticketId: ticket.id, attentionId: ticket.attention?.id })
+
 function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
@@ -25,6 +30,7 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const [group, setGroup] = useState<Group>()
   const [target, setTarget] = useState<TicketRow>()
   const [instruction, setInstruction] = useState('')
+  const drafts = useReplyDrafts()
   const [quick, setQuick] = useState<Record<string, { text: string; questionId: string }>>({})
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string>()
@@ -47,7 +53,23 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const choose = (ticket: TicketRow) => {
     // A pending reply owns this editor until it settles; reading other cards can still continue.
     if (busy) return
-    setTarget(ticket); setInstruction(''); setFailure(undefined); setReceipt(undefined); setOpen(true)
+    if (target) {
+      // The same destination keeps typed text. A Question replaced on the same Ticket stays apart until the owner
+      // explicitly moves the draft, so an answer written for the old Question never becomes the new one by accident.
+      const kept = replyDraftKey(draftTargetOf(target)) === replyDraftKey(draftTargetOf(ticket))
+        || (target.id === ticket.id && !!target.attention && !!ticket.attention && target.attention.id !== ticket.attention.id)
+      if (kept) { setFailure(undefined); setReceipt(undefined); setOpen(true); return }
+      drafts.write(draftTargetOf(target), instruction)
+    }
+    setTarget(ticket); setInstruction(drafts.read(draftTargetOf(ticket)) ?? ''); setFailure(undefined); setReceipt(undefined); setOpen(true)
+  }
+  /** Binds the kept draft to the Question that replaced the edited one, only after the owner asks for it. */
+  const adoptAttention = (ticket: TicketRow) => {
+    // An in-flight answer owns the editor until it settles, so its target cannot move to another Question meanwhile.
+    if (!target || busy) return
+    drafts.forget(draftTargetOf(target))
+    drafts.write(draftTargetOf(ticket), instruction)
+    setTarget(ticket)
   }
   const submit = async () => {
     if (!target || !instruction.trim() || busy) return
@@ -55,6 +77,7 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
     try {
       if (target.attention) await answerAttention(t, target.id, target.attention.id, instruction.trim())
       else await send(`对已有事项「${target.title}」（工单 ${target.id}）补充要求或修改成果。请继续这件事。\n\n${instruction.trim()}`)
+      drafts.forget(draftTargetOf(target))
       setReceipt(t(target.attention ? 'ticketAnswerSent' : 'ownerDeskSent')); setInstruction(''); setTarget(undefined)
       await reload()
     } catch (error) { setFailure(errorText(error)) }
@@ -64,9 +87,9 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
    * Non-empty text stays with the Question it was written for, so a replaced Question never receives it. A cleared line
    * starts over, so the next answer binds to the Question now shown.
    */
-  const draftAnswer = (ticketId: string, questionId: string, text: string) => setQuick(drafts => {
-    const remaining = { ...drafts }
-    if (text) remaining[ticketId] = { text, questionId: drafts[ticketId]?.questionId ?? questionId }
+  const draftAnswer = (ticketId: string, questionId: string, text: string) => setQuick(current => {
+    const remaining = { ...current }
+    if (text) remaining[ticketId] = { text, questionId: current[ticketId]?.questionId ?? questionId }
     else delete remaining[ticketId]
     return remaining
   })
@@ -79,8 +102,8 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
     try {
       await answerAttention(t, ticket.id, drafted.questionId, answer)
       // Release the binding with the answer, so a later Question on the same Ticket starts from its own identity.
-      setQuick(drafts => {
-        const remaining = { ...drafts }
+      setQuick(current => {
+        const remaining = { ...current }
         delete remaining[ticket.id]
         return remaining
       })
@@ -88,6 +111,11 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
     } catch (error) { setFailure(errorText(error)) }
     finally { setBusy(false) }
   }
+  /** The Ticket row the host now shows for this target, so a replaced Question can warn instead of binding silently. */
+  const liveTarget = target ? [...(data?.person ?? []), ...(data?.personDeferred ?? []), ...(data?.work?.working ?? []),
+    ...(data?.work?.waiting ?? []), ...(data?.work?.delivered ?? [])].find(ticket => ticket.id === target.id) : undefined
+  const replaced = target?.attention && liveTarget?.attention && liveTarget.attention.id !== target.attention.id
+    ? liveTarget : undefined
   return <aside className="dt-owner-desk" aria-label={t('ownerDeskTitle')}>
     <div className="dt-owner-bar">
       <button type="button" className="dt-owner-toggle" aria-expanded={open}
@@ -125,6 +153,12 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
             <div className="dt-owner-actions">
               <Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
                 onClick={() => choose(ticket)}>{t(ticket.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>
+              {ticket.stage === 'person' && ticket.actions.stop && (ticket.action === 'failed' || ticket.action === 'blocked')
+                && <CloseTicketButton ticket={ticket} onStopped={async () => {
+                  if (target?.id === ticket.id) { drafts.forget(draftTargetOf(target)); setTarget(undefined); setInstruction('') }
+                  setReceipt(t('closeTicketDone', { title: ticket.title }))
+                  await reload()
+                }} />}
               <Button size="sm" variant="ghost" onClick={() => openTicket(ticket.id)}>{t('ticketAllActions')}</Button>
               {ticket.deliverables?.map(item => {
                 const url = new URL(item.url, location.href)
@@ -143,9 +177,19 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
       </section>}
       {target && <section className="dt-owner-response">
         <div className="dt-owner-section-head"><strong>{t('workbenchUpdateTarget', { title: target.title })}</strong>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setTarget(undefined)}>{t('cancel')}</Button></div>
+          {busy ? <Button size="sm" variant="ghost" disabled>{t('cancel')}</Button>
+            : instruction.trim()
+              ? <ConfirmButton label={t('homeDiscardDraft')} title={t('homeDiscardDraftTitle')} message={t('homeDiscardDraftConfirm')}
+                onConfirm={async () => { drafts.forget(draftTargetOf(target)); setTarget(undefined); setInstruction('') }} />
+              : <Button size="sm" variant="ghost" onClick={() => { drafts.forget(draftTargetOf(target)); setTarget(undefined) }}>{t('cancel')}</Button>}</div>
         {target.attention && <MarkdownLite text={target.attention.question} />}
-        <ReplyForm autoFocus value={instruction} onChange={setInstruction} maxLength={16000} busy={busy} onSubmit={() => void submit()} />
+        {replaced && <div className="pw-actions">
+          <p className="dt-hint" role="status">{t('homeDraftAttentionChanged')}</p>
+          <Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
+            onClick={() => adoptAttention(replaced)}>{t('homeDraftUseNewQuestion')}</Button>
+        </div>}
+        <ReplyForm autoFocus value={instruction} onChange={value => { setInstruction(value); drafts.write(draftTargetOf(target), value) }}
+          maxLength={16000} busy={busy} onSubmit={() => void submit()} />
       </section>}
       {failure && <p role="alert" className="dt-error">{failure}</p>}
       {receipt && <p role="status" className="dt-hint">{receipt}</p>}

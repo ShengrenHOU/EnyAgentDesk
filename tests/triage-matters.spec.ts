@@ -310,16 +310,19 @@ it('rejects duplicate continue targets clearly before mutating a projection or r
 })
 it.each([63, 500])('validates a %i-receipt continuation chain in linear source reads and drops cache before next request', count => {
   const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-  for (let i = 0; i < count; i++) {
-    const id = `perf-${i}`, trigger: Trigger = { id, source: 'im', threads: [], at: now, actor: { source: 'im', id: 'sender' }, human: true, text: id, meta: {} }
-    store.triggers.save(trigger); const resolved = evidence(trigger)!, { configuration: _configuration, ...identity } = resolved
-    const ref = { kind: 'trigger', batchId: id, generation: 1, triggerId: id, version: 'v1' }
-    const refs = i ? [ref, { ...ref, batchId: `perf-${i - 1}`, triggerId: `perf-${i - 1}` }] : [ref]
-    store.set(`triage-production:${id}`, { id, generation: 1, state: 'completed', matterProvenance: Array.from({ length: i }, (_, j) => `perf-${j}`), inputs: [{ triggerId: id, identity, fingerprint: hash({ trigger, evidence: resolved }) }], contexts: {},
-      result: { matters: [{ id: 'local', title: 'Private goal', reason: 'Private basis', triggerIds: [id] }], proposals: i ? [{ evidence: refs }] : [] } })
-    store.set(`triage-matter-member:${id}`, { id, batchId: id, generation: 1, localMatterId: 'local', matterId: 'chain', originId: id })
-    store.set(`triage-matter-event:${id}`, { id, matterId: 'chain', revision: i + 1, memberId: id, evidence: refs })
-  }
+  // Fixture creation is outside the read-complexity assertions and needs only one disk commit.
+  store.atomic(() => {
+    for (let i = 0; i < count; i++) {
+      const id = `perf-${i}`, trigger: Trigger = { id, source: 'im', threads: [], at: now, actor: { source: 'im', id: 'sender' }, human: true, text: id, meta: {} }
+      store.triggers.save(trigger); const resolved = evidence(trigger)!, { configuration: _configuration, ...identity } = resolved
+      const ref = { kind: 'trigger', batchId: id, generation: 1, triggerId: id, version: 'v1' }
+      const refs = i ? [ref, { ...ref, batchId: `perf-${i - 1}`, triggerId: `perf-${i - 1}` }] : [ref]
+      store.set(`triage-production:${id}`, { id, generation: 1, state: 'completed', matterProvenance: Array.from({ length: i }, (_, j) => `perf-${j}`), inputs: [{ triggerId: id, identity, fingerprint: hash({ trigger, evidence: resolved }) }], contexts: {},
+        result: { matters: [{ id: 'local', title: 'Private goal', reason: 'Private basis', triggerIds: [id] }], proposals: i ? [{ evidence: refs }] : [] } })
+      store.set(`triage-matter-member:${id}`, { id, batchId: id, generation: 1, localMatterId: 'local', matterId: 'chain', originId: id })
+      store.set(`triage-matter-event:${id}`, { id, matterId: 'chain', revision: i + 1, memberId: id, evidence: refs })
+    }
+  })
   store.set('triage-matter:chain', { id: 'chain', scope: 'scope', revision: count, title: 'Private goal', reason: 'Private basis', assessment: 'suggested_action', anchorBatchId: 'perf-0', observedRevision: 0, createdAt: now, updatedAt: now })
   const resolve = vi.fn(evidence), projection = new TriageMatters(store, resolve), get = vi.spyOn(store, 'get')
   expect(projection.overview().groups[0]!.redacted).toBe(false)
@@ -332,7 +335,7 @@ it.each([63, 500])('validates a %i-receipt continuation chain in linear source r
   get.mockRestore(); source = false
   const revoked = projection.overview()
   expect(revoked.groups[0]!.redacted).toBe(true); expect(JSON.stringify(revoked)).not.toContain('Private goal')
-})
+}, 60_000)
 it('retains host-owned provenance for read summaries even when the model submits new without linking', async () => {
   const a = await next('a'); commit(a)
   const b = await next('b', 'Possibly derived from a candidate'); commit(b)

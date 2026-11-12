@@ -34,6 +34,19 @@ async function fixture(completeImmediately = false, readOnly = false, beforeThre
   return { host, connections, codex }
 }
 describe('Codex executor integration with upstream Engine and Effects', () => {
+  it('retires delivery and stage effects for an ended paused Ticket without reconnecting', async () => {
+    const { host: h, connections } = await fixture()
+    const { ticket } = await h.acceptedLegacyTicket(feishu('1', 'Read the document'))
+    h.runtime.store.tickets.save({ ...h.runtime.store.tickets.get(ticket.id)!, paused: true })
+    h.runtime.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id })
+    h.runtime.effects.enqueue('codexStage', ticket.id, { ticketId: ticket.id, assignmentId: ticket.assignments.at(-1)!.id, turnId: 'turn-1' })
+    h.runtime.engine.stopTicket(ticket.id, 'Owner stopped the task')
+    await h.runtime.idle()
+    expect(h.runtime.effects.pending('delivery', ticket.id)).toBe(false)
+    expect(h.runtime.effects.pending('codexStage', ticket.id)).toBe(false)
+    expect(connections).toHaveLength(1)
+  })
+
   it('checks execution ownership before connecting an external executor', async () => {
     const { host: h, connections } = await fixture()
     const guard = vi.spyOn(h.runtime.sources, 'guardExecution').mockRejectedValue(new Error('External executor owns this object'))

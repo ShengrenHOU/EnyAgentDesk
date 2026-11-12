@@ -25,7 +25,7 @@ type Delivery = 'injected' | 'pending'
 
 export interface Api {
   'GET state': { response: StateView }
-  'GET production-triage': { query?: { before?: number; limit?: number }; response: ReturnType<typeof productionOverview> }
+  'GET production-triage': { query?: { before?: number; limit?: number; unresolved?: boolean }; response: ReturnType<typeof productionOverview> }
   'GET triage-matters': { query?: { before?: number; limit?: number; active?: boolean }; response: ReturnType<TriageMatters['overview']> }
   'GET overview': { response: OverviewView }
   'GET followups': { response: ReturnType<Followups['pending']> }
@@ -55,7 +55,7 @@ export interface Api {
   'DELETE tickets/:id/followup': { query?: { request_id?: string; all?: 'true' }; response: ReturnType<Followups['cancel']> }
   'POST tickets/:id/retry': { response: { retried: true } }
   'POST tickets/:id/continue': { body: { instruction: string }; response: { continued: true; ticketId: string; executor: 'dsh' } }
-  'POST tickets/:id/stop': { response: { stopped: true } }
+  'POST tickets/:id/stop': { body: { reason?: string }; response: { stopped: true } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }

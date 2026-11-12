@@ -116,6 +116,25 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
   return { data: state.data, error: state.error, updatedAt: state.updatedAt, reload }
 }
 
+/** Selected history pages have their own refresh bound; usePoll backs this off while the document is hidden. */
+export const HISTORY_PAGE_POLL_MS = 30_000
+/**
+ * Poll one keyset page for the selected cursor. The result carries its cursor, so switching pages cannot show a late
+ * response for another one, and a failed refresh hides the page until a later poll or `reload` verifies it again.
+ */
+export function useHistoryPage<T>(before: number | undefined, load: ((before: number) => Promise<T>) | undefined,
+  intervalMs = HISTORY_PAGE_POLL_MS) {
+  type Result = { before: number; page: T } | { before: number; failure: string }
+  const { data, reload } = usePoll<Result | undefined>(async () => {
+    if (before === undefined || !load) return undefined
+    try { return { before, page: await load(before) } }
+    catch (failure) { return { before, failure: String(failure) } }
+  }, [before], intervalMs)
+  const result = data?.before === before ? data : undefined
+  return { page: result && 'page' in result ? result.page : undefined,
+    error: result && 'failure' in result ? result.failure : '', reload }
+}
+
 export const DECISION_FILTERS = ['work', 'stop', 'ignore', 'unavailable', 'all'] as const
 export type DecisionFilter = typeof DECISION_FILTERS[number]
 export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 'accept,reopen', stop: 'stop', ignore: 'ignore',

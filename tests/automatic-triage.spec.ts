@@ -46,13 +46,18 @@ beforeEach(() => {
 afterEach(async () => { await effects.drain(); store.close(); rmSync(directory, { recursive: true, force: true }) })
 
 it('captures 500 fragments once, consumes 63 bounded judgments, and reserves explicit intake', async () => {
-  for (let n = 0; n < 500; n++) { automatic.receive(make(`m${n}`)); automatic.maintain(); engine.evaluateDue() }
+  // Same receive/maintain/evaluate sequence and assertions; one outer transaction avoids 500 synchronous commits on the slower runner.
+  store.atomic(() => { for (let n = 0; n < 500; n++) { automatic.receive(make(`m${n}`)); automatic.maintain(); engine.evaluateDue() } })
   expect(rows()).toHaveLength(1); expect(request).not.toHaveBeenCalled()
   automatic.receive(make('urgent', 'chat', { addressed: 'mention' })); engine.evaluateDue()
   expect(request).toHaveBeenCalledTimes(1); expect(engine.candidate('urgent')!.triggers.map(item => item.id)).toEqual(['urgent'])
   expect(automatic.receive(make('m0'))).toBe('duplicate')
   advance()
-  for (let n = 0; n < 65; n++) { automatic.maintain(); await drain(); for (const batch of rows().filter(row => row.state === 'awaiting')) submit(batch) }
+  for (let n = 0; n < 65; n++) {
+    automatic.maintain(); await drain()
+    // Batch each round's context reads and submission, keeping the same reads, assertions and timeouts.
+    store.atomic(() => { for (const batch of rows().filter(row => row.state === 'awaiting')) submit(batch) })
+  }
   expect(rows()).toHaveLength(63); expect(deliver).toHaveBeenCalledTimes(63)
   const ids = rows().flatMap(row => row.inputs.map(input => input.triggerId))
   expect(ids).toHaveLength(500); expect(new Set(ids).size).toBe(500)

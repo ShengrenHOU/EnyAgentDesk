@@ -7,6 +7,7 @@ import { registerHttp, sourceHead } from '../src/app/http.ts'
 import { attach, close, open } from '../src/app/lines.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { Store } from '../src/app/store.ts'
+import { SourceRegistry } from '../src/sources/registry.ts'
 import type { Ticket } from '../src/core/index.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
@@ -92,6 +93,22 @@ it('answers each kind of failure with its own status', async () => {
   expect(await call('POST', 'executor/pause', 'not json')).toEqual({ status: 400, body: { error: 'The request body is not JSON' } })
 })
 
+it('closes a Ticket with an optional panel reason and refuses an overlong one', async () => {
+  const stops: { id: string; reason?: string }[] = []
+  const call = serve({
+    store: { tickets: { get: (id: string) => id === 't1' ? { id } : undefined } },
+    engine: { stopTicket: (id: string, reason?: string) => { stops.push({ id, reason }) } },
+  })
+  expect(await call('POST', 'tickets/t1/stop', { reason: '  已过期  ' })).toEqual({ status: 200, body: { stopped: true } })
+  // The pre-existing bodyless callers keep working, and `{}` still closes without a reason.
+  expect(await call('POST', 'tickets/t1/stop')).toEqual({ status: 200, body: { stopped: true } })
+  expect(await call('POST', 'tickets/t1/stop', {})).toEqual({ status: 200, body: { stopped: true } })
+  expect(await call('POST', 'tickets/t1/stop', { reason: 'x'.repeat(501) })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'tickets/t1/stop', 'not json')).toEqual({ status: 400, body: { error: 'The request body is not JSON' } })
+  // A blank optional reason is recorded as absent rather than as an empty reason line.
+  expect(stops).toEqual([{ id: 't1', reason: '已过期' }, { id: 't1', reason: undefined }, { id: 't1', reason: undefined }])
+})
+
 it('decodes path parameters and parses each route\'s query', async () => {
   const seen: unknown[] = []
   const call = serve({
@@ -135,6 +152,24 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+it('serves bounded Line results from the panel search route', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'search-lines-http-'))
+  const store = new Store(join(directory, 'state.sqlite'))
+  try {
+    const goal = open(store, { title: '跨阶段目标 Alpha', evidence: '没有成员工单的目标' }).line
+    const sources = new SourceRegistry(() => SettingsSchema.parse({}))
+    const call = serve({ store, sources, sourceLinks: { entries: () => new Map<string, string>().entries() },
+      links: () => () => ({ url: '', label: { zh: '', en: '' } }) })
+    expect(await call('GET', `search?q=${encodeURIComponent('跨阶段目标 Alpha')}`)).toMatchObject({ status: 200,
+      body: { lines: [{ id: goal.id, title: '跨阶段目标 Alpha', status: 'open', ticketCount: 0, openCount: 0 }],
+        tickets: [], items: [], threads: [] } })
+    expect(await call('GET', 'search?q=')).toMatchObject({ status: 200, body: { lines: [], tickets: [], items: [], threads: [] } })
+  } finally {
+    store.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 it('serves the work lines and one line detail', async () => {
