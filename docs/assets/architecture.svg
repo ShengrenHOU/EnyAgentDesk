@@ -1,7 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 980" role="img" aria-labelledby="loop-title loop-desc" id="workbench-architecture-loop-root">
-<title id="loop-title">个人智能体工作系统协同架构</title><desc id="loop-desc">工作信息由左侧接入，中央协同中枢负责主控判断、工单推进、持续跟进和持久记录，右侧任务执行智能体完成工作并返回结果。上方表示自动推进循环，下方以蓝色突出用户、主对话和个人工作台，支持交办、决定与验收。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 980" role="img" aria-labelledby="loop-title loop-desc" id="readme-style-root">
+<title id="loop-title">个人 Superagent 工作中台架构</title><desc id="loop-desc">工作信息由左侧接入，中央协同中枢负责主控判断、工单推进、持续跟进和持久记录，右侧任务执行智能体完成工作并返回结果。上方表示自动推进循环，下方以蓝色突出用户、主对话和个人工作台，支持交办、决定与验收。</desc>
 <defs>
+      <style>#readme-style-root { font-family: "Microsoft YaHei",sans-serif; color: #12263D; }
+      #readme-style-root .diagram-container { width:100%;overflow-x:auto }
+      #readme-style-root { color: #12263D; font-family: "Segoe UI","Microsoft YaHei",sans-serif; }
+      #readme-style-root .canvas { max-width:1200px;margin:auto;overflow-x:auto }
+      #readme-style-root text { font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif }
+      #readme-style-root .title { font-size:32px;font-weight:700;fill:#12263D }
+      #readme-style-root .head { font-size:24px;font-weight:700;fill:#12263D }
+      #readme-style-root .body { font-size:18px;fill:#344C64 }
+      #readme-style-root .small { font-size:16px;fill:#536B83 }
+      #readme-style-root .white { fill:#FFFFFF }
+      #readme-style-root .light { fill:#DFE9FA }
+      #readme-style-root .label { font-size:16px;font-weight:600;fill:#355A8A }
+      #readme-style-root .edge { fill:none;stroke:#547399;stroke-width:2.4;marker-end:url(#readme-style-workbench-architecture-loop-arrow) }
+      @media print {
+#readme-style-root .canvas { overflow:visible }
+}</style>
       <style>#workbench-architecture-loop-root { color: #12263D; font-family: "Segoe UI","Microsoft YaHei",sans-serif; }
       #workbench-architecture-loop-root .canvas { max-width:1200px;margin:auto;overflow-x:auto }
       #workbench-architecture-loop-root text { font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif }
@@ -12,25 +28,29 @@
       #workbench-architecture-loop-root .white { fill:#FFFFFF }
       #workbench-architecture-loop-root .light { fill:#DFE9FA }
       #workbench-architecture-loop-root .label { font-size:16px;font-weight:600;fill:#355A8A }
-      #workbench-architecture-loop-root .edge { fill:none;stroke:#547399;stroke-width:2.4;marker-end:url(#workbench-architecture-loop-arrow) }
+      #workbench-architecture-loop-root .edge { fill:none;stroke:#547399;stroke-width:2.4;marker-end:url(#readme-style-workbench-architecture-loop-arrow) }
       @media print {
 #workbench-architecture-loop-root .canvas { overflow:visible }
-}</style><marker id="workbench-architecture-loop-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#547399"/></marker><marker id="workbench-architecture-loop-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#0033A0"/></marker><marker id="workbench-architecture-loop-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#338B83"/></marker></defs>
+}</style><marker id="readme-style-workbench-architecture-loop-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#547399"/></marker><marker id="readme-style-workbench-architecture-loop-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#0033A0"/></marker><marker id="readme-style-workbench-architecture-loop-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#338B83"/></marker></defs>
 <rect width="1200" height="980" fill="#F7F9FC"/>
-<text x="40" y="52" class="title">个人智能体工作系统</text><text x="40" y="84" class="body">信息接入 · 协同推进 · 任务执行 · 人机协作</text>
+<text x="40" y="52" class="title">个人 Superagent 工作中台</text><text x="40" y="84" class="body">一个入口交办 · 多个事项并行 · 持续跟进 · 必要时找你</text>
 
+<text x="1160" y="52" class="small" text-anchor="end">0.6.1 · 当前架构</text>
+<rect x="40" y="108" width="512" height="68" rx="12" fill="#EDF3FC"/>
+<text x="56" y="132" class="label">你的关注领域 · 可调整</text>
+<text x="56" y="160" class="small">融资 · 客户 · 平台 · MLE · Quant · 内容 · 中台 · 工程</text>
 <!-- Automatic return loop and directed relationships. -->
-<path d="M 1060 200 V 148 Q 1060 140 1052 140 H 608 Q 600 140 600 148 V 200" fill="none" stroke="#338B83" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#workbench-architecture-loop-arrow-link)"/>
+<path d="M 1060 200 V 148 Q 1060 140 1052 140 H 608 Q 600 140 600 148 V 200" fill="none" stroke="#338B83" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#readme-style-workbench-architecture-loop-arrow-link)"/>
 <rect x="648" y="100" width="388" height="30" rx="15" fill="#E8F6F5"/>
 <text x="842" y="121" text-anchor="middle" font-size="18" font-weight="600" fill="#236962">自动推进：执行 · 等待 · 复查 · 继续</text>
 
 <path class="edge" d="M 260 400 H 340"/>
 <path class="edge" d="M 860 320 H 940"/>
 <path class="edge" d="M 940 480 H 860"/>
-<path d="M 700 600 V 720" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#workbench-architecture-loop-arrow-accent)"/>
-<path d="M 500 720 V 648 Q 500 640 492 640 H 408 Q 400 640 400 632 V 600" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#workbench-architecture-loop-arrow-accent)"/>
-<path d="M 320 768 H 440" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#workbench-architecture-loop-arrow-accent)"/>
-<path d="M 440 824 H 320" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#workbench-architecture-loop-arrow-accent)"/>
+<path d="M 700 600 V 720" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#readme-style-workbench-architecture-loop-arrow-accent)"/>
+<path d="M 500 720 V 648 Q 500 640 492 640 H 408 Q 400 640 400 632 V 600" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#readme-style-workbench-architecture-loop-arrow-accent)"/>
+<path d="M 320 768 H 440" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#readme-style-workbench-architecture-loop-arrow-accent)"/>
+<path d="M 440 824 H 320" fill="none" stroke="#0033A0" stroke-width="2.4" marker-end="url(#readme-style-workbench-architecture-loop-arrow-accent)"/>
 
 <rect x="268" y="362" width="64" height="28" rx="5" fill="#F7F9FC"/><text x="300" y="382" text-anchor="middle" class="label">① 事件</text>
 <rect x="868" y="282" width="64" height="28" rx="5" fill="#F7F9FC"/><text x="900" y="302" text-anchor="middle" class="label">② 派工</text>
@@ -41,37 +61,37 @@
 <rect x="336" y="786" width="88" height="28" rx="5" fill="#F7F9FC"/><text x="380" y="806" text-anchor="middle" class="label">查看反馈</text>
 
 <rect x="40" y="200" width="220" height="400" rx="18" fill="#EAF5ED" stroke="#33805A" stroke-width="2" stroke-dasharray="7 5"/>
-<text x="64" y="240" class="head" fill="#246240">信息接入</text><text x="64" y="270" class="small">持续获取工作变化</text>
+<text x="64" y="240" class="head" fill="#246240">信息接入</text><text x="64" y="270" class="small">独立保存读取进度</text>
 <rect x="64" y="300" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="150" y="333" text-anchor="middle" class="body">GitHub</text>
-<rect x="64" y="368" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="150" y="401" text-anchor="middle" class="body">飞书</text>
-<rect x="64" y="436" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="150" y="469" text-anchor="middle" class="body">微信</text>
-<text x="64" y="534" class="body">采集 · 去重 · 关联</text><text x="64" y="566" class="small">独立保存读取进度</text>
+<rect x="64" y="368" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="150" y="401" text-anchor="middle" class="body">飞书（多类资源）</text>
+<rect x="64" y="436" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="150" y="469" text-anchor="middle" class="body">微信（只读）</text>
+<text x="64" y="534" class="body">采集 · 校验 · 留证</text><text x="64" y="566" class="small">飞书统一账户与连接</text>
 
 <rect x="340" y="200" width="520" height="400" rx="20" fill="#172F50" stroke="#5575A3" stroke-width="2"/>
-<text x="368" y="240" class="head white">协同中枢</text><text x="832" y="240" text-anchor="end" class="small light">判断与执行有序衔接</text>
+<text x="368" y="240" class="head white">Superagent 协同中枢</text><text x="832" y="240" text-anchor="end" class="small light">判断 · 派工 · 持续跟进</text>
 <rect x="364" y="272" width="472" height="64" rx="10" fill="#304567"/>
 <text x="384" y="299" font-size="20" font-weight="600" fill="#E1D6FF">主控判断</text><text x="384" y="323" class="small light">理解证据，识别目标，关联已有事项或建立新工单</text>
 <rect x="364" y="352" width="472" height="64" rx="10" fill="#304567"/>
-<text x="384" y="379" font-size="20" font-weight="600" fill="#FFE0AD">工单推进</text><text x="384" y="403" class="small light">保存目标与授权，组织执行轮次、必要决定和交付</text>
+<text x="384" y="379" font-size="20" font-weight="600" fill="#FFE0AD">事项 / 工单推进</text><text x="384" y="403" class="small light">保存目标与授权，组织执行、必要决定和交付</text>
 <rect x="364" y="432" width="472" height="64" rx="10" fill="#304567"/>
-<text x="384" y="459" font-size="20" font-weight="600" fill="#B9EEE2">持续跟进</text><text x="384" y="483" class="small light">根据新反馈或到期检查，继续同一事项</text>
+<text x="384" y="459" font-size="20" font-weight="600" fill="#B9EEE2">持续跟进</text><text x="384" y="483" class="small light">根据反馈或到期检查续接；完成后结束</text>
 <rect x="364" y="512" width="472" height="64" rx="10" fill="#304567"/>
-<text x="384" y="539" font-size="20" font-weight="600" fill="#DCE8F9">持久记录</text><text x="384" y="563" class="small light">保留会话、事项状态和回执，支持追溯与恢复</text>
+<text x="384" y="539" font-size="20" font-weight="600" fill="#DCE8F9">持久记录</text><text x="384" y="563" class="small light">保留工作上下文、事项状态和回执，支持追溯与恢复</text>
 
 <rect x="940" y="200" width="220" height="400" rx="18" fill="#E8F6F5" stroke="#338B83" stroke-width="2" stroke-dasharray="7 5"/>
-<text x="964" y="240" class="head" fill="#236962">任务执行</text><text x="964" y="270" class="small">智能体完成具体工作</text>
+<text x="964" y="240" class="head" fill="#236962">任务执行</text><text x="964" y="270" class="small">当前采用 DSH 执行会话</text>
 <rect x="964" y="300" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="1050" y="333" text-anchor="middle" class="body">多任务并行</text>
 <rect x="964" y="368" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="1050" y="401" text-anchor="middle" class="body">上下文续接</text>
 <rect x="964" y="436" width="172" height="52" rx="10" fill="#FFFFFF"/><text x="1050" y="469" text-anchor="middle" class="body">专业方法与工具</text>
 <text x="964" y="534" class="body">执行 · 核对 · 汇报</text><text x="964" y="566" class="small">按事项范围调用能力</text>
 
 <rect x="80" y="720" width="240" height="136" rx="20" fill="#0033A0"/>
-<text x="200" y="768" text-anchor="middle" font-size="30" font-weight="700" fill="#FFFFFF">用户</text><text x="200" y="806" text-anchor="middle" class="body white">明确目标 · 作出决定</text><text x="200" y="834" text-anchor="middle" class="body white">查看进展 · 验收成果</text>
+<text x="200" y="768" text-anchor="middle" font-size="30" font-weight="700" fill="#FFFFFF">你（CEO）</text><text x="200" y="806" text-anchor="middle" class="body white">明确目标 · 作出决定</text><text x="200" y="834" text-anchor="middle" class="body white">查看进展 · 验收成果</text>
 <rect x="440" y="720" width="720" height="136" rx="18" fill="#EDF3FC" stroke="#0033A0" stroke-width="2"/>
 <text x="464" y="754" class="head" fill="#0033A0">统一工作入口</text>
 <rect x="464" y="772" width="304" height="60" rx="10" fill="#FFFFFF"/><text x="488" y="798" font-size="20" font-weight="600" fill="#0033A0">主对话</text><text x="488" y="822" class="small">讨论、交办与答复</text>
 <rect x="788" y="772" width="348" height="60" rx="10" fill="#FFFFFF"/><text x="812" y="798" font-size="20" font-weight="600" fill="#0033A0">个人工作台</text><text x="812" y="822" class="small">重点、工单、成果与来源状态</text>
 
 <rect x="40" y="900" width="1120" height="56" rx="12" fill="#E8EEF5"/>
-<text x="64" y="936" font-size="20" font-weight="600" fill="#435971">运行底座</text><text x="208" y="935" class="body">模型接入　·　持久会话　·　插件与工具　·　进程守护与恢复</text>
+<text x="64" y="936" font-size="20" font-weight="600" fill="#435971">运行底座</text><text x="208" y="935" class="body">模型接入　·　持久会话　·　Skills / MCP / 工具　·　进程守护与恢复</text>
 </svg>
