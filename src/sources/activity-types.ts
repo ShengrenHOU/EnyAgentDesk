@@ -40,6 +40,8 @@ export interface ActivityScan {
   objects: number
   complete: boolean
   contentPartial?: number
+  /** Messages this reader left to another Source so one conversation has one collector. */
+  skipped?: number
   detail?: string
 }
 /** Readers confirm external batches only after emit has durably handed every version to the monitor ticket. */

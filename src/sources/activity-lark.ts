@@ -1,11 +1,12 @@
 /** User-identity Lark activity reads; the existing Source controller owns scan scheduling and watermarks. */
 import { z } from 'zod'
-import type { ImContextRequest, ImContextPage, ImContextMessage } from './im-context.ts'
+import type { ImContextRequest, ImContextPage, ImContextMessage, ImReadPage, ImReadRequest } from './im-context.ts'
 import { key } from '../core/index.ts'
-import { Commands, CliError } from '../infra/commands.ts'
+import { Commands } from '../infra/commands.ts'
 import { family } from '../kv.ts'
-import { historyText } from './feishu-trigger.ts'
+import { feishuTriggerId, historyText } from './feishu-trigger.ts'
 import type { ContextMessage, ContextPart, ContextPartName } from './kind.ts'
+import { larkUserReader as userReader, nextPage } from './lark-user.ts'
 import type { ActivityEvent, ActivityRange, ActivityReaderContext, ActivityScan, LarkActivityBinding } from './activity-types.ts'
 
 const id = z.string().min(1)
@@ -17,6 +18,9 @@ const RawMessage = z.object({ message_id: id, chat_id: id, msg_type: id, create_
   message_app_link: z.url().optional() }).refine(message => message.deleted || message.body, 'Source message has no readable body')
 type RawMessage = z.infer<typeof RawMessage>
 const MessageBatch = z.object({ items: z.array(RawMessage) })
+const RawMessagePage = z.object({ items: z.array(RawMessage), has_more: z.boolean(), page_token: z.string().optional() })
+const Chat = z.object({ chat_id: id, name: z.string().optional(), chat_mode: z.string().optional() }).passthrough()
+const ChatPage = z.object({ chats: z.array(Chat).nullish(), has_more: z.boolean().optional(), page_token: z.string().optional() })
 const SearchMessages = z.object({ messages: z.array(z.object({ message_id: id, chat_id: id,
   chat_name: z.string().optional(), message_app_link: z.url().optional() })), has_more: z.boolean(), page_token: z.string().optional() })
 const SearchDocuments = z.object({ results: z.array(z.object({ entity_type: z.string(), result_meta: z.object({
@@ -27,47 +31,15 @@ const DocMetadata = z.object({ document: z.object({ document_id: id, revision_id
 const DocContent = z.object({ document: z.object({ document_id: id, revision_id: z.number().int().nonnegative(), content: z.string(),
   tips: z.string().optional() }) })
 const documentVersions = family<{ sourceVersion: string }, [consumer: string, account: string, object: string]>('activity-lark-doc-version:')
+const DocumentMetas = z.object({ metas: z.array(z.object({ doc_token: id, doc_type: id, title: z.string(), latest_modify_time: epoch, url: z.url() })),
+  failed_list: z.array(z.object({ token: id, code: z.number() })).default([]) })
 const MAX_EVENT_TEXT = 20_000, CONTEXT_CHARS = 12_000
-const json = (value: string): unknown => {
-  try { return JSON.parse(value) }
-  catch { throw new Error('Lark activity returned invalid JSON') }
-}
-/** Bind reads to the configured user without making the bot CLI or worker environment user-capable. */
-async function userReader(commands: Commands, binding: LarkActivityBinding, active = () => {}) {
-  const scoped = commands.withEnvironment({ LARKSUITE_CLI_CONFIG_DIR: binding.configDir })
-  // Owner reads resolve their own CLI so they keep working when the Feishu bot Source is off.
-  const cli = binding.cli || scoped.deployment.feishu?.cli
-  if (!cli) throw new Error('Lark activity requires the configured native lark-cli executable')
-  active()
-  // The CLI refreshes a needs_refresh token on its next user API call.
-  const auth = z.object({ identities: z.object({ user: z.object({ status: z.enum(['ready', 'needs_refresh']), openId: id }) }) })
-    .parse(json(await scoped.run(cli, ['auth', 'status', '--json'])))
-  active()
-  if (auth.identities.user.openId !== binding.expectedUserId) throw new Error('Lark activity user does not match the configured account')
-  return async <T>(schema: z.ZodType<T>, args: string[]): Promise<T> => {
-    active()
-    const envelope = z.object({ ok: z.boolean(), identity: z.string().optional(), data: z.unknown().optional(),
-      error: z.object({ code: z.number().optional(), type: z.string().optional(), subtype: z.string().optional() }).optional() })
-      .parse(json(await scoped.run(cli, [...args, '--as', 'user', '--format', 'json'])))
-    active()
-    if (!envelope.ok) throw new CliError(`Lark activity read failed: ${envelope.error?.subtype ?? envelope.error?.type ?? 'unknown'}`, envelope.error?.code)
-    if (envelope.identity !== 'user') throw new Error('Lark activity returned an unexpected identity')
-    return schema.parse(envelope.data)
-  }
-}
 type UserRead = Awaited<ReturnType<typeof userReader>>
 function active(ctx: ActivityReaderContext) { ctx.signal.throwIfAborted(); ctx.assertActive() }
 function rangeTimes(range: ActivityRange): [number, number] {
   const start = Date.parse(range.start), end = Date.parse(range.end)
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw new Error('Activity scan needs a valid fixed time range')
   return [start, end]
-}
-function nextPage(result: { has_more: boolean; page_token?: string }, seen: Set<string>): string | undefined {
-  if (!result.has_more) return undefined
-  const token = result.page_token
-  if (!token || seen.has(token)) throw new Error('Lark activity pagination did not advance; coverage is incomplete')
-  seen.add(token)
-  return token
 }
 const messageTime = (message: RawMessage) => new Date(Number(message.update_time ?? message.create_time)).toISOString()
 const originalText = (message: RawMessage) => message.deleted ? '[Message deleted]' : historyText(message)
@@ -82,6 +54,35 @@ function messageContext(items: RawMessage[], status = 'available', next?: string
   return { messages: views.map(message => ({ ...message, text: message.text.slice(0, CONTEXT_CHARS) })), ...next ? { next } : {}, status,
     body: { status, ...partial ? { contentPartial: true } : {} } }
 }
+/** Normalized native message evidence shared by anchored context and anchorless window reads. */
+function imView(message: RawMessage, gaps: string[]): ImContextMessage {
+  const full = originalText(message)
+  const partial = !message.deleted && (!['text', 'system'].includes(message.msg_type) || full.length > MAX_EVENT_TEXT)
+  if (partial && !gaps.includes('content_partial')) gaps.push('content_partial')
+  if (!message.deleted && !['text', 'system'].includes(message.msg_type) && !gaps.includes('attachments_not_read')) gaps.push('attachments_not_read')
+  return { id: message.message_id, version: key(message.update_time ?? message.create_time, message.msg_type, String(!!message.deleted), full),
+    versionBasis: 'source_digest', nativeVersion: message.update_time ?? message.create_time,
+    text: full.slice(0, MAX_EVENT_TEXT), sender: message.sender.id, senderType: message.sender.sender_type,
+    ...message.sender.id_type ? { senderIdType: message.sender.id_type } : {},
+    createdAt: new Date(Number(message.create_time)).toISOString(), ...message.update_time ? { updatedAt: new Date(Number(message.update_time)).toISOString() } : {},
+    ...message.deleted ? { deleted: true } : {}, ...partial ? { partial: true } : {},
+    ...message.parent_id ? { parent: message.parent_id } : {}, ...message.root_id ? { root: message.root_id } : {} }
+}
+/** Intake filter for bot alert cards in one configured chat; an empty severity list disables it. */
+export interface LarkMessageFilter { alertChats: readonly string[]; severities: readonly string[] }
+/** A bot card in an alert chat is evidence only when its title names a retained severity; progress states carry no matter. */
+function progressCardNoise(message: RawMessage, filter: LarkMessageFilter): boolean {
+  if (!filter.alertChats.includes(message.chat_id) || !filter.severities.length) return false
+  if (message.msg_type !== 'interactive' || message.sender.sender_type === 'user' || message.deleted) return false
+  let content: unknown
+  try { content = JSON.parse(originalText(message)) } catch { return false }
+  if (!content || typeof content !== 'object' || !('title' in content) || typeof content.title !== 'string') return false
+  const title = content.title.trim()
+  const labels = [...title.matchAll(/\[([^\]]+)\]/g)].map(match => match[1]!.trim())
+  if (!labels.length) return false
+  const status = title.replace(/^(?:\[[^\]]+\]\s*)+/, '').trim()
+  return ![...labels, status].some(label => filter.severities.includes(label))
+}
 async function messages(read: UserRead, ids: string[]): Promise<RawMessage[]> {
   const result = await read(MessageBatch, ['api', 'GET', '/open-apis/im/v1/messages/mget', '--params', JSON.stringify({ message_ids: ids })])
   if (result.items.some(message => !ids.includes(message.message_id)) || ids.some(id => !result.items.some(message => message.message_id === id))) {
@@ -91,13 +92,14 @@ async function messages(read: UserRead, ids: string[]): Promise<RawMessage[]> {
 }
 
 /** Discover all indexed messages in a fixed window, using raw milliseconds and body hashes for durable versions. */
-export async function scanLarkMessages(ctx: ActivityReaderContext, binding: LarkActivityBinding, range: ActivityRange): Promise<ActivityScan> {
+export async function scanLarkMessages(ctx: ActivityReaderContext, binding: LarkActivityBinding, range: ActivityRange,
+  filter?: LarkMessageFilter): Promise<ActivityScan> {
   const [start, end] = rangeTimes(range)
   // Lark search rejects fractional epoch seconds; widen boundaries so subsecond events are not lost.
   const searchTime = (value: number) => new Date(value * 1000).toISOString().replace('.000Z', '+00:00')
   const read = await userReader(ctx.source.commands.withSignal(ctx.signal), binding, () => active(ctx))
   const pages = new Set<string>(), objects = new Set<string>(), seen = new Set<string>()
-  let cursor: string | undefined, records = 0, contentPartial = 0
+  let cursor: string | undefined, records = 0, contentPartial = 0, skipped = 0
   do {
     const page = await read(SearchMessages, ['im', '+messages-search', '--query', '', '--start', searchTime(Math.floor(start / 1000)), '--end', searchTime(Math.ceil(end / 1000)),
       '--page-size', '50', '--no-reactions', ...cursor ? ['--page-token', cursor] : []])
@@ -108,6 +110,15 @@ export async function scanLarkMessages(ctx: ActivityReaderContext, binding: Lark
         if (message.chat_id !== discovered.chat_id) throw new Error('Lark message does not belong to its discovered conversation')
         const bot = ctx.source.commands.deployment.feishu
         if (bot && (message.sender.id === bot.botId || message.sender.id === bot.appId)) continue
+        if (filter && progressCardNoise(message, filter)) continue
+        // The bot collector stores one ID per message and cannot replace an edit or a deletion; keep that evidence here.
+        // Intake also stores filtered records, so only a successfully admitted Trigger owns the unchanged message.
+        const botTrigger = feishuTriggerId(message.message_id)
+        const disposition = ctx.source.triggers.get(botTrigger) ? ctx.source.triggers.disposition(botTrigger) : undefined
+        if (disposition && !disposition.filtered) {
+          const changed = message.deleted || (message.update_time !== undefined && message.update_time !== message.create_time)
+          if (!changed) { skipped++; continue }
+        }
         const full = originalText(message), version = key(message.update_time ?? message.create_time, message.msg_type, String(!!message.deleted), full)
         const eventId = key(message.message_id, version)
         if (seen.has(eventId)) continue
@@ -130,24 +141,37 @@ export async function scanLarkMessages(ctx: ActivityReaderContext, binding: Lark
     cursor = nextPage(page, pages)
   } while (cursor)
   active(ctx)
-  return { records, objects: objects.size, complete: true, ...contentPartial ? { contentPartial } : {} }
+  return { records, objects: objects.size, complete: true, ...contentPartial ? { contentPartial } : {},
+    ...skipped ? { skipped } : {} }
 }
 
 /** Discover recently modified indexed objects, independently of who edited or opened them. */
-export async function scanLarkDocuments(ctx: ActivityReaderContext, binding: LarkActivityBinding, range: ActivityRange): Promise<ActivityScan> {
+export async function scanLarkDocuments(ctx: ActivityReaderContext, binding: LarkActivityBinding, range: ActivityRange,
+  watched?: readonly { token: string; type: string; url: string }[]): Promise<ActivityScan> {
   const [start, end] = rangeTimes(range)
+  if (watched && !watched.length) return { records: 0, objects: 0, complete: true }
   const read = await userReader(ctx.source.commands.withSignal(ctx.signal), binding, () => active(ctx))
   const pages = new Set<string>(), objects = new Set<string>()
   let cursor: string | undefined, records = 0, contentPartial = 0, previous = Infinity, reachedStart = false
   do {
-    const page = await read(SearchDocuments, ['drive', '+search', '--query', '', '--sort', 'edit_time', '--page-size', '20',
+    let page: z.infer<typeof SearchDocuments>
+    if (watched) {
+      const result = await read(DocumentMetas, ['api', 'POST', '/open-apis/drive/v1/metas/batch_query', '--data',
+        JSON.stringify({ request_docs: watched.map(item => ({ doc_token: item.token, doc_type: item.type })), with_url: true })])
+      if (result.failed_list.length || result.metas.length !== watched.length) throw new Error('Watched document metadata is incomplete; progress retained')
+      if (result.metas.some(meta => !watched.some(item => item.token === meta.doc_token && item.type === meta.doc_type.toLowerCase()))) {
+        throw new Error('Document metadata returned an object outside the configured watch scope')
+      }
+      page = { results: result.metas.map(meta => ({ entity_type: meta.doc_type, title_highlighted: meta.title,
+        result_meta: { token: meta.doc_token, doc_types: meta.doc_type, url: meta.url, update_time: Number(meta.latest_modify_time) } })), has_more: false }
+    } else page = await read(SearchDocuments, ['drive', '+search', '--query', '', '--sort', 'edit_time', '--page-size', '20',
       ...cursor ? ['--page-token', cursor] : []])
     for (const found of page.results) {
       const meta = found.result_meta, at = meta.update_time * 1000
-      if (at > previous) throw new Error('Lark documents are not in edit-time order; coverage is incomplete')
+      if (!watched && at > previous) throw new Error('Lark documents are not in edit-time order; coverage is incomplete')
       previous = at
-      if (at < start) { reachedStart = true; break }
-      if (at > end) continue
+      if (!watched && at < start) { reachedStart = true; break }
+      if (!watched && at > end) continue
       const locator = found.entity_type === 'WIKI' || new URL(meta.url).pathname.startsWith('/wiki/')
         ? await read(Inspected, ['drive', '+inspect', '--url', meta.url]) : { token: meta.token, type: meta.doc_types.toLowerCase(), url: meta.url }
       const objectId = `${locator.type}:${locator.token}`
@@ -252,19 +276,7 @@ export async function readLarkImContext(commands: Commands, binding: LarkActivit
       sort_type: 'ByCreateTimeDesc', page_size: 50, only_thread_root_messages: false, ...cursor ? { page_token: cursor } : {} })])
   if (page.items.some(message => message.chat_id !== anchor.conversation)) throw new Error('Lark returned context outside the source conversation')
   const next = nextPage(page, new Set(cursor ? [cursor] : []))
-  const view = (message: RawMessage): ImContextMessage => {
-    const full = originalText(message)
-    const partial = !message.deleted && (!['text', 'system'].includes(message.msg_type) || full.length > MAX_EVENT_TEXT)
-    if (partial && !gaps.includes('content_partial')) gaps.push('content_partial')
-    if (!message.deleted && !['text', 'system'].includes(message.msg_type) && !gaps.includes('attachments_not_read')) gaps.push('attachments_not_read')
-    return { id: message.message_id, version: key(message.update_time ?? message.create_time, message.msg_type, String(!!message.deleted), full),
-      versionBasis: 'source_digest', nativeVersion: message.update_time ?? message.create_time,
-      text: full.slice(0, MAX_EVENT_TEXT), sender: message.sender.id, senderType: message.sender.sender_type,
-      ...message.sender.id_type ? { senderIdType: message.sender.id_type } : {},
-      createdAt: new Date(Number(message.create_time)).toISOString(), ...message.update_time ? { updatedAt: new Date(Number(message.update_time)).toISOString() } : {},
-      ...message.deleted ? { deleted: true } : {}, ...partial ? { partial: true } : {},
-      ...message.parent_id ? { parent: message.parent_id } : {}, ...message.root_id ? { root: message.root_id } : {} }
-  }
+  const view = (message: RawMessage): ImContextMessage => imView(message, gaps)
   // Reread after each history page: history can omit recalled messages and stale anchors.
   // Parse IDs/chat before body validation so unreadable foreign records still fail closed.
   const originals = await read(z.object({ items: z.array(z.object({ message_id: id, chat_id: id }).passthrough()) }),
@@ -287,4 +299,77 @@ export async function readLarkImContext(commands: Commands, binding: LarkActivit
   signal.throwIfAborted()
   return { provider: anchor.provider, account: anchor.account, conversation: anchor.conversation, start, end,
     messages: items, ...current ? { anchor: current } : {}, ...next ? { next } : {}, consistency: 'live_paginated', gaps }
+}
+
+const NATIVE_CHAT = /^oc_[A-Za-z0-9_-]+$/
+const named = (chat: z.infer<typeof Chat>): string => chat.name?.trim() ?? ''
+const candidate = (chat: z.infer<typeof Chat>): { id: string; label?: string } =>
+  ({ id: chat.chat_id, ...named(chat) ? { label: chat.name!.trim() } : {} })
+const exactName = (chats: { id: string; label?: string }[], query: string) => {
+  const wanted = query.trim().toLocaleLowerCase()
+  return chats.filter(chat => (chat.label ?? '').toLocaleLowerCase() === wanted)
+    .filter((chat, index, all) => all.findIndex(other => other.id === chat.id) === index)
+}
+/**
+ * Resolve an exact display name to one visible conversation. A native chat ID bypasses resolution; ambiguous or
+ * unknown names return candidates and the caller reads nothing rather than guessing.
+ */
+export async function resolveLarkConversation(commands: Commands, binding: LarkActivityBinding, query: string, signal: AbortSignal):
+Promise<{ resolved: { id: string; label?: string }; resolution: 'native_id' | 'exact_name' } | { candidates: { id: string; label?: string }[] }> {
+  signal.throwIfAborted()
+  const text = query.trim()
+  if (!text) throw new Error('An IM read needs a conversation ID or exact display name')
+  if (NATIVE_CHAT.test(text)) return { resolved: { id: text }, resolution: 'native_id' }
+  const read = await userReader(commands.withSignal(signal), binding, () => signal.throwIfAborted())
+  const found = new Map<string, { id: string; label?: string }>()
+  // Group search covers visible group and topic chats; the p2p listing always runs too, because a private
+  // conversation and a group can share a display name and a group-only match would silently pick one.
+  const search = await read(ChatPage, ['im', '+chat-search', '--query', text, '--page-size', '100', '--page-all', '--page-limit', '5'])
+  for (const chat of search.chats ?? []) found.set(chat.chat_id, candidate(chat))
+  const listed = await read(ChatPage, ['im', '+chat-list', '--types', 'p2p', '--page-all', '--page-limit', '5', '--page-size', '100'])
+  for (const chat of listed.chats ?? []) found.set(chat.chat_id, candidate(chat))
+  // A page limit that stopped a list cannot prove the match is unique; return what was seen instead of guessing.
+  if (search.has_more || listed.has_more) return { candidates: [...found.values()].slice(0, 10) }
+  const exact = exactName([...found.values()], text)
+  if (exact.length > 1) return { candidates: exact.slice(0, 10) }
+  if (exact.length === 1) return { resolved: exact[0]!, resolution: 'exact_name' }
+  return { candidates: [...found.values()].slice(0, 10) }
+}
+
+/**
+ * Read an ascending native message window without an anchor. The window is half-open in milliseconds; Lark's
+ * list API uses whole seconds, so the read widens to whole seconds and filters the exact bounds locally.
+ */
+export async function readLarkWindow(commands: Commands, binding: LarkActivityBinding, request: ImReadRequest, cursor: string | undefined,
+  signal: AbortSignal, resolved: { id: string; label?: string }, resolution: 'native_id' | 'exact_name'): Promise<ImReadPage> {
+  signal.throwIfAborted()
+  if (resolved.id !== request.conversation) throw new Error('Lark window conversation does not match its resolution')
+  const [from, until] = rangeTimes(request)
+  const read = await userReader(commands.withSignal(signal), binding, () => signal.throwIfAborted())
+  const page = await read(RawMessagePage, ['api', 'GET', '/open-apis/im/v1/messages', '--params', JSON.stringify({
+    container_id_type: 'chat', container_id: request.conversation,
+    start_time: String(Math.floor(from / 1000)), end_time: String(Math.ceil(until / 1000)),
+    sort_type: 'ByCreateTimeAsc', page_size: 50, only_thread_root_messages: false,
+    ...cursor ? { page_token: cursor } : {} })])
+  if (page.items.some(message => message.chat_id !== request.conversation)) {
+    throw new Error('Lark returned messages outside the requested conversation')
+  }
+  const gaps = ['live_pagination', 'thread_replies_not_covered']
+  if (from % 1000 !== 0 || until % 1000 !== 0) gaps.push('window_bounds_whole_seconds')
+  const keyword = request.keyword?.trim().toLowerCase()
+  if (keyword) gaps.push('keyword_local_filter')
+  // Match the full native text before imView truncates it: a keyword after the display limit must still select its message.
+  const items = page.items.filter(message => {
+    const at = Number(message.create_time)
+    return at >= from && at < until && (!keyword || originalText(message).toLowerCase().includes(keyword))
+  }).map(message => imView(message, gaps))
+  const next = page.has_more ? page.page_token : undefined
+  if (page.has_more && (!next || next === cursor)) throw new Error('Lark message pagination did not advance; coverage is incomplete')
+  const messages = items
+  // The native CLI account can change independently of Source configuration during a read.
+  await userReader(commands.withSignal(signal), binding, () => signal.throwIfAborted())
+  signal.throwIfAborted()
+  return { provider: 'feishu-messages', account: binding.expectedUserId, conversation: request.conversation,
+    start: request.start, end: request.end, messages, ...next ? { next } : {}, consistency: 'live_paginated', gaps,
+    resolved, resolution }
 }

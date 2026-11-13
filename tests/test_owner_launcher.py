@@ -427,6 +427,18 @@ class OwnerLauncherTest(unittest.TestCase):
         self.assertEqual(env['DSH_FEISHU_BOT_CONFIG_DIR'], str(bot_dir))
         self.assertEqual(env['LARKSUITE_CLI_CONFIG_DIR'], str(self.root / 'lark'))
 
+    def test_personal_user_directory_is_the_host_default_and_bot_probe_uses_its_own_directory(self):
+        personal = self.root / 'personal-user'
+        personal.mkdir()
+        bot = self.root / 'bot-only'
+        bot.mkdir()
+        config = launcher.validate_config(self.platform_config(feishuUserConfigDir=str(personal), feishuBotConfigDir=str(bot)))
+        env = launcher.launch_environment(config)
+        self.assertEqual(env['LARKSUITE_CLI_CONFIG_DIR'], str(personal))
+        self.assertEqual(env['DSH_FEISHU_BOT_CONFIG_DIR'], str(bot))
+        with self.assertRaises(ValueError):
+            launcher.validate_config(self.platform_config(feishuUserConfigDir='relative'))
+
     def test_activation_refuses_unready_busy_or_manually_stopped_instances(self):
         config = launcher.validate_config(self.platform_config())
         for current in [None, {**self.ready, 'setup': {'feishuProblem': {'code': 'not_configured'}}},

@@ -3,11 +3,42 @@ import { Commands } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { feishuRead, readFeishu, feishuReferences, readFeishuLink } from '../src/sources/feishu-read.ts'
 import type { FeishuRef } from '../src/sources/feishu-read.ts'
+import { receiveSharedFeishu, backfillChat } from '../src/sources/feishu-loops.ts'
+import { KV } from '../src/kv.ts'
+import type { SourceContext } from '../src/sources/host.ts'
 const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
 const event: FeishuRef = { triggerId: 'source', chatId: 'oc_chat', messageId: 'om_source' }
 const source = { message_id: 'om_source', chat_id: 'oc_chat', parent_id: 'om_parent', root_id: 'om_root', thread_id: 'omt_thread' }
 const message = { message_id: 'om_root', chat_id: 'oc_chat', msg_type: 'merge_forward', content: '<forwarded_messages>Earlier discussion ![Image](img_one)</forwarded_messages>', sender: { id: 'ou_user', name: 'User', sender_type: 'user' }, create_time: '2026-09-11 12:00' }
 afterEach(() => vi.restoreAllMocks())
+it.each([['p2p', true], ['group', false]])('retains %s recovery identity from the shared SDK receive path', async (chatType, direct) => {
+  const values = new Map(), receive = vi.fn(async () => 'stored' as const)
+  const ctx = { config: () => ({ sharedEvents: true }), deployment: testDeployment(), receive,
+    state: { get: (id: string) => values.get(id), set: (id: string, value: unknown) => values.set(id, value) },
+    threads: { describe: vi.fn() } } as unknown as SourceContext
+  await receiveSharedFeishu(ctx, { sender: { sender_id: { open_id: 'ou_member' }, sender_type: 'user' },
+    message: { message_id: 'om_new', chat_id: 'oc_new', chat_type: chatType, create_time: '1794500000000',
+      message_type: 'text', content: '{"text":"Native event recovery fixture"}' } })
+  expect(values.get(KV.feishu.chats)).toEqual({ oc_new: direct })
+  expect(receive).toHaveBeenCalledWith(expect.objectContaining({ meta: expect.objectContaining({ direct, chatId: 'oc_new' }) }))
+})
+it('does not let a buffered group-classified poll overwrite a live direct-chat identity', async () => {
+  const values = new Map(), receive = vi.fn(async () => 'stored' as const)
+  const ctx = { config: () => ({ sharedEvents: true }), deployment: testDeployment(), receive, commands,
+    state: { get: (id: string) => values.get(id), set: (id: string, value: unknown) => values.set(id, value) },
+    threads: { describe: vi.fn(), subscribed: () => [] } } as unknown as SourceContext
+  vi.spyOn(Commands.prototype, 'lark').mockImplementationOnce(async () => {
+    await receiveSharedFeishu(ctx, { sender: { sender_id: { open_id: 'ou_member' }, sender_type: 'user' },
+      message: { message_id: 'om_live', chat_id: 'oc_new', chat_type: 'p2p', create_time: '1794500000000',
+        message_type: 'text', content: '{"text":"Live identity"}' } })
+    return { items: [{ message_id: 'om_polled', chat_id: 'oc_new', msg_type: 'text', create_time: '1794500000000',
+      body: { content: '{"text":"Buffered poll"}' }, sender: { id: 'ou_member', sender_type: 'user' } }], has_more: false }
+  })
+  await backfillChat(ctx, 'oc_new', false, '2026-11-12T00:00:00Z', '2026-11-14T00:00:00Z', new AbortController().signal)
+  expect(values.get(KV.feishu.chats)).toEqual({ oc_new: true })
+  expect(receive).toHaveBeenCalledTimes(2)
+})
+
 it('resolves legacy source metadata and reads merged forwards without embedding automatic thread expansion', async () => {
   const lark = vi.spyOn(commands, 'lark').mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({ messages: [{ ...message, thread_replies: [{ content: 'Automatic expansion omitted' }] }] })
   const result = await readFeishu(commands, event, 'feishu/source/root', 20)

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { Engine, type Ticket, type Trigger } from '../src/core/index.ts'
+import { Engine, key, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Store } from '../src/app/store.ts'
 import { sourceContextOf } from '../src/app/source-context.ts'
 import { Commands } from '../src/infra/commands.ts'
@@ -16,12 +16,17 @@ import { ActivityConfigSchema, activityState, activityTrigger, createActivityKin
 import type { ActivityEvent, ActivityReaderContext, ActivityScan, ActivityTools } from '../src/sources/activity-types.ts'
 import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext } from '../src/sources/activity-lark.ts'
 import { scanWechatActivity, readWechatActivityContext } from '../src/sources/activity-wechat.ts'
+import { imDedupKey, imMessageId, imObjectId } from '../src/sources/im-identity.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { workbenchKind } from '../src/sources/workbench.ts'
 import { KV } from '../src/kv.ts'
+import { queueLarkEvent, pendingLarkEvents, requestLarkReconcile, larkReconcileToken } from '../src/sources/lark-event-inbox.ts'
+import { documentEventChanges } from '../src/sources/document-events.ts'
 
-vi.mock('../src/sources/activity-lark.ts', () => ({ scanLarkMessages: vi.fn(), scanLarkDocuments: vi.fn(), readLarkActivityContext: vi.fn() }))
-vi.mock('../src/sources/activity-wechat.ts', () => ({ scanWechatActivity: vi.fn(), readWechatActivityContext: vi.fn() }))
+vi.mock('../src/sources/activity-lark.ts', () => ({ scanLarkMessages: vi.fn(), scanLarkDocuments: vi.fn(), readLarkActivityContext: vi.fn(),
+  readLarkImContext: vi.fn(), readLarkWindow: vi.fn(), resolveLarkConversation: vi.fn() }))
+vi.mock('../src/sources/activity-wechat.ts', () => ({ scanWechatActivity: vi.fn(), readWechatActivityContext: vi.fn(),
+  readWechatImContext: vi.fn(), readWechatWindow: vi.fn() }))
 
 const bindings: ActivitySourceBindings = { ownerChatId: 'oc_private', lark: { expectedUserId: 'ou_owner', configDir: '/private/user-config' }, wechat: { serverName: 'wechat_readonly' } }
 const tools: ActivityTools = { schemas: vi.fn(() => []), execute: vi.fn<ActivityTools['execute']>() }
@@ -83,6 +88,62 @@ beforeEach(() => {
 })
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
 
+it('keeps WeChat on its independent interval while Feishu readers continue', async () => {
+  const h = host()
+  saveConfig(config({ wechatPollSeconds: 1200 }))
+  await h.scan()
+  expect(scanWechatActivity).toHaveBeenCalledTimes(1)
+  clock += 120_000
+  await h.scan()
+  expect(scanLarkMessages).toHaveBeenCalledTimes(2)
+  expect(scanLarkDocuments).toHaveBeenCalledTimes(2)
+  expect(scanWechatActivity).toHaveBeenCalledTimes(1)
+  clock += 1_080_000
+  await h.scan()
+  expect(scanWechatActivity).toHaveBeenCalledTimes(2)
+})
+
+it('coalesces watched document notifications, validates native identity and confirms after intake', async () => {
+  const h = host()
+  const watched = config({ documentEvents: true, watchedDocuments: [{ token: 'doc-one', type: 'docx', url: 'https://example.feishu.cn/docx/doc-one', name: 'Project plan' }] })
+  saveConfig(watched)
+  for (const id of ['edit-one', 'edit-two']) queueLarkEvent(h.ctx, bindings.lark.expectedUserId, 'documents', {
+    eventType: 'drive.file.edit_v1', eventId: id,
+    at: '1794500000000', payload: { file_token: 'doc-one', file_type: 'docx' } })
+  const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => JSON.stringify(args[0] === 'auth'
+    ? { identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } }
+    : { ok: true, identity: 'user', data: { document: { document_id: 'doc-one', revision_id: 3, content: 'Changed project plan' } } }))
+  const changes = await documentEventChanges(h.ctx, bindings.lark, watched, new AbortController().signal)
+  expect(changes.events).toMatchObject([{ version: key('revision:3', 'Changed project plan'), text: 'Changed project plan', label: 'Project plan' }])
+  expect(run.mock.calls.filter(([, args]) => args.includes('+fetch'))).toHaveLength(1)
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toHaveLength(2)
+  changes.confirm()
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toEqual([])
+})
+
+it('keeps the other readers running when a retained document notification cannot be read', async () => {
+  const h = host()
+  saveConfig(config({ documentEvents: true, watchedDocuments: [{ token: 'doc-one', type: 'docx', url: 'https://example.feishu.cn/docx/doc-one', name: 'Project plan' }] }))
+  queueLarkEvent(h.ctx, bindings.lark.expectedUserId, 'documents', {
+    eventType: 'drive.file.edit_v1', eventId: 'edit-one',
+    at: '1794500000000', payload: { file_token: 'doc-one', file_type: 'docx' } })
+  let fail = true
+  vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => JSON.stringify(args[0] === 'auth'
+    ? { identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } }
+    : fail ? { ok: false, identity: 'user', error: { code: 1061004, type: 'forbidden' } }
+      : { ok: true, identity: 'user', data: { document: { document_id: 'doc-one', revision_id: 4, content: 'Changed project plan' } } }))
+  await h.scan()
+  expect(scanWechatActivity).toHaveBeenCalledOnce()
+  expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-documents')))
+    .toMatchObject({ failures: 1, error: expect.stringContaining('forbidden') })
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toHaveLength(1)
+  fail = false
+  clock += 120_000
+  await h.scan()
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toEqual([])
+  expect(h.receive.mock.calls.some(([trigger]) => (trigger.meta.activity as { provider?: string } | undefined)?.provider === 'feishu-documents')).toBe(true)
+})
+
 it('accepts a native owner monitor and delivers reader failures to that discussion without requiring a Feishu bot audience', async () => {
   const h = host()
   h.sources.register(workbenchKind)
@@ -106,6 +167,34 @@ it('accepts a native owner monitor and delivers reader failures to that discussi
   clock += 130_000
   await h.scan()
   expect(scanWechatActivity).toHaveBeenCalledTimes(calls)
+})
+
+it('reconciles watched documents after reconnect without waiting for the daily deadline', async () => {
+  const h = host()
+  saveConfig(config({ feishuMessages: false, wechat: false, documentEvents: true }))
+  await h.scan()
+  await h.scan()
+  expect(scanLarkDocuments).toHaveBeenCalledOnce()
+  requestLarkReconcile(h.ctx, bindings.lark.expectedUserId, 'documents')
+  await h.scan()
+  expect(scanLarkDocuments).toHaveBeenCalledTimes(2)
+  expect(larkReconcileToken(h.ctx, bindings.lark.expectedUserId, 'documents')).toBeUndefined()
+})
+
+it('retains a newer WeChat wake arriving during an incremental scan', async () => {
+  const h = host()
+  saveConfig(config({ feishuMessages: false, feishuDocuments: false, wechatNotifications: true, wechatPollSeconds: 1200 }))
+  const wakeKey = activityState.wechatWake('monitor', 'monitor')
+  store.set(wakeKey, { token: 'first', at: iso() })
+  vi.mocked(scanWechatActivity).mockImplementationOnce(async () => {
+    store.set(wakeKey, { token: 'newer', at: iso() })
+    return complete
+  })
+  await h.scan()
+  expect(store.get(wakeKey)?.token).toBe('newer')
+  await h.scan()
+  expect(scanWechatActivity).toHaveBeenCalledTimes(2)
+  expect(store.get(wakeKey)).toBeUndefined()
 })
 
 it('collects without a monitoring ticket, routes independent goals, and survives unrelated project stops', async () => {
@@ -187,6 +276,21 @@ it('keeps source-native versions stable without turning third-party words into a
   expect(first).not.toHaveProperty('channel')
 })
 
+it('records canonical IM identity in trigger metadata without changing the trigger identity', () => {
+  const first = activityTrigger(event(), config())
+  expect(first.meta.im).toEqual({ object_id: imObjectId({ provider: 'feishu-messages', conversation: 'oc_business' }),
+    message_key: imMessageId({ provider: 'feishu-messages', conversation: 'oc_business' }, 'om_update'),
+    dedup_key: imDedupKey({ provider: 'feishu-messages', conversation: 'oc_business' }, 'om_update', 'v1') })
+  const wechat = activityTrigger(event({ provider: 'wechat', accountId: 'wx-account', objectId: 'wx-chat', id: 'wxe_event',
+    locator: { provider: 'wechat', contact: 'wx-chat', messageRef: 'wx1.one', start: iso(), end: iso() } }), config())
+  expect(wechat.meta.im).toEqual({ object_id: imObjectId({ provider: 'wechat', conversation: 'wx-chat' }),
+    message_key: imMessageId({ provider: 'wechat', conversation: 'wx-chat' }, 'wx1.one'),
+    dedup_key: imDedupKey({ provider: 'wechat', conversation: 'wx-chat' }, 'wx1.one', 'v1') })
+  const document = activityTrigger(event({ provider: 'feishu-documents', objectId: 'docx:doc',
+    locator: { provider: 'feishu-documents', token: 'doc', type: 'docx', url: 'https://example.com/doc' } }), config())
+  expect(document.meta.im).toBeUndefined()
+})
+
 it('binds one own monitor thread and fans observations only into that ticket, without automatic source replies', async () => {
   const h = host()
   store.tickets.save(ticket('business'))
@@ -200,8 +304,16 @@ it('binds one own monitor thread and fans observations only into that ticket, wi
   expect(store.receipts.waiting()).toEqual([])
   h.engine.report('monitor', { state: 'ready', summary: 'Useful update delivered' })
   expect(store.tickets.get('monitor')?.ended).toBeUndefined()
-  expect(scanLarkMessages).toHaveBeenCalledWith(expect.anything(), bindings.lark, { start: '2026-11-03T10:00:00.000Z', end: iso() })
+  expect(scanLarkMessages).toHaveBeenCalledWith(expect.anything(), bindings.lark, { start: '2026-11-03T10:00:00.000Z', end: iso() },
+    { alertChats: [], severities: ['警告', '严重', '恢复'] })
   expect(h.board.all['activity:feishu-messages']?.detail).toContain('changes 1')
+})
+
+it('passes the configured alert chat and severity list to the Feishu scan', async () => {
+  saveConfig(config({ alertChatId: 'oc_alerts', alertSeverities: '警告，严重' }))
+  await host().scan()
+  expect(scanLarkMessages).toHaveBeenCalledWith(expect.anything(), bindings.lark, expect.anything(),
+    { alertChats: ['oc_alerts'], severities: ['警告', '严重'] })
 })
 
 it('retains provider watermarks and deduplicates replay through an actual Store restart', async () => {
@@ -214,7 +326,8 @@ it('retains provider watermarks and deduplicates replay through an actual Store 
   clock += 120_000
   await host().scan()
   expect(store.tickets.get('monitor')?.inputs).toHaveLength(before!)
-  expect(scanLarkMessages).toHaveBeenLastCalledWith(expect.anything(), bindings.lark, { start: '2026-11-04T09:58:00.000Z', end: iso() })
+  expect(scanLarkMessages).toHaveBeenLastCalledWith(expect.anything(), bindings.lark, { start: '2026-11-04T09:58:00.000Z', end: iso() },
+    { alertChats: [], severities: ['警告', '严重', '恢复'] })
   expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-messages'))).toMatchObject({ since: iso(), changes: 0 })
 })
 
@@ -314,7 +427,8 @@ it('retains the failed provider range while other providers advance, then retrie
   expect(store.get(activityState.progress('monitor', 'monitor', 'wechat'))?.since).toBe(iso())
   clock += 120_000
   await h.scan()
-  expect(scanLarkMessages).toHaveBeenLastCalledWith(expect.anything(), bindings.lark, pending.pending)
+  expect(scanLarkMessages).toHaveBeenLastCalledWith(expect.anything(), bindings.lark, pending.pending,
+    { alertChats: [], severities: ['警告', '严重', '恢复'] })
   expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-messages'))).toMatchObject({ since: pending.pending!.end, failures: 0 })
 })
 

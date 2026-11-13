@@ -80,7 +80,7 @@ export interface ResourceHost {
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
   readonly commands: Commands
-  readonly sources: Pick<SourceRegistry, 'threadContext' | 'publishFiles'>
+  readonly sources: Pick<SourceRegistry, 'threadContext' | 'publishFiles' | 'imRead'>
   readonly masterId: string
   readonly context: Context
   promptVersion(sessionId: string): PromptVersion

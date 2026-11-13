@@ -12,6 +12,7 @@ import { AutomaticTriage } from '../src/app/automatic-triage.ts'
 import { ProductionTriage, productionOverview, type ProductionBatch } from '../src/app/production-triage.ts'
 import { automaticTriageTools } from '../src/app/tools/automatic-triage.ts'
 import { evidenceRevision, newerKnownEvidence } from '../src/app/im-evidence-revisions.ts'
+import { readConversationCursor } from '../src/app/im-conversation-cursors.ts'
 let directory: string, store: Store, engine: Engine, effects: Effects, handoffs: TriageHandoffs, production: ProductionTriage, automatic: AutomaticTriage
 let enabled: boolean, historical: boolean, paused: boolean, source: boolean, configuration: string, policyVersion: string, now: string
 const request = vi.fn(), deliver = vi.fn(async (_id: string, _text: string, authorize: () => void) => { authorize(); return now })
@@ -242,6 +243,79 @@ it('retains the active production reservation through opt-out so re-enable canno
   await drain(); expect(rows().find(row=>row.owner==='manual')!.state).toBe('queued')
   expect(()=>production.read(first.id)).toThrow('disabled')
   enabled=true; production.maintain(); expect(production.activeCount()).toBe(1); submit(rows().find(row=>row.id===first.id)!)
+})
+
+it('reads a first-seen conversation with 24h lookback and later batches from its covered cursor', async () => {
+  automatic.receive(make('a0', 'chatA', { at: '2026-11-10T11:00:00.000Z' }))
+  advance(11_000); automatic.maintain(); await drain()
+  const first = rows()[0]!
+  expect(first.coverage).toMatchObject({ mode: 'initial', conversation: 'chatA' })
+  expect(Date.parse(first.window.end) - Date.parse(first.window.start)).toBe(24 * 3_600_000 + 1000)
+  submit(first)
+  expect(readConversationCursor(store, evidence(make('a0', 'chatA'))!)!.through).toBe(first.coverage!.to)
+  advance(30 * 60_000)
+  automatic.receive(make('a1', 'chatA', { at: now }))
+  advance(11_000); automatic.maintain(); await drain()
+  const second = rows().find(row => row.inputs.some(input => input.triggerId === 'a1'))!
+  expect(second.coverage).toMatchObject({ mode: 'incremental', previous: first.coverage!.to })
+  expect(Date.parse(second.window.start)).toBe(Date.parse(first.coverage!.to) - 120_000)
+  expect(Date.parse(second.window.end) - Date.parse(second.window.start)).toBeLessThan(2 * 60 * 60_000)
+  submit(second)
+  expect(readConversationCursor(store, evidence(make('a1', 'chatA'))!)!.through).toBe(second.coverage!.to)
+})
+
+it('does not advance coverage on rollback and re-reads a covered-message edit as one anchor', async () => {
+  automatic.receive(make('a0', 'chatA', { at: '2026-11-10T11:00:00.000Z' }))
+  advance(11_000); automatic.maintain(); await drain()
+  const first = rows()[0]!
+  production.rollback(first.id, first.generation)
+  expect(readConversationCursor(store, evidence(make('a0', 'chatA'))!)).toBeUndefined()
+  automatic.receive(make('a1', 'chatA', { at: now }))
+  advance(11_000); automatic.maintain(); await drain()
+  const second = rows().find(row => row.state === 'awaiting')!
+  expect(second.coverage).toMatchObject({ mode: 'initial' })
+  submit(second)
+  const covered = readConversationCursor(store, evidence(make('a1', 'chatA'))!)!.through
+  automatic.receive(make('a0-edit', 'chatA', { at: '2026-11-10T10:59:00.000Z',
+    meta: { chat: 'chatA', message: 'a0', version: 'v2' } }))
+  advance(11_000); automatic.maintain(); await drain()
+  const change = rows().find(row => row.inputs.some(input => input.triggerId === 'a0-edit'))!
+  expect(change.coverage).toMatchObject({ mode: 'change', changeTriggerIds: ['a0-edit'] })
+  expect(Date.parse(change.window.end) - Date.parse(change.window.start)).toBe(120_000 + 1000)
+  submit(change)
+  expect(readConversationCursor(store, evidence(make('a1', 'chatA'))!)!.through).toBe(covered)
+})
+
+it('splits newer inputs so a capped incremental window still contains every member', async () => {
+  now = '2026-11-01T12:00:00.000Z'
+  automatic.receive(make('a0', 'chatA', { at: '2026-11-01T11:00:00.000Z' }))
+  advance(11_000); automatic.maintain(); await drain()
+  submit(rows()[0]!)
+  now = '2026-11-06T12:00:00.000Z'
+  automatic.receive(make('n2', 'chatA', { at: '2026-11-02T00:00:00.000Z' }))
+  automatic.receive(make('n5', 'chatA', { at: '2026-11-05T00:00:00.000Z' }))
+  advance(11_000); automatic.maintain()
+  const split = rows().filter(row => row.inputs.some(input => ['n2', 'n5'].includes(input.triggerId)))
+  expect(split).toHaveLength(2)
+  for (const batch of split) {
+    expect(batch.inputs).toHaveLength(1)
+    const input = batch.inputs[0]!, at = Date.parse(store.triggers.get(input.triggerId)!.at)
+    expect(at).toBeGreaterThanOrEqual(Date.parse(batch.window.start))
+    expect(at).toBeLessThan(Date.parse(batch.window.end))
+  }
+})
+
+it('keeps behind-cursor plans bounded instead of spanning the whole late backlog', async () => {
+  automatic.receive(make('a0', 'chatA', { at: '2026-11-06T11:00:00.000Z' }))
+  advance(11_000); automatic.maintain(); await drain()
+  submit(rows()[0]!)
+  automatic.receive(make('b2', 'chatA', { at: '2026-11-02T00:00:00.000Z' }))
+  automatic.receive(make('b5', 'chatA', { at: '2026-11-05T00:00:00.000Z' }))
+  advance(11_000); automatic.maintain()
+  const changes = rows().filter(row => row.inputs.some(input => ['b2', 'b5'].includes(input.triggerId)))
+  expect(changes).toHaveLength(2)
+  expect(changes.every(batch => batch.inputs.length === 1 && batch.coverage!.mode === 'change')).toBe(true)
+  for (const batch of changes) expect(Date.parse(batch.window.end) - Date.parse(batch.window.start)).toBe(120_000 + 1000)
 })
 
 it('recovers bounded blocked groups through explicit main tool with all-or-nothing generation fencing', async () => {

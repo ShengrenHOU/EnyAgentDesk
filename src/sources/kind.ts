@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger, Ticket, Deliverable } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
-import type { ImContextPage, ImContextRequest } from './im-context.ts'
+import type { ImContextPage, ImContextRequest, ImReadPage, ImReadRequest } from './im-context.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
 
@@ -109,6 +109,14 @@ export interface ImMessageHeader {
   parent?: string
   url?: string
 }
+/**
+ * Read-only conversation window owned by the Source that holds the native reader. The capability resolves a
+ * display name only to an exact, unique conversation and never sends, acknowledges or attaches evidence.
+ */
+export interface ImReadCapability<C> {
+  providers: readonly string[]
+  read(commands: Commands, request: ImReadRequest, cursor: string | undefined, config: C, signal: AbortSignal): Promise<ImReadPage>
+}
 /** Pluggable source kind descriptor registered with SourceRegistry. */
 export interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>> {
   /** Stable ID; a default instance with the same ID exists when none is stored. */
@@ -142,6 +150,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   imAnchorText?(trigger: Trigger, config: C): string
   /** Optional fixed-window, read-only conversation evidence capability. Host owns budgets and completeness. */
   imContext?(commands: Commands, request: ImContextRequest, cursor: string | undefined, config: C, signal: AbortSignal): Promise<ImContextPage>
+  /** Optional bounded conversation window read by native ID or an exact display name; never a send or an action. */
+  imRead?: ImReadCapability<C>
   /** Maps a search query to candidate Thread keys (such as `github:12`) and Trigger search terms (such as a Feishu `om_` ID). */
   find?(query: string): { threads: string[]; terms: string[] }
   /** Returns the ID of the Trigger whose message this Trigger replies to, when derivable without a network read. */

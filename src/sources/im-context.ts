@@ -28,6 +28,17 @@ export interface ImContextReader {
   assertActive(): void
   read(request: ImContextRequest, cursor: string | undefined, signal: AbortSignal): Promise<ImContextPage>
 }
+/** A conversation accepted by a display name, or the candidates that make a name too ambiguous to read. */
+export interface ImConversationCandidate { id: string; label?: string }
+/** A bounded window read that does not need a known message to anchor it. */
+export interface ImReadRequest { provider: string; conversation: string; start: string; end: string; keyword?: string }
+export interface ImReadPage extends ImContextPage {
+  /** The native conversation when a display name was resolved to exactly one conversation. */
+  resolved?: ImConversationCandidate
+  /** Present when the adapter could not resolve the display name; no messages are read in that case. */
+  candidates?: ImConversationCandidate[]
+  resolution?: 'native_id' | 'exact_name'
+}
 export interface ImContextManifest {
   schema: 'im-context-v1'; hash: string; scope: Pick<ImEvidence, 'provider' | 'account' | 'conversation'>
   requested: { start: string; end: string }; covered: { start: string; end: string } | null

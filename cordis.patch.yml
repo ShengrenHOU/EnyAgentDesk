@@ -14,6 +14,10 @@
     - id: dsh-superagent-activity
       name: dsh-superagent/activity-watch
       disabled: true
+    # Read-only mailbox, assigned-task and calendar Sources; each needs the owner's user lark-cli configured after enabling.
+    - id: dsh-superagent-lark-workspace
+      name: dsh-superagent/lark-workspace-watch
+      disabled: true
     - id: dsh-superagent-workbench
       name: dsh-superagent/workbench
       disabled: true

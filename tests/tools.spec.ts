@@ -332,6 +332,13 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
+it('offers the same read-only IM window tool to the main Session and ticket workers', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('im-read', '@bot read the conversation'))
+  for (const session of [h.runtime.masterId, sessionId]) {
+    expect(h.tools.get(session)!.has('orchestrator_im_read')).toBe(true)
+  }
+})
+
 it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const card = expect.objectContaining({ ticket_id: ticket.id })

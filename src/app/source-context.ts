@@ -71,7 +71,8 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
         return deps.engine.answerAttention(id, attentionId, text, { source: 'workbench', id: owner })
       },
     },
-    triggers: { get: id => store.triggers.get(id), latest: thread => store.read.threadTriggers(thread, 1)[0] },
+    triggers: { get: id => store.triggers.get(id), latest: thread => store.read.threadTriggers(thread, 1)[0],
+      disposition: id => store.triggers.disposition(id) },
     notify: message => { deps.outbox.send(message) },
     report: (entry, value) => {
       if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)

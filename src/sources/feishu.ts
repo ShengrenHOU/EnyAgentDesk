@@ -26,6 +26,7 @@ const FeishuConfigSchema = FeishuBotSchema.extend({
     .default([]),
   directMessages: z.boolean().default(true),
   otherChats: z.enum(['none', 'mentions']).default('none'),
+  sharedEvents: z.boolean().default(false),
 }).strict()
 export type FeishuConfig = z.infer<typeof FeishuConfigSchema>
 export const feishuKind: SourceKind<FeishuConfig> = {
@@ -35,6 +36,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
   description: { zh: '接收下列群和私聊中发给机器人的消息，补收群历史并轮询订阅的线程。', en: 'Receives messages to the bot in these chats and direct messages, recovers chat history and polls subscribed Threads.' },
   schema: FeishuConfigSchema,
   fields: [
+    { key: 'sharedEvents', type: 'switch', advanced: true, label: { zh: '由统一个人事件接入接收', en: 'Receive through the personal event transport' } },
     { key: 'cli', type: 'text', label: { zh: '机器人的 lark-cli', en: 'Bot lark-cli' },
       hint: { zh: '命令名或绝对路径，指向 lark-cli；机器人配置目录必须仅允许机器人身份。保存时读取应用和机器人，然后重启 dsh-superagent。', en: 'A lark-cli command name or absolute path. The bot configuration must allow only the bot identity. Saving reads the app and bot, then restarts dsh-superagent.' } },
     { key: 'configDir', type: 'text', advanced: true, label: { zh: '机器人配置目录', en: 'Bot configuration directory' },

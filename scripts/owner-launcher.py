@@ -24,6 +24,9 @@ def validate_config(config):
     bot_config = config.get('feishuBotConfigDir')
     if bot_config and (not Path(bot_config).is_absolute() or not Path(bot_config).is_dir()):
         raise ValueError('feishuBotConfigDir must be an existing absolute directory')
+    user_config = config.get('feishuUserConfigDir')
+    if user_config and (not Path(user_config).is_absolute() or not Path(user_config).is_dir()):
+        raise ValueError('feishuUserConfigDir must be an existing absolute directory')
     if config.get('stateDir') and not Path(config['stateDir']).is_absolute():
         raise ValueError('stateDir must be an absolute path')
     probes = config.get('preflightCommands', [])
@@ -102,7 +105,8 @@ def launch_environment(config):
     for key in ['CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'CODEX_TOOL_CALL_ID', 'CODEX_APP_TOOLS_PIPE_PATH',
                 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY', 'CODEX_PERMISSION_PROFILE']:
         env.pop(key, None)
-    env.update(DSH_HOME=str(root / config.get('home', 'windows-home')), LARKSUITE_CLI_CONFIG_DIR=str(root / 'lark'),
+    env.update(DSH_HOME=str(root / config.get('home', 'windows-home')),
+               LARKSUITE_CLI_CONFIG_DIR=config.get('feishuUserConfigDir') or str(root / 'lark'),
                LARKSUITE_CLI_NO_UPDATE_NOTIFIER='1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER='1')
     if config.get('feishuBotConfigDir'):
         env['DSH_FEISHU_BOT_CONFIG_DIR'] = config['feishuBotConfigDir']

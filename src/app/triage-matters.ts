@@ -174,7 +174,10 @@ export class TriageMatters {
       this.assertReadable(source, cache)
       if (source.generation !== ref.generation || this.scope(source) !== this.scope(batch) || !input || !context || (source.id !== batch.id && source.state !== 'completed')) throw new Error('Foreign or stale matter evidence')
       const read = source.id === batch.id ? batch.reads?.[ref.triggerId] : ledger.contexts[`${source.id}:${source.generation}:${ref.triggerId}`]
-      if (!read || !(read.complete === true || read.next === null) || read.hash !== context.manifest.hash || read.revision !== context.revision) throw new Error('Read exact matter evidence before linking')
+      // Current-batch evidence follows the first-page submit policy. Prior immutable receipts and complete-evidence
+      // claims (no_further_action_suggested) still require every page to have been served.
+      const fullyRead = !!read && (read.complete === true || read.next === null)
+      if (!read || !fullyRead && (source.id !== batch.id || complete) || read.hash !== context.manifest.hash || read.revision !== context.revision) throw new Error('Read exact matter evidence before linking')
       if (ref.kind === 'trigger') { if (ref.version !== input.identity.version || !['matched', 'unverified'].includes(context.manifest.anchor.status) || !context.manifest.anchor.contentMatch
         || complete && (input.identity.partial || context.manifest.anchor.observed?.partial)) throw new Error('Invalid, changed or insufficient trigger citation') }
       else {

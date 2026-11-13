@@ -10,8 +10,11 @@ import { sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
 import { ownerDiscussionChannel, type WorkbenchConfig } from './workbench.ts'
 import type { ActivityBindings, ActivityEvent, ActivityProvider, ActivityRange, ActivityReaderContext, ActivityScan, ActivityTools } from './activity-types.ts'
-import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext, readLarkImContext } from './activity-lark.ts'
-import { scanWechatActivity, readWechatActivityContext, readWechatImContext } from './activity-wechat.ts'
+import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext, readLarkImContext, readLarkWindow, resolveLarkConversation } from './activity-lark.ts'
+import { scanWechatActivity, readWechatActivityContext, readWechatImContext, readWechatWindow, waitWechatChange } from './activity-wechat.ts'
+import { imDedupKey, imMessageId, imObjectId } from './im-identity.ts'
+import { documentEventChanges } from './document-events.ts'
+import { pendingLarkEvents, larkReconcileToken, finishLarkReconcile } from './lark-event-inbox.ts'
 
 export const SOURCE = 'activity'
 const PROVIDERS = ['feishu-messages', 'feishu-documents', 'wechat'] as const
@@ -23,12 +26,22 @@ export const ActivityConfigSchema = z.object({
   feishuMessages: z.boolean().default(true),
   feishuDocuments: z.boolean().default(true),
   wechat: z.boolean().default(true),
+  alertChatId: z.string().trim().regex(/^$|^oc_[a-zA-Z0-9]+$/).default(''),
+  alertSeverities: z.string().trim().max(200).default('警告,严重,恢复'),
   lookbackHours: z.number().int().min(1).max(168).default(24),
   pollSeconds: z.number().int().min(30).max(3600).default(120),
+  wechatPollSeconds: z.number().int().min(30).max(3600).optional(),
+  wechatNotifications: z.boolean().default(false),
+  documentEvents: z.boolean().default(false),
+  watchedDocuments: z.array(z.object({ token: z.string().min(1), type: z.enum(['docx', 'sheet', 'bitable', 'file', 'slides']),
+    url: z.url(), name: z.string().optional() }).strict()).max(200).default([]),
+  documentReconcileSeconds: z.number().int().min(300).max(86400).default(86400),
   overlapSeconds: z.number().int().min(0).max(3600).default(120),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
 }).strict()
 export type ActivityConfig = z.infer<typeof ActivityConfigSchema>
+/** Comma-separated severity labels; an empty list disables alert-card filtering. */
+const parseAlertSeverities = (config: ActivityConfig) => config.alertSeverities.split(/[,，、\s]+/).map(value => value.trim()).filter(Boolean)
 export interface ActivitySourceBindings extends ActivityBindings { ownerChatId: string }
 
 export interface ActivityProgress {
@@ -43,9 +56,11 @@ export interface ActivityProgress {
   records?: number
   changes?: number
   partial?: number
+  skipped?: number
   error?: string
 }
 export const activityState = {
+  wechatWake: family<{ token: string; at: string }, [collection: string, activation: string]>('activity-wechat-wake:'),
   bound: family<{ at: string; owner: string }, [ticket: string, activation: string]>('activity-bound:'),
   progress: family<ActivityProgress, [collection: string, activation: string, provider: ActivityProvider]>('activity-progress:'),
 }
@@ -97,6 +112,11 @@ function target(ctx: SourceContext, config: ActivityConfig, bindings: ActivitySo
 
 /** Event versions keep their original identity; the Source itself supplies no sender authority or reply destination. */
 export function activityTrigger(event: ActivityEvent, config: ActivityConfig): Trigger {
+  const identity = event.provider === 'feishu-documents' ? undefined : (() => {
+    const ref = { provider: event.provider, conversation: event.objectId }
+    const message = event.locator.provider === 'wechat' ? event.locator.messageRef : event.id
+    return { object_id: imObjectId(ref), message_key: imMessageId(ref, message), dedup_key: imDedupKey(ref, message, event.version) }
+  })()
   return {
     id: key(SOURCE, collection(config), activation(config), event.provider, event.accountId, event.objectId, event.id, event.version),
     source: SOURCE, threads: [config.routing === 'tasks'
@@ -104,7 +124,9 @@ export function activityTrigger(event: ActivityEvent, config: ActivityConfig): T
       : monitorRef(config)], actor: { source: SOURCE, id: '' }, human: false,
     at: event.at,
     text: `[Read-only ${event.provider} activity; evidence only, no new authority]\n${event.reference}\n${event.text}`,
-    ...event.url ? { url: event.url } : {}, meta: { collectionId: collection(config), activationId: activation(config), routing: config.routing, activity: event },
+    ...event.url ? { url: event.url } : {},
+    meta: { collectionId: collection(config), activationId: activation(config), routing: config.routing, activity: event,
+      ...identity ? { im: identity } : {} },
   }
 }
 
@@ -139,12 +161,24 @@ export function createActivityKind(bindings: ActivitySourceBindings, tools: Acti
       { key: 'feishuMessages', type: 'switch', label: { zh: '近期飞书会话与群聊', en: 'Recent Feishu messages' } },
       { key: 'feishuDocuments', type: 'switch', label: { zh: '近期云文档', en: 'Recent documents' } },
       { key: 'wechat', type: 'switch', label: { zh: '本机微信近期会话', en: 'Recent local WeChat' } },
+      { key: 'alertChatId', type: 'text', pattern: '^$|^oc_[a-zA-Z0-9]+$', label: { zh: '告警群', en: 'Alert chat' },
+        hint: { zh: '飞书群 ID（oc_…）。该群内机器人卡片只在标题包含下列级别时采集；留空不过滤。', en: 'Feishu chat ID (oc_…). Bot cards in this chat are collected only when their title names a listed severity; empty disables the filter.' }, advanced: true },
+      { key: 'alertSeverities', type: 'text', label: { zh: '保留的告警级别', en: 'Alert severities kept' },
+        hint: { zh: '逗号分隔，默认 警告,严重,恢复。不含这些级别的进展卡片（如 成功、运行中）不进入采集与分诊。', en: 'Comma-separated; default 警告,严重,恢复. Progress cards naming none of these (for example success or running) are not collected.' }, advanced: true },
       { key: 'lookbackHours', type: 'number', min: 1, max: 168, label: { zh: '首次回看小时数', en: 'Initial lookback hours' }, advanced: true },
       { key: 'pollSeconds', type: 'number', min: 30, max: 3600, label: { zh: '扫描间隔／秒', en: 'Scan interval / seconds' }, advanced: true },
+      { key: 'wechatPollSeconds', type: 'number', min: 30, max: 3600, label: { zh: '微信独立扫描间隔／秒', en: 'WeChat scan interval / seconds' }, advanced: true },
+      { key: 'wechatNotifications', type: 'switch', label: { zh: '微信数据库变化唤醒', en: 'Wake on WeChat database changes' } },
+      { key: 'documentEvents', type: 'switch', label: { zh: '重要文档按事件读取', en: 'Read important documents on events' } },
+      { key: 'watchedDocuments', type: 'rows', label: { zh: '关注文档', en: 'Watched documents' }, columns: [
+        { key: 'token', type: 'text', label: { zh: '对象 token', en: 'Object token' } },
+        { key: 'type', type: 'text', label: { zh: '类型', en: 'Type' } },
+        { key: 'url', type: 'text', label: { zh: '链接', en: 'URL' } },
+        { key: 'name', type: 'text', optional: true, label: { zh: '名称', en: 'Name' } }] },
       { key: 'overlapSeconds', type: 'number', min: 0, max: 3600, label: { zh: '重叠读取／秒', en: 'Read overlap / seconds' }, advanced: true },
       { key: 'failuresBeforeError', type: 'number', min: 1, max: 20, label: { zh: '连续失败告警次数', en: 'Failures before alert' }, advanced: true },
     ],
-    health: [SOURCE, ...PROVIDERS.map(healthName)],
+    health: [SOURCE, 'activity:events', 'activity:wechat-events', ...PROVIDERS.map(healthName)],
     scope: ({ meta }, config) => (meta.collectionId ?? meta.monitorTicketId) === collection(config) && meta.activationId === activation(config)
       ? { listened: true, observed: config.routing === 'tasks' && meta.routing === 'tasks', ...config.routing === 'tasks' ? { row: 'updates' } : {} }
       : { listened: false, reason: 'activity_monitor_changed' },
@@ -190,6 +224,25 @@ export function createActivityKind(bindings: ActivitySourceBindings, tools: Acti
       }
       throw new Error('This IM context reader is disabled or unsupported')
     },
+    imRead: {
+      providers: ['feishu-messages', 'wechat'],
+      async read(commands, request, cursor, config, signal) {
+        if (request.provider === 'wechat' && enabled(config, 'wechat')) {
+          return readWechatWindow(tools, bindings.wechat, request, cursor, signal)
+        }
+        if (request.provider === 'feishu-messages' && enabled(config, 'feishu-messages')) {
+          const found = await resolveLarkConversation(commands, bindings.lark, request.conversation, signal)
+          if (!('resolved' in found)) {
+            return { provider: 'feishu-messages', account: bindings.lark.expectedUserId, conversation: request.conversation,
+              start: request.start, end: request.end, messages: [], candidates: found.candidates,
+              consistency: 'live_paginated', gaps: [found.candidates.length ? 'conversation_ambiguous' : 'conversation_not_found'] }
+          }
+          return readLarkWindow(commands, bindings.lark, { ...request, conversation: found.resolved.id }, cursor, signal,
+            found.resolved, found.resolution)
+        }
+        throw new Error('This IM reader is disabled or unsupported')
+      },
+    },
     threadContext: {
       messageId: trigger => {
         const { locator } = EventSchema.parse(trigger.meta.activity)
@@ -229,7 +282,7 @@ export async function assertOwnerAudience(commands: Commands, bindings: Activity
 
 function providerHealth(ctx: SourceContext, provider: ActivityProvider, progress: ActivityProgress, state: 'ready' | 'error'): void {
   ctx.report(healthName(provider), { state, at: progress.lastSuccess,
-    detail: `Last success: ${progress.lastSuccess ?? 'never'}; objects ${progress.objects ?? 0}; records ${progress.records ?? 0}; changes ${progress.changes ?? 0}; partial ${progress.partial ?? 0}; next scan ${progress.nextAt ?? 'now'}`
+    detail: `Last success: ${progress.lastSuccess ?? 'never'}; objects ${progress.objects ?? 0}; records ${progress.records ?? 0}; changes ${progress.changes ?? 0}; partial ${progress.partial ?? 0}; left to the Feishu Source ${progress.skipped ?? 0}; next scan ${progress.nextAt ?? 'now'}`
       + (progress.error ? `; ${progress.error}` : '') })
 }
 
@@ -263,7 +316,10 @@ export async function scanActivityRound(ctx: SourceContext, bindings: ActivitySo
       const progress = ctx.state.get(activityState.progress(collection(config), activation(config), provider))
       return enabled(config, provider) && (!progress?.nextAt || Date.parse(progress.nextAt) <= clock())
     })
-    if (due) {
+    const notified = config.documentEvents && (pendingLarkEvents(ctx, bindings.lark.expectedUserId, 'documents').length > 0
+      || larkReconcileToken(ctx, bindings.lark.expectedUserId, 'documents') !== undefined)
+      || config.wechatNotifications && !!ctx.state.get(activityState.wechatWake(collection(config), activation(config)))
+    if (due || notified) {
       const monitored = target(ctx, config, bindings, signature, signal)
       if (monitored && ctx.triggers.get(monitored.origin.triggerId)?.channel?.source === 'feishu') await assertOwnerAudience(ctx.commands.withSignal(signal), bindings)
       assertActive()
@@ -284,49 +340,70 @@ export async function scanActivityRound(ctx: SourceContext, bindings: ActivitySo
   for (const provider of PROVIDERS) {
     if (!enabled(config, provider)) { ctx.report(healthName(provider), { state: 'paused', detail: 'Reader disabled' }); continue }
     const stateKey = activityState.progress(collection(config), activation(config), provider)
+    const pollSeconds = provider === 'wechat' ? config.wechatPollSeconds ?? config.pollSeconds
+      : provider === 'feishu-documents' && config.documentEvents ? config.documentReconcileSeconds : config.pollSeconds
     const previous = ctx.state.get(stateKey) ?? { failures: 0 }
-    if (previous.nextAt && Date.parse(previous.nextAt) > clock()) {
-      providerHealth(ctx, provider, previous, previous.failures >= config.failuresBeforeError ? 'error' : 'ready')
-      failures += previous.failures >= config.failuresBeforeError ? 1 : 0
-      continue
-    }
-    let changes = 0
-    const range = previous.pending ?? { start: new Date(previous.since ? Date.parse(previous.since) - config.overlapSeconds * 1000
-      : clock() - config.lookbackHours * 3600_000).toISOString(), end: new Date(clock()).toISOString() }
-    const reader: ActivityReaderContext = { source: ctx, signal, consumerId: key(SOURCE, collection(config), activation(config), provider), assertActive,
-      async emit(event) {
-        assertActive()
-        if (event.provider !== provider) throw new Error('Reader emitted an event for another provider')
-        const trigger = activityTrigger(event, config)
-        if (config.routing === 'tasks') {
-          const channel = ownerDiscussionChannel(ctx)
-          if (!channel) throw new ActivityHeld('Choose a private owner destination for individual matters')
-          trigger.channel = channel
-        }
-        const result = await ctx.receive(trigger)
-        if (result === 'stored' && config.routing === 'tasks') ctx.threads.describe(threadKey(trigger.threads[0]!), { label: event.label ?? event.reference, ...event.url ? { url: event.url } : {} })
-        if (result === 'filtered') throw new Error('Activity intake was filtered; its batch must not be acknowledged')
-        assertActive()
-        if (result === 'stored') changes++
-        return result
-      } }
-    let result: ActivityScan | undefined
+    const wakeKey = activityState.wechatWake(collection(config), activation(config))
+    const wake = provider === 'wechat' && config.wechatNotifications ? ctx.state.get(wakeKey) : undefined
+    const reconnect = provider === 'feishu-documents' && config.documentEvents ? larkReconcileToken(ctx, bindings.lark.expectedUserId, 'documents') : undefined
+    let changes = 0, range: ActivityRange | undefined, result: ActivityScan | undefined
     try {
       assertActive()
+      // A retained document notification must fail inside this provider's boundary; otherwise its retry would stop the readers after it.
+      if (provider === 'feishu-documents' && config.documentEvents) {
+        const events = await documentEventChanges(ctx, bindings.lark, config, signal)
+        for (const event of events.events) {
+          const trigger = activityTrigger(event, config)
+          const channel = ownerDiscussionChannel(ctx)
+          if (channel) trigger.channel = channel
+          const received = await ctx.receive(trigger)
+          if (received !== 'stored' && received !== 'duplicate') throw new Error('Document event was not persisted')
+          if (received === 'stored') changes++
+        }
+        events.confirm()
+      }
+      if (previous.nextAt && Date.parse(previous.nextAt) > clock() && !(wake && !previous.failures) && reconnect === undefined) {
+        providerHealth(ctx, provider, previous, previous.failures >= config.failuresBeforeError ? 'error' : 'ready')
+        failures += previous.failures >= config.failuresBeforeError ? 1 : 0
+        continue
+      }
+      range = previous.pending ?? { start: new Date(previous.since ? Date.parse(previous.since) - config.overlapSeconds * 1000
+        : clock() - config.lookbackHours * 3600_000).toISOString(), end: new Date(clock()).toISOString() }
+      const reader: ActivityReaderContext = { source: ctx, signal, consumerId: key(SOURCE, collection(config), activation(config), provider), assertActive,
+        async emit(event) {
+          assertActive()
+          if (event.provider !== provider) throw new Error('Reader emitted an event for another provider')
+          const trigger = activityTrigger(event, config)
+          if (config.routing === 'tasks') {
+            const channel = ownerDiscussionChannel(ctx)
+            if (!channel) throw new ActivityHeld('Choose a private owner destination for individual matters')
+            trigger.channel = channel
+          }
+          const result = await ctx.receive(trigger)
+          if (result === 'stored' && config.routing === 'tasks') ctx.threads.describe(threadKey(trigger.threads[0]!), { label: event.label ?? event.reference, ...event.url ? { url: event.url } : {} })
+          if (result === 'filtered') throw new Error('Activity intake was filtered; its batch must not be acknowledged')
+          assertActive()
+          if (result === 'stored') changes++
+          return result
+        } }
+      assertActive()
       ctx.state.set(stateKey, { ...previous, pending: range })
-      const scanned: ActivityScan = provider === 'feishu-messages' ? await scanLarkMessages(reader, bindings.lark, range)
-        : provider === 'feishu-documents' ? await scanLarkDocuments(reader, bindings.lark, range)
+      const scanned: ActivityScan = provider === 'feishu-messages' ? await scanLarkMessages(reader, bindings.lark, range,
+        { alertChats: config.alertChatId ? [config.alertChatId] : [], severities: parseAlertSeverities(config) })
+        : provider === 'feishu-documents' ? await scanLarkDocuments(reader, bindings.lark, range, config.documentEvents ? config.watchedDocuments : undefined)
           : await scanWechatActivity(reader, tools, bindings.wechat, range)
       result = scanned
       assertActive()
       if (!scanned.complete) throw new Error(scanned.detail ?? 'Incomplete scan; read position retained')
       const progress: ActivityProgress = { since: range.end, lastSuccess: new Date(clock()).toISOString(), failures: 0,
-        nextAt: new Date(clock() + config.pollSeconds * 1000).toISOString(), objects: scanned.objects, records: scanned.records,
-        changes, partial: scanned.contentPartial ?? 0 }
+        nextAt: new Date(clock() + pollSeconds * 1000).toISOString(), objects: scanned.objects, records: scanned.records,
+        changes, partial: scanned.contentPartial ?? 0, ...scanned.skipped ? { skipped: scanned.skipped } : {} }
       ctx.atomic(() => {
         assertActive()
         if (previous.alerted) notice(ctx, config, provider, target(ctx, config, bindings, signature, signal), previous, true)
         ctx.state.set(stateKey, progress)
+        if (wake && ctx.state.get(wakeKey)?.token === wake.token) ctx.state.set(wakeKey, undefined)
+        if (provider === 'feishu-documents') finishLarkReconcile(ctx, bindings.lark.expectedUserId, 'documents', reconnect)
       })
       providerHealth(ctx, provider, progress, 'ready')
     } catch (error) {
@@ -342,9 +419,10 @@ export async function scanActivityRound(ctx: SourceContext, bindings: ActivitySo
         ctx.report(SOURCE, { state: 'paused', detail: held.message })
         return
       }
-      const progress: ActivityProgress = { ...previous, pending: range, failures: previous.failures + 1,
-        firstFailure: previous.firstFailure ?? new Date(clock()).toISOString(), nextAt: new Date(clock() + config.pollSeconds * 1000).toISOString(),
-        changes, ...(result ? { objects: result.objects, records: result.records, partial: 1 + (result.contentPartial ?? 0) } : {}),
+      const progress: ActivityProgress = { ...previous, pending: range ?? previous.pending, failures: previous.failures + 1,
+        firstFailure: previous.firstFailure ?? new Date(clock()).toISOString(), nextAt: new Date(clock() + pollSeconds * 1000).toISOString(),
+        changes, ...(result ? { objects: result.objects, records: result.records, partial: 1 + (result.contentPartial ?? 0),
+          ...result.skipped ? { skipped: result.skipped } : {} } : {}),
         error: error instanceof Error ? error.message : String(error) }
       ctx.atomic(() => {
         assertActive()
@@ -396,5 +474,37 @@ export function apply(ctx: Context, config: ActivityPluginConfig): void {
   ctx.effect(() => ctx.orchestrator.sources.register(kind), 'activity: source kind')
   ctx.effect(() => ctx.tools.guard(execution => execution.agent && execution.name === `mcp__${bindings.wechat.serverName}__wechat_incremental_ack`
     ? 'Only the activity Source may acknowledge its durable evidence batches' : undefined))
-  ctx.effect(() => ctx.orchestrator.runSource(signal => runActivity(sourceContext(ctx.orchestrator, kind), bindings, ctx.tools, signal)))
+  ctx.effect(() => ctx.orchestrator.runSource(async signal => {
+    const source = sourceContext(ctx.orchestrator, kind)
+    await Promise.all([runActivity(source, bindings, ctx.tools, signal), watchWechatActivity(source, bindings, ctx.tools, signal)])
+  }))
+}
+
+/** The WeChat package owns native notification handles; this loop only persists a durable wake hint. */
+export async function watchWechatActivity(ctx: SourceContext, bindings: ActivitySourceBindings, tools: ActivityTools, signal: AbortSignal): Promise<void> {
+  await ctx.ready
+  if (!ctx.configured()) return
+  let token = '', signature = ''
+  while (!signal.aborted) {
+    const config = ctx.config<ActivityConfig>(SOURCE)
+    if (!config?.wechat || !config.wechatNotifications) {
+      ctx.report('activity:wechat-events', { state: 'paused', detail: 'Native WeChat notifications disabled' })
+      token = ''; signature = ''
+      await delay(5000, undefined, { signal }).catch(() => {})
+      continue
+    }
+    const current = JSON.stringify(config)
+    if (current !== signature) { token = ''; signature = current }
+    try {
+      const change = await waitWechatChange(tools, bindings.wechat, token, signal)
+      if (JSON.stringify(ctx.config<ActivityConfig>(SOURCE)) !== signature) continue
+      if (change.changed) ctx.state.set(activityState.wechatWake(collection(config), activation(config)), { token: change.token, at: new Date().toISOString() })
+      token = change.token
+      ctx.report('activity:wechat-events', { state: 'ready', detail: 'Windows database notifications; messages use validated incremental reads', at: new Date().toISOString() })
+    } catch (error) {
+      if (signal.aborted) return
+      ctx.report('activity:wechat-events', { state: 'error', detail: error instanceof Error ? error.message : 'Native notification unavailable; periodic reconciliation remains active' })
+      await delay(30_000, undefined, { signal }).catch(() => {})
+    }
+  }
 }

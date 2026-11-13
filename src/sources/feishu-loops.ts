@@ -23,6 +23,16 @@ const bot = (ctx: SourceContext): FeishuBot => {
   if (!resolved) throw new Error('The Feishu Source has no working bot CLI')
   return resolved
 }
+/** Only live events establish chat identity; a buffered poll can carry an older classification. */
+async function receiveLive(ctx: SourceContext, trigger: Trigger): Promise<void> {
+  const chatId = String(trigger.meta.chatId ?? '')
+  if (chatId) {
+    const chats = ctx.state.get(KV.feishu.chats) ?? {}
+    chats[chatId] = trigger.meta.direct === true
+    ctx.state.set(KV.feishu.chats, chats)
+  }
+  await receive(ctx, trigger)
+}
 async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   await ctx.receive(trigger)
   const chatId = String(trigger.meta.chatId ?? '')
@@ -30,6 +40,19 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   const name = ctx.state.get(KV.sources.labels(SOURCE))?.[chatId] ?? chatId
   const chat = trigger.meta.direct === true ? { value: { zh: '私聊', en: 'Direct message' } } : { value: name }
   for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { url: chatLink(ctx, chatId), facts: { chat } })
+}
+/** Preserve the bot's normal scope and source identity when the shared SDK transport owns the connection. */
+export async function receiveSharedFeishu(ctx: SourceContext, value: unknown): Promise<void> {
+  if (!enabled(ctx)?.sharedEvents) return
+  const event = z.object({ message: z.object({ message_id: z.string(), chat_id: z.string(), chat_type: z.string(),
+    create_time: z.string(), content: z.string(), message_type: z.string(), root_id: z.string().optional(), parent_id: z.string().optional(),
+    thread_id: z.string().optional(), mentions: z.array(z.object({ key: z.string(), name: z.string(), id: z.object({ open_id: z.string() }) })).optional() }),
+    sender: z.object({ sender_id: z.object({ open_id: z.string() }), sender_type: z.string() }) }).parse(value)
+  const message = HistoricalMessageSchema.parse({ ...event.message, msg_type: event.message.message_type,
+    body: { content: event.message.content }, sender: { id: event.sender.sender_id.open_id, sender_type: event.sender.sender_type },
+    mentions: event.message.mentions?.map(item => ({ key: item.key, name: item.name, id: item.id.open_id })) })
+  const trigger = feishuTrigger(historyEvent(message, message.chat_id, event.message.chat_type === 'p2p'), bot(ctx).botId, bot(ctx).appId)
+  if (trigger) await receiveLive(ctx, trigger)
 }
 const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
@@ -51,8 +74,9 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       await delay(5000, undefined, { signal }).catch(() => {})
       continue
     }
+    if (enabled(ctx)?.sharedEvents) { await delay(5000, undefined, { signal }).catch(() => {}); continue }
     const running = new AbortController()
-    const check = setInterval(() => { if (!enabled(ctx)) running.abort() }, 5000)
+    const check = setInterval(() => { if (!enabled(ctx) || enabled(ctx)?.sharedEvents) running.abort() }, 5000)
     const stop = () => running.abort()
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()
@@ -89,10 +113,7 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       const trigger = feishuTrigger(JSON.parse(line), bot(ctx).botId, bot(ctx).appId)
       // Events already read when the Source is disabled are dropped; the consumer stops shortly after.
       if (!trigger || !enabled(ctx)) return
-      const chats = ctx.state.get(KV.feishu.chats) ?? {}
-      chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
-      ctx.state.set(KV.feishu.chats, chats)
-      await receive(ctx, trigger)
+      await receiveLive(ctx, trigger)
     }).catch(error => { eventError = true; ctx.report('feishu', { state: 'error', detail: String(error) }) })
   })
   try {

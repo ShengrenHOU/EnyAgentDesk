@@ -160,9 +160,9 @@ export class AutomaticTriage {
         group.state = 'blocked'; group.problem = 'Source, settings, policy or prompt changed; held evidence retained for explicit recovery'
         store.set(groups(group.owner), group); return
       }
-      const end = new Date(Math.max(Date.parse(group.newestAt) + 1000, Math.min(Date.parse(now), Date.parse(group.oldestAt) + 6 * 86_400_000))).toISOString()
-      const start = new Date(Date.parse(group.oldestAt) - 86_400_000 + 1000).toISOString()
-      production.start(group.owner, handoffs.read(group.owner).generation, { start, end }, true)
+      // Production plans the native window per conversation from that conversation's covered cursor; the
+      // accumulation group no longer fixes a 24h lookback for every batch.
+      production.start(group.owner, handoffs.read(group.owner).generation, undefined, true)
       group.state = 'transferred'; store.set(groups(group.owner), group)
       store.set(turnKey, { lane: group.lane, sequence: turn.sequence + 1 })
       store.set(served(`source:${group.source}`), turn.sequence + 1); store.set(served(`conversation:${group.scope}`), turn.sequence + 1)

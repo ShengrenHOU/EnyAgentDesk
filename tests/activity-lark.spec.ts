@@ -1,5 +1,6 @@
 /** Activity reads keep user identity, native object versions, coverage and original-context boundaries explicit. */
 import { afterEach, expect, it, vi } from 'vitest'
+import { key } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { scanLarkDocuments, scanLarkMessages, readLarkActivityContext } from '../src/sources/activity-lark.ts'
 import type { ActivityEvent, ActivityReaderContext } from '../src/sources/activity-types.ts'
@@ -24,13 +25,78 @@ function fixture(handler: (args: string[]) => unknown | Promise<unknown>, user =
   const commands = new Commands(() => testDeployment({ feishu: { cli: 'synthetic-lark', appId: 'cli_test', botId: 'ou_bot',
     name: 'Test bot', brand: 'feishu' } }), { LARKSUITE_CLI_CONFIG_DIR: 'synthetic-bot-config' }, new AbortController().signal)
   const values = new Map<string, unknown>()
-  const source = { commands, state: { get: (key: string) => values.get(key), set: (key: string, value: unknown) => values.set(key, value) } } as unknown as SourceContext
+  const configs = new Map<string, unknown>(), triggers = new Map<string, unknown>(), dispositions = new Map<string, unknown>()
+  const source = { commands, config: (kind: string) => configs.get(kind),
+    triggers: { get: (id: string) => triggers.get(id), disposition: (id: string) => dispositions.get(id) },
+    state: { get: (key: string) => values.get(key), set: (key: string, value: unknown) => values.set(key, value) } } as unknown as SourceContext
   const events: ActivityEvent[] = [], abort = new AbortController()
   const ctx: ActivityReaderContext = { source, signal: abort.signal, consumerId: 'monitor-test', assertActive: vi.fn(),
     emit: vi.fn(async (event: ActivityEvent): Promise<'stored' | 'duplicate'> => { events.push(event); return 'stored' }) }
-  return { ctx, commands, run, environment, events, values, abort }
+  return { ctx, commands, run, environment, events, values, configs, triggers, dispositions, abort }
 }
 afterEach(() => vi.restoreAllMocks())
+
+it('leaves unchanged bot-owned messages to the Feishu Source and keeps their edits, deletions and other chats ambient', async () => {
+  const f = fixture(args => args.includes('+messages-search')
+    ? envelope({ messages: [discovered('own-chat', 'oc_bot'), discovered('own-edited', 'oc_bot'), discovered('own-deleted', 'oc_bot'),
+      discovered('bot-direct', 'oc_dm'), discovered('filtered-group', 'oc_other')], has_more: false })
+    : envelope({ items: [original({ message_id: 'own-chat', chat_id: 'oc_bot', update_time: '1793527200123' }),
+      original({ message_id: 'own-edited', chat_id: 'oc_bot' }), original({ message_id: 'own-deleted', chat_id: 'oc_bot', deleted: true }),
+      original({ message_id: 'bot-direct', chat_id: 'oc_dm', update_time: '1793527200123' }),
+      original({ message_id: 'filtered-group', chat_id: 'oc_other' })] }))
+  f.configs.set('feishu', { chats: [{ chatId: 'oc_bot', listen: 'all' }] })
+  f.triggers.set(key('feishu', 'own-chat'), { id: 'collected', meta: { direct: false } })
+  f.triggers.set(key('feishu', 'bot-direct'), { id: 'collected', meta: { direct: true } })
+  f.triggers.set(key('feishu', 'filtered-group'), { id: 'filtered', meta: { direct: false } })
+  for (const id of ['own-chat', 'bot-direct']) f.dispositions.set(key('feishu', id), { fanout: [], at: range.start })
+  f.dispositions.set(key('feishu', 'filtered-group'), { filtered: { code: 'chat_not_allowed' }, fanout: [], at: range.start })
+  expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ complete: true, records: 3, skipped: 2 })
+  expect(f.events.map(event => event.id)).toEqual(['own-edited', 'own-deleted', 'filtered-group'])
+})
+
+it('keeps an unchanged message that the bot intake only filtered independent of bot configuration', async () => {
+  const f = fixture(args => args.includes('+messages-search')
+    ? envelope({ messages: [discovered('outside-scope', 'oc_other')], has_more: false })
+    : envelope({ items: [original({ message_id: 'outside-scope', chat_id: 'oc_other', update_time: '1793527200123' })] }))
+  f.configs.set('feishu', { chats: [], otherChats: 'none' })
+  f.triggers.set(key('feishu', 'outside-scope'), { id: 'filtered', meta: { direct: false } })
+  f.dispositions.set(key('feishu', 'outside-scope'), { filtered: { code: 'chat_not_allowed' }, fanout: [], at: range.start })
+  expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ complete: true, records: 1 })
+  expect(f.events.map(event => event.id)).toEqual(['outside-scope'])
+})
+
+it('keeps a direct message ambient while the bot Source does not receive direct messages', async () => {
+  const f = fixture(args => args.includes('+messages-search')
+    ? envelope({ messages: [discovered('dm', 'oc_dm')], has_more: false })
+    : envelope({ items: [original({ message_id: 'dm', chat_id: 'oc_dm' })] }))
+  f.configs.set('feishu', { chats: [], directMessages: false })
+  f.triggers.set(key('feishu', 'dm'), { id: 'stored-filtered', meta: { direct: true } })
+  f.dispositions.set(key('feishu', 'dm'), { filtered: { code: 'direct_messages_not_allowed' }, fanout: [], at: range.start })
+  expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ complete: true, records: 1 })
+  expect(f.events.map(event => event.id)).toEqual(['dm'])
+})
+
+it('retains a message in a configured bot chat until the bot has actually persisted it', async () => {
+  const f = fixture(args => args.includes('+messages-search')
+    ? envelope({ messages: [discovered('missed', 'oc_bot')], has_more: false })
+    : envelope({ items: [original({ message_id: 'missed', chat_id: 'oc_bot', update_time: '1793527200123' })] }))
+  f.configs.set('feishu', { chats: [{ chatId: 'oc_bot', listen: 'all' }] })
+  expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ records: 1 })
+  expect(f.events[0]?.id).toBe('missed')
+})
+
+it('reconciles only explicitly watched document metadata and reads unchanged revisions once', async () => {
+  const f = fixture(args => envelope(args.includes('/open-apis/drive/v1/metas/batch_query')
+    ? { metas: [{ doc_token: 'watch', doc_type: 'docx', title: 'Watched plan', latest_modify_time: String(end - 1000), url: 'https://example.feishu.cn/docx/watch' }], failed_list: [] }
+    : args.includes('+fetch') ? { document: { document_id: 'watch', revision_id: 2, content: 'Plan' } }
+      : { document: { document_id: 'watch', revision_id: 2 } }))
+  const watched = [{ token: 'watch', type: 'docx', url: 'https://example.feishu.cn/docx/watch' }]
+  await scanLarkDocuments(f.ctx, binding, range, watched)
+  await scanLarkDocuments(f.ctx, binding, range, watched)
+  expect(f.run.mock.calls.filter(([, args]) => args.includes('+fetch'))).toHaveLength(1)
+  expect(f.run.mock.calls.some(([, args]) => args.includes('+search'))).toBe(false)
+  expect(f.events).toHaveLength(1)
+})
 
 it('retains native sender type, namespace, content kind and reply reference at collection', async () => {
   const f = fixture(args => args.includes('+messages-search')
@@ -80,6 +146,28 @@ it('ignores only this system bot’s own messages and retains other bots as evid
   })
   expect(await scanLarkMessages(f.ctx, binding, range)).toMatchObject({ complete: true, records: 1 })
   expect(f.events.map(item => item.id)).toEqual(['other'])
+})
+
+it('drops progress-only bot cards in the configured alert chat while keeping severities, human and non-card messages and other chats', async () => {
+  const card = (id: string, title: string, chat = 'oc_alerts', sender = { id: 'cli_alert', sender_type: 'app' }) => original({
+    message_id: id, chat_id: chat, msg_type: 'interactive', body: { content: JSON.stringify({ title, elements: [] }) }, sender })
+  const bot = { id: 'cli_alert', sender_type: 'app' }
+  const progressTitle = JSON.stringify({ title: '[发布] 失败' })
+  const ids = ['success', 'running', 'warning', 'critical', 'recovery', 'other', 'human', 'post', 'text']
+  const f = fixture(args => {
+    if (args.includes('+messages-search')) return envelope({ messages: ids.map(id => discovered(id, id === 'other' ? 'oc_other' : 'oc_alerts')), has_more: false })
+    return envelope({ items: [
+      card('success', '[运行进展] 成功'), card('running', '[运行进展] 运行中'),
+      card('warning', '[流程级][警告] scheduled unit'), card('critical', '[平台级][严重] quota'),
+      card('recovery', '[容器级][恢复] readiness'), card('other', '[运行进展] 成功', 'oc_other'),
+      card('human', '[流程级][警告] 人工转发', 'oc_alerts', { id: 'ou_sender', sender_type: 'user' }),
+      original({ message_id: 'post', chat_id: 'oc_alerts', msg_type: 'post', sender: bot, body: { content: progressTitle } }),
+      original({ message_id: 'text', chat_id: 'oc_alerts', msg_type: 'text', sender: bot, body: { content: JSON.stringify({ text: progressTitle }) } }),
+    ] })
+  })
+  expect(await scanLarkMessages(f.ctx, binding, range, { alertChats: ['oc_alerts'], severities: ['警告', '严重', '恢复'] }))
+    .toMatchObject({ complete: true, records: 7 })
+  expect(f.events.map(event => event.id)).toEqual(['warning', 'critical', 'recovery', 'other', 'human', 'post', 'text'])
 })
 
 it('widens fractional search bounds to the whole seconds accepted by the live API', async () => {

@@ -1,5 +1,5 @@
 /** Host and context interfaces connecting Source plugins to the application; also imported by the web panel, so it must not import Node-only modules. */
-import type { ChannelRef, ReceiveResult, OutboundMessage, Thread, ThreadFact, ThreadRef, Ticket, Trigger } from '../core/index.ts'
+import type { ChannelRef, ReceiveResult, OutboundMessage, Thread, ThreadFact, ThreadRef, Ticket, Trigger, TriggerDisposition } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -64,7 +64,9 @@ export interface SourceContext {
     /** Reports that a followed Thread closed at `at`; each open ticket following it ends once no `own` Thread remains open and no resumed work is still running. */
     threadClosed(thread: ThreadRef, outcome: 'merged' | 'closed', at: string): void
   }
-  triggers: { get(id: string): Trigger | undefined; /** The newest Trigger on a Thread. */ latest(thread: string): Trigger | undefined }
+  triggers: { get(id: string): Trigger | undefined; /** The newest Trigger on a Thread. */ latest(thread: string): Trigger | undefined;
+    /** How intake disposed of a Trigger: an absent value means it was not stored through intake. */
+    disposition(id: string): TriggerDisposition | undefined }
   notify(message: OutboundMessage): void
   /** Reports the state of one of this kind's declared health entries; throws for undeclared entry names. */
   report(entry: string, health: Health): void

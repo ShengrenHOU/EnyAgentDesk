@@ -5,7 +5,7 @@
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
   "license": "Apache-2.0",
-  "version": "0.5.36",
+  "version": "0.5.38",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
   "repository": {
@@ -36,6 +36,7 @@
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
     "./activity-watch": "./lib/activity-watch.js",
+    "./lark-workspace-watch": "./lib/lark-workspace-watch.js",
     "./workbench": "./lib/workbench.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
@@ -82,7 +83,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build",
-    "check:native": "tsc --noEmit && vitest run tests/codex-rpc.spec.ts tests/codex-executor.spec.ts tests/windows-environment.spec.ts tests/core-engine.spec.ts tests/policy.spec.ts tests/docs.spec.ts tests/class-docs.spec.ts && tsdown",
+    "check:native": "tsc --noEmit && vitest run tests/codex-rpc.spec.ts tests/codex-executor.spec.ts tests/windows-environment.spec.ts tests/core-engine.spec.ts tests/policy.spec.ts tests/docs.spec.ts tests/class-docs.spec.ts tests/lark-workspace.spec.ts tests/lark-event-bridge.spec.ts tests/feishu-read.spec.ts tests/activity-lark.spec.ts tests/activity-wechat.spec.ts tests/activity.spec.ts && tsdown",
     "check:codex-live": "vitest run tests/codex-live.spec.ts",
     "check:owner-launcher": "python tests/test_owner_launcher.py"
   },
@@ -92,11 +93,11 @@
   },
   "packageManager": "pnpm@11.28.10",
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.76.0",
     "proper-lockfile": "4.1.2",
     "zod": "4.6.6"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-client-ui-session": "^0.2.1-alpha.2",
     "@deepseek-ai/cordis": "4.0.5-alpha.1",
     "@deepseek-ai/dsh-agent": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-api-session-controller": "^0.2.1-alpha.2",
@@ -107,6 +108,7 @@
     "@deepseek-ai/dsh-client-ui-conversation": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-layout": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.1-alpha.2",
+    "@deepseek-ai/dsh-client-ui-session": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-sidebar": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.1-alpha.2",

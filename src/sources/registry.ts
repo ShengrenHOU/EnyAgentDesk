@@ -1,6 +1,6 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger, Ticket, Deliverable } from '../core/index.ts'
-import type { ImContextReader } from './im-context.ts'
+import type { ImContextReader, ImReadPage, ImReadRequest } from './im-context.ts'
 import { ImContextReadError } from './im-context.ts'
 import { CliError } from '../infra/commands.ts'
 import type { Commands } from '../infra/commands.ts'
@@ -177,6 +177,27 @@ export class SourceRegistry implements SourceScope {
         throw new ImContextReadError(retryable)
       }
     } }
+  }
+  /**
+   * Reads a bounded conversation window through the one enabled Source that owns `provider`. The configuration is
+   * captured before the read and checked again afterwards, so a Source switch, disable or account change cannot
+   * return content read under a different configuration.
+   */
+  async imRead(commands: Commands, request: ImReadRequest, cursor: string | undefined, signal: AbortSignal): Promise<ImReadPage> {
+    for (const kind of this.kinds.values()) {
+      const capability = kind.imRead
+      if (!capability?.providers.includes(request.provider)) continue
+      const instance = this.resolve(kind, this.settings().sources[kind.kind])
+      if (!instance.enabled) continue
+      const configuration = JSON.stringify(instance.config)
+      const page = await capability.read(commands.withSignal(signal), request, cursor, instance.config, signal)
+      const current = this.resolve(kind, this.settings().sources[kind.kind])
+      if (this.kinds.get(kind.kind) !== kind || !current.enabled || JSON.stringify(current.config) !== configuration) {
+        throw new Error('IM read Source configuration changed during the read')
+      }
+      return page
+    }
+    throw new Error(`No enabled Source provides read-only access to ${request.provider}`)
   }
   repliesTo(trigger: Trigger): string | undefined { return this.kinds.get(trigger.source)?.repliesTo?.(trigger) }
   threadContext(trigger: Trigger, settings = this.settings()): TriggerContext | undefined {

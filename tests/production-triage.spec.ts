@@ -122,7 +122,7 @@ it('delivers a real durable production assessment and completes information with
   expect(deliver).toHaveBeenCalledTimes(1)
   let batch = service.read(created!.id); expect(batch.state).toBe('awaiting'); expect(service.activeCount()).toBe(1)
   expect(Object.keys(batch.contexts)).toEqual(['a', 'b']); expect(batch.contexts.a!.hash).not.toBe(batch.contexts.b!.hash)
-  expect(() => service.submit(batch.id, 1, batch.binding!, result(created!))).toThrow('Read every')
+  expect(() => service.submit(batch.id, 1, batch.binding!, result(created!))).toThrow('Read the first')
   consume(created!); const value = result(created!)
   const completed = service.submit(batch.id, 1, batch.binding!, value)
   expect(service.submit(batch.id, 1, batch.binding!, value)).toEqual(completed)
@@ -133,7 +133,7 @@ it('delivers a real durable production assessment and completes information with
   engine.evaluateDue(); expect(store.threads.get('im:chat')!.pending).toEqual([])
   for (const table of ['decision', 'ticket', 'outbox']) expect(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0)
   expect(store.triggers.disposition('a')!.acked).toBeUndefined()
-  expect(productionOverview(store, evidence).groups[0]).toMatchObject({ state: 'completed', counts: { informational: 2 }, messages: 2 })
+  expect(productionOverview(store, evidence).groups[0]).toMatchObject({ state: 'completed', counts: { informational: 2 }, messages: 2, coverage: { mode: 'explicit' } })
 })
 
 it('requires exact exhaustive/bidirectional coverage and exact current context binding', async () => {
@@ -172,7 +172,7 @@ it('redacts completed semantic content when source permission/config changes', a
   service.submit(live.id, 1, live.binding!, result(batch!)); source = false
   const view = productionOverview(store, evidence)
   expect(view.groups[0]!.redacted).toBe(true); expect(JSON.stringify(view)).not.toContain('shared reference')
-  expect(view.groups[0]!.conversation).toBeUndefined(); expect(() => service.read(live.id)).toThrow()
+  expect(view.groups[0]!.conversation).toBeUndefined(); expect(view.groups[0]).not.toHaveProperty('coverage'); expect(() => service.read(live.id)).toThrow()
 })
 
 it.each(['informational', 'suggested_action'] as const)('accepts %s from matched partial evidence while preserving its gaps', async kind => {
@@ -202,6 +202,26 @@ it('invalidates in-flight reads on retry, parks errors once, and never automatic
   const retry = service.retry(batch!.id, 1); release(); await effects.idle('triageAssessment')
   expect(retry.generation).toBe(2); expect(() => service.context(batch!.id, 1, 'a')).toThrow('Stale')
   expect(deliver.mock.calls.every(([id]) => id.endsWith(':2'))).toBe(true)
+})
+
+it('recomputes coverage gaps on retry instead of retaining the failed attempt', async () => {
+  let first = true
+  native = id => ({ assertActive() {}, async read(request) {
+    const anchor = { id, text: `private ${id}`, version: 'v1', createdAt: now }
+    const gaps = first ? ['page_budget'] : []
+    first = false
+    return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
+      start: request.start, end: request.end, consistency: 'live_paginated', gaps, anchor, messages: [anchor] }
+  } })
+  add('a'); const [batch] = start(); await drain()
+  const live = service.read(batch!.id)
+  expect(live.coverage!.gaps).toContain('page_budget')
+  const retry = service.retry(live.id, 1)
+  expect(retry.coverage!.gaps).not.toContain('page_budget')
+  await drain()
+  const reread = service.read(retry.id)
+  expect(reread.coverage!.gaps).not.toContain('page_budget')
+  consume(retry); expect(service.submit(retry.id, retry.generation, reread.binding!, result(retry)).state).toBe('completed')
 })
 
 it('rolls back unfinished batches with original age and leaves new arrivals intact', async () => {
@@ -239,14 +259,14 @@ it('migrates a schema11 held generated column and protects schema14 from old rea
   expect(() => { if (persistedVersion > legacySchemaVersion) throw new Error(`Unsupported orchestrator database version ${persistedVersion}`) }).toThrow('version 14')
 })
 
-it('refuses partial pages and swapped input context hashes', async () => {
+it('keeps page order and context hashes exact while accepting first-page reads', async () => {
   const normal = native; native = id => { const reader = normal(id); return { ...reader, async read(...args) { const page = await reader.read(...args); page.messages.push({ id: 'extra', text: 'x'.repeat(7999), version: 'v1', createdAt: now }); return page } } }
   add('a'); add('b'); const [batch] = start(['a', 'b']); await drain(); const live = service.read(batch!.id), value = result(batch!)
   service.context(live.id, 1, 'a', 0); service.context(live.id, 1, 'b', 0)
-  expect(() => service.submit(live.id, 1, live.binding!, value)).toThrow('Read every')
   expect(() => service.context(live.id, 1, 'a', 16000)).toThrow('in order')
-  consume(batch!); value.items[0]!.context.hash = value.items[1]!.context.hash
+  value.items[0]!.context.hash = value.items[1]!.context.hash
   expect(() => service.submit(live.id, 1, live.binding!, value)).toThrow('Per-input')
+  expect(service.submit(live.id, 1, live.binding!, result(batch!)).state).toBe('completed')
 })
 
 it('blocks native read failures once and permits explicit source-configuration retry without changing immutable inputs', async () => {
@@ -464,7 +484,51 @@ it('drops carried reads when a retried generation collects different content', a
   await drain()
   const live = service.read(batch!.id)
   expect(live.state).toBe('awaiting')
-  expect(() => service.submit(live.id, live.generation, live.binding!, result(batch!))).toThrow('Read every')
+  expect(() => service.submit(live.id, live.generation, live.binding!, result(batch!))).toThrow(/unread: a/)
+})
+
+it('accepts the first page of a multi-page context without every later page', async () => {
+  native = id => longContext(id)
+  add('a'); const [batch] = start(); await drain()
+  const live = service.read(batch!.id), page = service.context(live.id, live.generation, 'a', 0)
+  expect(page.next_offset).toBe(8000)
+  expect(service.submit(live.id, live.generation, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it('links a current matter proposal from a first-page read, like the submit receipt it cites', async () => {
+  native = id => longContext(id)
+  add('a'); const [batch] = start(); await drain()
+  const live = service.read(batch!.id)
+  service.context(live.id, live.generation, 'a', 0)
+  const value = { model: 'reported-model',
+    items: [{ triggerId: 'a', kind: 'informational' as const, reason: 'A shared reference',
+      context: { revision: live.contexts.a!.revision, hash: live.contexts.a!.hash }, matterIds: ['m1'] }],
+    matters: [{ id: 'm1', title: 'Shared matter', reason: 'Shared', triggerIds: ['a'] }],
+    proposals: [{ localMatterId: 'm1', relation: 'new' as const, assessment: 'informational' as const, reason: 'Shared',
+      evidence: [{ kind: 'trigger' as const, batchId: live.id, generation: live.generation, triggerId: 'a', version: 'v1' }] }] }
+  expect(service.submit(live.id, live.generation, live.binding!, value).state).toBe('completed')
+})
+
+it('names unread inputs in the refusal and accepts a later first-page read in the same batch', async () => {
+  add('a'); add('b'); const [batch] = start(['a', 'b']); await drain()
+  const live = service.read(batch!.id)
+  expect(() => service.submit(live.id, live.generation, live.binding!, result(batch!))).toThrow(/unread: a, b/)
+  for (const input of batch!.inputs) service.context(live.id, live.generation, input.triggerId, 0)
+  expect(service.submit(live.id, live.generation, live.binding!, result(batch!)).state).toBe('completed')
+})
+
+it('accepts an edited anchor read at its first page only as unknown', async () => {
+  native = id => ({ assertActive() {}, async read(request) {
+    const anchor = { id, text: `private ${id}`, version: 'v2', createdAt: now }
+    return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
+      start: request.start, end: request.end, consistency: 'live_paginated', gaps: [], anchor, messages: [anchor] }
+  } })
+  add('a'); add('b'); const [batch] = start(['a', 'b']); await drain()
+  const live = service.read(batch!.id)
+  for (const input of batch!.inputs) service.context(live.id, live.generation, input.triggerId, 0)
+  expect(() => service.submit(live.id, live.generation, live.binding!, result(batch!))).toThrow('Changed or missing anchor must remain unknown')
+  const completed = service.submit(live.id, live.generation, live.binding!, result(batch!, 'unknown'))
+  expect(completed.state).toBe('completed'); expect(completed.result!.items.every(item => item.kind === 'unknown')).toBe(true)
 })
 
 

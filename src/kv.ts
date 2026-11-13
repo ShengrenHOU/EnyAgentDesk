@@ -7,6 +7,9 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { MailState } from './sources/mail.ts'
+import type { TaskState } from './sources/task.ts'
+import type { CalendarState } from './sources/calendar.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -61,4 +64,10 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /** Lark workspace Sources: per-account/folder mail progress, task versions, and calendar event versions. */
+  workspace: {
+    mail: family<MailState, [account: string, folder: string]>('workspace-mail:'),
+    task: record<TaskState>('workspace-task'),
+    calendar: record<CalendarState>('workspace-calendar'),
+  },
 }
