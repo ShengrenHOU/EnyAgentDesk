@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
 import { feishuLink, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
-import { refreshChatNames, runFeishu } from './feishu-loops.ts'
+import { refreshChatNames, runFeishu, receiveSharedFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
 import { sourceContext } from './host.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -36,7 +36,6 @@ export const feishuKind: SourceKind<FeishuConfig> = {
   description: { zh: '接收下列群和私聊中发给机器人的消息，补收群历史并轮询订阅的线程。', en: 'Receives messages to the bot in these chats and direct messages, recovers chat history and polls subscribed Threads.' },
   schema: FeishuConfigSchema,
   fields: [
-    { key: 'sharedEvents', type: 'switch', advanced: true, label: { zh: '由统一个人事件接入接收', en: 'Receive through the personal event transport' } },
     { key: 'cli', type: 'text', label: { zh: '机器人的 lark-cli', en: 'Bot lark-cli' },
       hint: { zh: '命令名或绝对路径，指向 lark-cli；机器人配置目录必须仅允许机器人身份。保存时读取应用和机器人，然后重启 dsh-superagent。', en: 'A lark-cli command name or absolute path. The bot configuration must allow only the bot identity. Saving reads the app and bot, then restarts dsh-superagent.' } },
     { key: 'configDir', type: 'text', advanced: true, label: { zh: '机器人配置目录', en: 'Bot configuration directory' },
@@ -132,8 +131,16 @@ export const feishuKind: SourceKind<FeishuConfig> = {
 export const feishuSettings = (sources: SourceRegistry): FeishuConfig => sources.instance<FeishuConfig>(SOURCE)?.config ?? FeishuConfigSchema.parse({})
 
 export const name = 'dsh-superagent-feishu'
-export const inject = ['orchestrator']
+export const inject = ['orchestrator', 'larkAccount']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(feishuKind), 'feishu: source kind')
-  ctx.effect(() => ctx.orchestrator.runSource(signal => runFeishu(sourceContext(ctx.orchestrator, feishuKind), signal)))
+  const source = sourceContext(ctx.orchestrator, feishuKind), account = ctx.larkAccount
+  ctx.effect(() => account.subscribe(['im.message.receive_v1'], async event => {
+    if (!source.config('feishu')) return false
+    return receiveSharedFeishu(source, event.payload)
+  }, status => {
+    if (account.mode === 'sdk') source.report('feishu', { state: source.config('feishu') ? status.state : 'paused',
+      detail: `${status.detail}; received ${status.received}, accepted ${status.accepted}, failed ${status.failed} deliveries`, at: new Date().toISOString() })
+  }))
+  ctx.effect(() => ctx.orchestrator.runSource(signal => runFeishu(source, signal, account.mode === 'cli')))
 }

@@ -112,6 +112,25 @@ class OwnerLauncherTest(unittest.TestCase):
             opener.open.return_value.__enter__.return_value = io.StringIO(json.dumps(result))
         return patch.object(launcher.urllib.request, 'build_opener', return_value=opener)
 
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows scheduled supervisor launcher selection')
+    def test_supervisor_follows_configured_release_and_refuses_invalid_override(self):
+        source = SCRIPT.with_name('owner-supervisor.ps1')
+        (self.root / source.name).write_bytes(source.read_bytes())
+        response = 'print(\'{"running":false,"manually_stopped":true}\')\n'
+        (self.root / 'owner-launcher.py').write_text(
+            'from pathlib import Path\nPath(__file__).with_name("wrong-launcher.txt").write_text("called")\n' + response,
+            encoding='utf-8')
+        selected = self.root / 'verified-launcher.py'
+        selected.write_text(response, encoding='utf-8')
+        config = self.root / 'config.json'
+        shell = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
+        for target, expected in [(str(selected), 0), ('relative-launcher.py', 1), (str(self.root / 'missing.py'), 1)]:
+            config.write_text(json.dumps({**self.config, 'launcherPath': target}), encoding='utf-8')
+            result = subprocess.run([shell, '-NoProfile', '-File', str(self.root / source.name), '-Config', str(config)],
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, expected, result.stderr.decode(errors='replace'))
+            self.assertFalse((self.root / 'wrong-launcher.txt').exists())
+
     @unittest.skipUnless(sys.platform == 'win32', 'Windows scheduled-task wrapper')
     def test_supervisor_follows_validated_listener_even_with_stale_startup_receipt(self):
         source = SCRIPT.with_name('owner-supervisor.ps1')
@@ -472,6 +491,42 @@ class OwnerLauncherTest(unittest.TestCase):
         with patch.object(launcher.webbrowser, 'open', return_value=True) as browser:
             launcher.open_panel(self.config)
         browser.assert_called_once_with('http://127.0.0.1:3083/?token=synthetic#main-conversation', new=0)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows owner process identity checks')
+    def test_owned_stop_checks_listener_and_command_line_before_recording_stop_intent(self):
+        config = launcher.validate_config(self.platform_config())
+        (self.root / config['receiptName']).write_text(json.dumps({'pid': 123, 'profile': config['profile']}), encoding='utf-8')
+        current = {**self.ready, 'paused': True, 'load': {'running': 0}}
+        original_run = subprocess.run
+        marker = self.root / config['stopMarker']
+        for wrong_pid, wrong_program in [(False, False), (True, False), (False, True)]:
+            marker.unlink(missing_ok=True)
+            prelude = r'''
+$script:stopped = $false
+function Get-NetTCPConnection { if (-not $script:stopped) { [pscustomobject]@{ OwningProcess = $target.pid + OFFSET } } }
+function Get-CimInstance { [pscustomobject]@{ ExecutablePath = $target.node; CommandLine = ('"' + $target.node + '" "' + ENTRY + '" ' + $target.profile + ' --no-open') } }
+function Stop-Process { param([int]$Id, [switch]$Force); $script:stopped = $true }
+'''.replace('OFFSET', '1' if wrong_pid else '0').replace('ENTRY', "'another-program.js'" if wrong_program else '$target.entry')
+            def execute(command, **kwargs):
+                return original_run([*command[:-1], prelude + command[-1]], **kwargs)
+            with patch.object(launcher, 'state', return_value=current), patch.object(launcher.subprocess, 'run', side_effect=execute):
+                if wrong_pid or wrong_program:
+                    with self.assertRaisesRegex(RuntimeError, 'Owned stop failed'):
+                        launcher.stop_owned(config)
+                    self.assertFalse(marker.exists())
+                else:
+                    self.assertEqual(launcher.stop_owned(config), 123)
+                    self.assertTrue(marker.exists())
+        current['load']['running'] = 1
+        with patch.object(launcher, 'state', return_value=current), patch.object(launcher.subprocess, 'run') as run:
+            with self.assertRaisesRegex(RuntimeError, 'drain'):
+                launcher.stop_owned(config)
+            run.assert_not_called()
+        marker.unlink(missing_ok=True)
+        with patch.object(launcher, 'state', return_value=None), patch.object(launcher.subprocess, 'run') as run:
+            self.assertIsNone(launcher.stop_owned(config))
+            self.assertTrue(marker.exists())
+            run.assert_not_called()
 
 
 if __name__ == '__main__':

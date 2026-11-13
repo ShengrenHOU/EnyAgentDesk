@@ -11,7 +11,13 @@ export const SOURCE = 'calendar'
 /** Events seen before activation are baseline versions; the window is reread each round, so a vanished event is cancelled. */
 export interface CalendarState {
   baselineAt?: string
-  events?: Record<string, { version: string; start: string; summary: string; organizer?: string; revision?: number; cancelled?: true }>
+  events?: Record<string, { version: string; start: string; summary: string; organizer?: string; revision?: number; cancelled?: true;
+    /** Set once a series master is projected through its bounded instance view. */
+    recurring?: true
+    /** In-window occurrence starts last projected for a series; absent on versions written before series projection. */
+    windowStarts?: string[]
+    /** Master fields independent of the first projected occurrence; absent on versions written before series projection. */
+    masterVersion?: string }>
   lastSuccess?: string
   nativeCalendarId?: string
   syncToken?: string
@@ -33,6 +39,7 @@ export const CalendarEventSchema = z.object({
   event_organizer: z.object({ user_id: z.string().nullish(), display_name: z.string().nullish() }).nullish(),
   self_rsvp_status: z.string().nullish(), app_link: z.string().nullish(),
   vchat: z.object({ meeting_url: z.string().nullish() }).nullish(), is_exception: z.boolean().nullish(),
+  recurrence: z.string().nullish(), recurring_event_id: z.string().nullish(),
 })
 const Event = CalendarEventSchema
 type Event = z.infer<typeof Event>
@@ -75,6 +82,8 @@ export function calendarTrigger(event: Event, change: CalendarChange, at: string
     meta: { eventId: event.event_id, summary: clean(event.summary ?? ''), change, start, ...end ? { end } : {},
       ...event.event_organizer?.user_id ? { organizer: event.event_organizer.user_id } : {},
       ...event.self_rsvp_status ? { rsvp: event.self_rsvp_status } : {}, version: eventVersion(event), revision,
+      ...event.recurrence ? { recurring: true } : {},
+      ...event.recurring_event_id ? { seriesId: event.recurring_event_id } : {},
       ...event.is_exception ? { exception: true } : {} } }
 }
 /** A cancellation has no readable event body, so it reuses the last version and organizer seen for that event. */

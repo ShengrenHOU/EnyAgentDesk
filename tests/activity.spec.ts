@@ -20,8 +20,9 @@ import { imDedupKey, imMessageId, imObjectId } from '../src/sources/im-identity.
 import { testDeployment } from './fixtures/deployment.ts'
 import { workbenchKind } from '../src/sources/workbench.ts'
 import { KV } from '../src/kv.ts'
-import { queueLarkEvent, pendingLarkEvents, requestLarkReconcile, larkReconcileToken } from '../src/sources/lark-event-inbox.ts'
+import { queueLarkEvent, pendingLarkEvents, requestLarkReconcile, larkReconcileToken, finishLarkReconcile } from '../src/sources/lark-event-inbox.ts'
 import { documentEventChanges } from '../src/sources/document-events.ts'
+import { prepareLarkSubscriptions, runLarkSubscriptions } from '../src/sources/lark-subscriptions.ts'
 
 vi.mock('../src/sources/activity-lark.ts', () => ({ scanLarkMessages: vi.fn(), scanLarkDocuments: vi.fn(), readLarkActivityContext: vi.fn(),
   readLarkImContext: vi.fn(), readLarkWindow: vi.fn(), resolveLarkConversation: vi.fn() }))
@@ -113,11 +114,86 @@ it('coalesces watched document notifications, validates native identity and conf
   const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => JSON.stringify(args[0] === 'auth'
     ? { identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } }
     : { ok: true, identity: 'user', data: { document: { document_id: 'doc-one', revision_id: 3, content: 'Changed project plan' } } }))
-  const changes = await documentEventChanges(h.ctx, bindings.lark, watched, new AbortController().signal)
-  expect(changes.events).toMatchObject([{ version: key('revision:3', 'Changed project plan'), text: 'Changed project plan', label: 'Project plan' }])
+  const delivered: ActivityEvent[] = []
+  await documentEventChanges(h.ctx, bindings.lark, watched, new AbortController().signal, async event => {
+    expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toHaveLength(2)
+    delivered.push(event)
+  })
+  expect(delivered).toMatchObject([{ version: key('revision:3', 'Changed project plan'), text: 'Changed project plan', label: 'Project plan' }])
   expect(run.mock.calls.filter(([, args]) => args.includes('+fetch'))).toHaveLength(1)
-  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toHaveLength(2)
-  changes.confirm()
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toEqual([])
+})
+
+it('subscribes later documents when an earlier object is denied, and skips auth when events are off', async () => {
+  const h = host(), subscribed: string[] = []
+  saveConfig(config({ documentEvents: true, watchedDocuments: ['denied', 'healthy'].map(token =>
+    ({ token, type: 'docx', url: `https://example.feishu.cn/docx/${token}`, name: token })) }))
+  const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => {
+    if (args[0] === 'auth') return JSON.stringify({ identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } })
+    const path = args.find(value => value.startsWith('/open-apis/drive/'))!
+    subscribed.push(path)
+    return JSON.stringify(path.includes('/denied/') ? { ok: false, identity: 'user', error: { code: 99991672 } } : { ok: true, identity: 'user', data: {} })
+  })
+  try {
+    const failures = await prepareLarkSubscriptions(h.ctx, bindings.lark, new AbortController().signal, ['activity'])
+    expect(subscribed).toEqual(['/open-apis/drive/v1/files/denied/subscribe', '/open-apis/drive/v1/files/healthy/subscribe'])
+    expect(failures.activity).toContain('code=99991672')
+    saveConfig(config({ documentEvents: false }))
+    run.mockClear()
+    expect(await prepareLarkSubscriptions(h.ctx, bindings.lark, new AbortController().signal, ['activity'])).toEqual({})
+    expect(run).not.toHaveBeenCalled()
+  } finally { run.mockRestore() }
+})
+
+it('catches up after a late subscription succeeds without turning idle subscription checks into reads', async () => {
+  const h = host(), controller = new AbortController(), report = vi.fn()
+  saveConfig(config({ documentEvents: true, watchedDocuments: [{ token: 'document', type: 'docx', url: 'https://example.feishu.cn/docx/document', name: 'Plan' }] }))
+  let denied = true
+  const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => JSON.stringify(args[0] === 'auth'
+    ? { identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } }
+    : denied ? { ok: false, identity: 'user', error: { code: 99991672 } } : { ok: true, identity: 'user', data: {} }))
+  const owner = bindings.lark.expectedUserId
+  requestLarkReconcile(h.ctx, owner, 'documents')
+  const loop = runLarkSubscriptions(h.ctx, bindings.lark, ['activity'], controller.signal, report, 1)
+  try {
+    await vi.waitFor(() => expect(report).toHaveBeenCalledWith({ activity: expect.stringContaining('99991672') }), { interval: 1 })
+    // The earlier connection catch-up finished while the resource subscription was unavailable.
+    finishLarkReconcile(h.ctx, owner, 'documents', larkReconcileToken(h.ctx, owner, 'documents'))
+    denied = false
+    await vi.waitFor(() => expect(larkReconcileToken(h.ctx, owner, 'documents')).toBe(1), { interval: 1 })
+    finishLarkReconcile(h.ctx, owner, 'documents', 1)
+    run.mockClear()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(run).not.toHaveBeenCalled()
+    expect(larkReconcileToken(h.ctx, owner, 'documents')).toBeUndefined()
+  } finally { controller.abort(); await loop; run.mockRestore() }
+})
+
+it('isolates document reads and intake failures while retaining a newer notification during delivery', async () => {
+  const h = host(), watched = config({ documentEvents: true, watchedDocuments: ['denied', 'rejected', 'good'].map(token =>
+    ({ token, type: 'docx' as const, url: `https://example.feishu.cn/docx/${token}` })) })
+  saveConfig(watched)
+  const enqueue = (token: string, id = token) => queueLarkEvent(h.ctx, bindings.lark.expectedUserId, 'documents', {
+    eventType: 'drive.file.edit_v1', eventId: id, at: '1794500000000', payload: { file_token: token, file_type: 'docx' } })
+  for (const token of ['denied', 'rejected', 'good']) enqueue(token)
+  let denied = true
+  vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_cli, args) => {
+    if (args[0] === 'auth') return JSON.stringify({ identities: { user: { status: 'ready', openId: bindings.lark.expectedUserId } } })
+    const token = args[args.indexOf('--doc') + 1]
+    return JSON.stringify(token === 'denied' && denied ? { ok: false, identity: 'user', error: { code: 1061004, type: 'forbidden' } }
+      : { ok: true, identity: 'user', data: { document: { document_id: token, revision_id: 1, content: 'Fixture document' } } })
+  })
+  const delivered: string[] = []
+  await expect(documentEventChanges(h.ctx, bindings.lark, watched, new AbortController().signal, async event => {
+    if (event.id === 'rejected') throw new Error('Intake rejected')
+    delivered.push(event.id)
+    enqueue('good', 'good-newer')
+  })).rejects.toThrow('retained for retry (2)')
+  expect(delivered).toEqual(['good'])
+  expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents').map(event => event.eventId).sort())
+    .toEqual(['denied', 'good-newer', 'rejected'])
+  denied = false
+  await documentEventChanges(h.ctx, bindings.lark, watched, new AbortController().signal, async () => {})
   expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toEqual([])
 })
 
@@ -135,7 +211,7 @@ it('keeps the other readers running when a retained document notification cannot
   await h.scan()
   expect(scanWechatActivity).toHaveBeenCalledOnce()
   expect(store.get(activityState.progress('monitor', 'monitor', 'feishu-documents')))
-    .toMatchObject({ failures: 1, error: expect.stringContaining('forbidden') })
+    .toMatchObject({ failures: 1, error: expect.stringContaining('1061004') })
   expect(pendingLarkEvents(h.ctx, bindings.lark.expectedUserId, 'documents')).toHaveLength(1)
   fail = false
   clock += 120_000
@@ -496,11 +572,13 @@ it('uses the host Source lifecycle and denies model-owned consumption acknowledg
   const disposers: (() => unknown)[] = []
   const guard = vi.fn<Context['tools']['guard']>().mockReturnValue(() => {})
   const runSource = vi.fn(() => async () => {})
-  apply({ tools: { ...tools, guard }, orchestrator: { sources: h.sources, context: h.context, runSource },
+  apply({ tools: { ...tools, guard }, larkAccount: { binding: bindings.lark, mode: 'cli', checkLegacy: vi.fn(),
+    subscribe: (_types: string[], _receive: unknown, report: (status: { state: string }) => void) => { report({ state: 'starting' }); return () => {} } },
+    orchestrator: { sources: h.sources, context: h.context, runSource },
     effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
   { configDir: '/private/user-config', larkCli: '', expectedOwner: 'ou_owner', ownerChatId: 'oc_private', serverName: 'wechat_readonly' })
   expect(h.sources.kind('activity')).toBeDefined()
-  expect(runSource).toHaveBeenCalledOnce()
+  expect(runSource).toHaveBeenCalledTimes(2)
   const check = guard.mock.calls[0]![0]
   expect(check({ name: 'mcp__wechat_readonly__wechat_incremental_ack', agent: {} } as never)).toContain('Only the activity Source')
   expect(check({ name: 'mcp__wechat_readonly__wechat_incremental_ack' } as never)).toBeUndefined()

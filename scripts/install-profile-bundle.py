@@ -45,14 +45,14 @@ def install(profile, bundle, pnpm_js, node, receipt_path):
         command = [str(node), str(pnpm_js)]
         receipt['stage'] = 'validate_store'
         actual = subprocess.run([*command, 'store', 'path', '--store-dir', str(store_base)], cwd=profile,
-                                capture_output=True, text=True, encoding='utf-8', check=True)
+                                capture_output=True, text=True, encoding='utf-8', check=True, timeout=30)
         if Path(actual.stdout.strip()).resolve() != stored:
             raise ValueError('The selected pnpm does not resolve the installed store; no install was attempted')
         receipt['storeDir'] = str(stored)
         receipt['stage'] = 'install'
         subprocess.run([*command, 'add', 'file:' + bundle.resolve().as_posix(), '--store-dir', str(store_base),
                         '--ignore-scripts', '--config.confirmModulesPurge=false'], cwd=profile,
-                       capture_output=True, text=True, encoding='utf-8', check=True)
+                       capture_output=True, text=True, encoding='utf-8', check=True, timeout=300)
         receipt['stage'] = 'verify_manifest'
         resolved = json.loads(package.read_text(encoding='utf-8'))
         if resolved.get('name') != target['name'] or resolved.get('version') != target['version']:

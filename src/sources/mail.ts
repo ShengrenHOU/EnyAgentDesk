@@ -1,18 +1,30 @@
 /** Read-only Feishu mailbox Source: a bounded list of new mail becomes evidence Triggers, and replies stay outside it. */
 import { z } from 'zod'
 import { key, type Trigger } from '../core/index.ts'
+import { CliError } from '../infra/commands.ts'
 import { KV } from '../kv.ts'
 import type { SourceContext } from './host.ts'
 import type { ContextPart, SourceKind } from './kind.ts'
-import { larkUserBinding, type LarkUserBinding } from './lark-user.ts'
+import { larkUserBinding, type LarkUserBinding, type LarkUserBindings } from './lark-user.ts'
 import { finishLarkEvent, pendingLarkEvents, larkReconcileToken, finishLarkReconcile } from './lark-event-inbox.ts'
 
 export const SOURCE = 'mail'
+/**
+ * One queued message and the mailbox identity that named it. Entries written before provenance was recorded have no
+ * `mailbox` and are never guessed away; a later deterministic read result is required to recover them.
+ */
+export interface MailPending { id: string; at: string; mailbox?: string }
+/** Why a queued entry provably does not belong to this account/folder and was removed instead of retried. */
+export type MailRecoveryReason = 'mailbox_mismatch' | 'message_not_found'
+/** Bounded audit of recovered entries; the message ids stay visible but are no longer read or retried. */
+export interface MailRecovery { id: string; at: string; mailbox?: string; reason: MailRecoveryReason; recoveredAt: string }
 /** Bounded per-account/folder progress; the queue keeps message IDs whose detail read has not completed. */
 export interface MailState {
   since?: string
   seen?: string[]
-  pending?: { id: string; at: string }[]
+  pending?: MailPending[]
+  /** Entries recovered from a queue polluted by another mailbox or a vanished message, kept for audit. */
+  recovered?: MailRecovery[]
   lastSuccess?: string
   lastError?: string
 }
@@ -75,6 +87,27 @@ const Detail = z.object({
   attachments: z.array(z.unknown()).nullish().transform(value => value ?? []),
 })
 const MailThread = z.object({ thread_id: z.string().optional(), messages: z.array(Detail) })
+/** The mailbox profile API reports the verified user's native primary address for the `me` alias. */
+const MailProfile = z.object({ primary_email_address: z.string().nullish(), not_found_reason: z.string().nullish() })
+/** Feishu mail answers this code when the message id does not exist in the queried mailbox. */
+const MESSAGE_NOT_FOUND = 1234034
+/** A deterministic "not in this mailbox" answer, unlike a network, auth or rate-limit failure that may recover. */
+export const mailMessageMissing = (error: unknown): boolean => error instanceof CliError && error.code === MESSAGE_NOT_FOUND
+/** Addresses compare case-insensitively; a display name or message body never decides attribution. */
+const mailboxKey = (value: string): string => value.trim().toLowerCase()
+/**
+ * Resolves the account's native mailbox identity. `me` is only a CLI alias for the verified user's primary mailbox,
+ * so it is read once and then matched exactly; an unknown identity or failed profile read never widens to a wildcard.
+ */
+async function accountMailbox(user: LarkUserBindings, account: MailAccount): Promise<string> {
+  const configured = account.mailbox.trim()
+  if (configured !== 'me') return mailboxKey(configured)
+  const profile = await user.read(MailProfile, ['mail', 'user_mailboxes', 'profile', '--user-mailbox-id', 'me'])
+  const primary = profile.primary_email_address ? mailboxKey(profile.primary_email_address) : ''
+  if (!primary) throw new Error(`The primary mailbox identity for account ${account.id} could not be resolved`
+    + (profile.not_found_reason ? `: ${profile.not_found_reason}` : ''))
+  return primary
+}
 const CONTEXT_MESSAGES = 20, CONTEXT_CHARS = 4000, PREVIEW_CHARS = 500
 /** Strips line breaks and control characters from untrusted header values before they enter Trigger text. */
 export const mailText = (value: string, max = 200): string => value
@@ -245,26 +278,53 @@ export async function scanMailRound(ctx: SourceContext, binding: LarkUserBinding
   const notifications = config.events ? pendingLarkEvents(ctx, binding.expectedUserId, SOURCE) : []
   const reconnect = larkReconcileToken(ctx, binding.expectedUserId, SOURCE)
   const failures: string[] = []
-  let received = 0, filtered = 0, pendingCount = 0
+  const identityFailures = new Map<string, string>()
+  const identities = new Map<string, Promise<string>>()
+  const claimed = new Set<string>()
+  let received = 0, filtered = 0, pendingCount = 0, recoveredCount = 0
+  /** Resolves one account's native mailbox once per round so a notification is never matched by guesswork. */
+  const identityOf = (user: LarkUserBindings, account: MailAccount) => {
+    const cached = identities.get(account.id)
+    if (cached) return cached
+    const resolved = accountMailbox(user, account)
+    identities.set(account.id, resolved)
+    return resolved
+  }
   for (const account of accounts) {
     for (const folder of foldersOf(account)) {
       const stateKey = KV.workspace.mail(account.id, folder)
       const previous = ctx.state.get(stateKey) ?? {}
       const reconcile = !config.events || reconnect !== undefined || !previous.since || Date.parse(previous.since) + config.reconcileSeconds * 1000 <= now.getTime()
-      const incoming = notifications.filter(event => {
-        const address = event.payload.mail_address
-        return typeof address === 'string' && (account.mailbox === 'me' || address.toLowerCase() === account.mailbox.toLowerCase())
-      })
-      if (!reconcile && !incoming.length && !previous.pending?.length) continue
+      const queuedBefore = previous.pending ?? []
+      if (!reconcile && !notifications.length && !queuedBefore.length) continue
       const user = await larkUserBinding(ctx.commands.withSignal(signal), binding, () => signal.throwIfAborted())
+      // `me` is a CLI alias for the verified user's primary mailbox, never a wildcard. Resolve it before matching.
+      let effective: string | undefined, identityFailed = false
+      if (config.events && (notifications.length || queuedBefore.some(item => item.mailbox))) {
+        try { effective = await identityOf(user, account) }
+        catch (error) {
+          // Keep notifications and their pending entries for a later round instead of guessing a mailbox or folder.
+          identityFailed = true
+          identityFailures.set(account.id, String(error))
+        }
+      }
+      const incoming = config.events && effective
+        ? notifications.filter(event => typeof event.payload.mail_address === 'string' && mailboxKey(event.payload.mail_address) === effective)
+        : []
+      if (!reconcile && !incoming.length && !queuedBefore.length) continue
       const since = previous.since ?? new Date(now.getTime() - config.initialLookbackHours * 3600_000).toISOString()
       // Triage prints whole minutes; floor the cutoff so a message in the watermark's own minute is not skipped.
       const cutoff = Math.floor((Date.parse(since) - config.overlapSeconds * 1000) / 60_000) * 60_000
       const seen = new Set(previous.seen ?? [])
-      const pending = [...(previous.pending ?? [])]
+      const pending = [...queuedBefore]
+      const recovered = [...(previous.recovered ?? [])]
       for (const event of incoming) {
         const id = z.string().min(1).parse(event.payload.message_id)
-        if (!seen.has(id) && !pending.some(item => item.id === id)) pending.push({ id, at: new Date(Number(event.at)).toISOString() })
+        claimed.add(id)
+        const existing = pending.find(item => item.id === id)
+        // A fresh notification is the authority on its mailbox; it also repairs provenance after a config change.
+        if (existing) { if (effective) existing.mailbox = effective; continue }
+        if (!seen.has(id)) pending.push({ id, at: new Date(Number(event.at)).toISOString(), ...effective ? { mailbox: effective } : {} })
       }
       const queued = new Set(pending.map(item => item.id))
       const pages = new Set<string>()
@@ -289,13 +349,23 @@ export async function scanMailRound(ctx: SourceContext, binding: LarkUserBinding
         throw new Error('More new mail than the configured page budget; raise the messages or pages per poll so no mail is skipped')
       }
       pending.sort((a, b) => a.at.localeCompare(b.at))
-      const remaining: { id: string; at: string }[] = []
+      const remaining: MailPending[] = []
       const applied = new Set(seen)
       const outside = new Set<string>()
+      /** Records a proof-backed removal; the id stays auditable instead of being retried or silently cleared. */
+      const recover = (item: MailPending, reason: MailRecoveryReason) => {
+        recovered.push({ id: item.id, at: item.at, ...item.mailbox ? { mailbox: item.mailbox } : {}, reason, recoveredAt: now.toISOString() })
+        recoveredCount += 1
+        if (incoming.some(event => event.payload.message_id === item.id)) outside.add(item.id)
+      }
       for (const item of pending) {
         if (signal.aborted) throw signal.reason
         assertActive()
         if (seen.has(item.id)) continue
+        // Without the resolved identity the notification's folder cannot be verified, so retain the entry unread.
+        if (identityFailed) { remaining.push(item); continue }
+        // A recorded notification address that no longer matches proves foreign attribution; no read is attempted.
+        if (item.mailbox && effective && mailboxKey(item.mailbox) !== effective) { recover(item, 'mailbox_mismatch'); continue }
         try {
           const detail = await user.read(Detail, ['mail', '+message', '--mailbox', account.mailbox, '--message-id', item.id, '--html=false'])
           if (detail.message_id !== item.id) throw new Error('Mail detail does not match its event')
@@ -314,6 +384,8 @@ export async function scanMailRound(ctx: SourceContext, binding: LarkUserBinding
           applied.add(item.id)
           received += 1
         } catch (error) {
+          // A deterministic "message not found" proves this id is not in this mailbox; only transient failures stay queued.
+          if (mailMessageMissing(error)) { recover(item, 'message_not_found'); continue }
           // Keep the message queued: a transient read failure must not silently skip mail.
           remaining.push(item)
           failures.push(`${item.id}: ${String(error)}`)
@@ -323,6 +395,7 @@ export async function scanMailRound(ctx: SourceContext, binding: LarkUserBinding
       pendingCount += remaining.length
       assertActive()
       ctx.state.set(stateKey, { since: reconcile ? now.toISOString() : previous.since, seen: [...seen].slice(-1000), pending: remaining,
+        ...recovered.length ? { recovered: recovered.slice(-100) } : {},
         lastSuccess: remaining.length ? previous.lastSuccess : now.toISOString(), ...previous.lastError ? { lastError: previous.lastError } : {} })
       for (const event of incoming) {
         const id = String(event.payload.message_id)
@@ -331,10 +404,25 @@ export async function scanMailRound(ctx: SourceContext, binding: LarkUserBinding
       }
     }
   }
-  if (failures.length) throw new Error(`${failures.length} mail message(s) could not be read and stay queued: ${failures.slice(0, 3).join('; ')}`)
+  // A notification for no configured mailbox is outside this Source's read scope; acknowledging it avoids a permanent retry.
+  // An unresolved `me` identity could still claim any address, so attribution stays open until it resolves.
+  if (config.events && notifications.length && !identityFailures.size) {
+    for (const event of notifications) {
+      const id = typeof event.payload.message_id === 'string' ? event.payload.message_id : ''
+      if (id && !claimed.has(id)) finishLarkEvent(ctx, binding.expectedUserId, SOURCE, event, 'outside_scope')
+    }
+  }
+  if (identityFailures.size || failures.length) {
+    const parts: string[] = []
+    if (identityFailures.size) parts.push(`${identityFailures.size} mailbox identity read(s) failed; notifications stay queued: `
+      + [...identityFailures].slice(0, 3).map(([id, error]) => `${id}: ${error}`).join('; '))
+    if (failures.length) parts.push(`${failures.length} mail message(s) could not be read and stay queued: ${failures.slice(0, 3).join('; ')}`)
+    throw new Error(parts.join('; '))
+  }
   finishLarkReconcile(ctx, binding.expectedUserId, SOURCE, reconnect)
   const pending = pendingCount ? `; ${pendingCount} pending` : ''
-  return `${received} new, ${filtered} filtered${pending}; ${accounts.length} account(s)`
+  const recovered = recoveredCount ? `, ${recoveredCount} recovered` : ''
+  return `${received} new, ${filtered} filtered${pending}${recovered}; ${accounts.length} account(s)`
 }
 /** Reads one more page only when the CLI returned a usable continuation token. */
 function nextCursor(page: z.infer<typeof Triage>, seen: Set<string>): string | undefined {

@@ -8,6 +8,7 @@ import { TriageHandoffs } from '../src/app/triage-handoffs.ts'
 import { triageHandoffTools } from '../src/app/tools/triage-handoffs.ts'
 import { Engine, MemoryRepositories, type Policy, type Trigger, type Ticket } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
+import { Runtime } from '../src/app/runtime.ts'
 
 let directory: string, store: Store, engine: Engine, service: TriageHandoffs
 let paused: boolean, enabled: boolean, source: boolean, configuration: string, version: string, now: string
@@ -43,6 +44,24 @@ it('holds without Decisions, source ACK, Ticket, outbox or trigger changes; rele
   expect(store.triggers.get('a')).toEqual(original)
   for (const table of ['decision', 'ticket', 'outbox', 'effect']) expect(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0)
   expect(store.triageHandoffStatus().held).toBe(0)
+})
+
+it('reports normal held work as healthy and only current blocked owners as errors', () => {
+  add('a'); adopt()
+  const health = () => Object.getOwnPropertyDescriptor(Runtime.prototype, 'health')!.get!.call({ store, board: { all: {} }, machine: { triageHandoff: true } })
+  expect(health().triageHandoff.state).toBe('ready')
+  expect(store.triageHandoffStatus()).toMatchObject({ held: 1, blocked: 0 })
+  store.set('automatic-triage-group:test-owner', { state: 'blocked' })
+  expect(health().triageHandoff.state).toBe('error')
+  expect(store.triageHandoffStatus().blocked).toBe(1)
+  const disposition = store.triggers.disposition('a')!
+  store.triggers.saveDisposition('a', { ...disposition, triage: { ...disposition.triage!, phase: 'production', batchId: 'batch' } })
+  store.set('triage-production:batch', { id: 'batch', state: 'blocked', owner: 'test-owner', ownerGeneration: 1, inputs: [{ triggerId: 'a' }] })
+  expect(store.triageHandoffStatus()).toMatchObject({ held: 0, blocked: 1, state: 'blocked' })
+  expect(health().triageHandoff.state).toBe('error')
+  store.set('triage-production:batch', { id: 'batch', state: 'blocked', owner: 'test-owner', ownerGeneration: 2, inputs: [{ triggerId: 'a' }] })
+  expect(store.triageHandoffStatus().blocked).toBe(0)
+  expect(health().triageHandoff).toBeUndefined()
 })
 
 it('refuses mixed explicit, active, previously decided, subscribed, and ticket-input evidence without partial adoption', () => {

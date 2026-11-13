@@ -15,8 +15,8 @@ import { KV } from '../kv.ts'
 import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 import type { FeishuConfig } from './feishu.ts'
 
-export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
-  Promise.allSettled([watch, backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
+export const runFeishu = (ctx: SourceContext, signal: AbortSignal, live = true): Promise<unknown> =>
+  Promise.allSettled([...(live ? [watch] : []), backfillLoop, chatNamesLoop].map(loop => loop(ctx, signal)))
 const enabled = (ctx: SourceContext): FeishuConfig | undefined => ctx.config<FeishuConfig>(SOURCE)
 const bot = (ctx: SourceContext): FeishuBot => {
   const resolved = ctx.deployment.feishu
@@ -42,8 +42,8 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
   for (const ref of trigger.threads) ctx.threads.describe(threadKey(ref), { url: chatLink(ctx, chatId), facts: { chat } })
 }
 /** Preserve the bot's normal scope and source identity when the shared SDK transport owns the connection. */
-export async function receiveSharedFeishu(ctx: SourceContext, value: unknown): Promise<void> {
-  if (!enabled(ctx)?.sharedEvents) return
+export async function receiveSharedFeishu(ctx: SourceContext, value: unknown): Promise<boolean> {
+  if (!enabled(ctx)) return false
   const event = z.object({ message: z.object({ message_id: z.string(), chat_id: z.string(), chat_type: z.string(),
     create_time: z.string(), content: z.string(), message_type: z.string(), root_id: z.string().optional(), parent_id: z.string().optional(),
     thread_id: z.string().optional(), mentions: z.array(z.object({ key: z.string(), name: z.string(), id: z.object({ open_id: z.string() }) })).optional() }),
@@ -53,6 +53,7 @@ export async function receiveSharedFeishu(ctx: SourceContext, value: unknown): P
     mentions: event.message.mentions?.map(item => ({ key: item.key, name: item.name, id: item.id.open_id })) })
   const trigger = feishuTrigger(historyEvent(message, message.chat_id, event.message.chat_type === 'p2p'), bot(ctx).botId, bot(ctx).appId)
   if (trigger) await receiveLive(ctx, trigger)
+  return !!trigger
 }
 const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
@@ -74,9 +75,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       await delay(5000, undefined, { signal }).catch(() => {})
       continue
     }
-    if (enabled(ctx)?.sharedEvents) { await delay(5000, undefined, { signal }).catch(() => {}); continue }
     const running = new AbortController()
-    const check = setInterval(() => { if (!enabled(ctx) || enabled(ctx)?.sharedEvents) running.abort() }, 5000)
+    const check = setInterval(() => { if (!enabled(ctx)) running.abort() }, 5000)
     const stop = () => running.abort()
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()

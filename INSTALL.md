@@ -127,7 +127,7 @@ It checks the profile patch, the install receipt, the model key, that no other p
 - **Credentials stay the operator's.** The installer stores no token and no app secret. The GitHub wrapper, the Lark configuration and the model key remain in the operator's own configuration. Do not reuse another person's wrappers or state.
 - **The worker is not sandboxed from the operator.** It runs as the operator's OS user and can read the home directory. Use a separate OS account that contains only the agent's credentials if isolation matters.
 - **Local only.** The panel listens on `127.0.0.1`. Do not expose the management port or the token URL to a network.
-- **Early software.** Versions are 0.5.x; interfaces, settings and the database can change. Pin a release and read its notes before upgrading.
+- **Early software.** Versions are 0.x; interfaces, settings and the database can change. Pin a release and read its notes before upgrading.
 - **No automatic upgrade or recovery.** The installer starts the process; it does not install a watchdog, a service manager or a scheduled check.
 - **A running model key is required.** Evals and workers fail without a reachable model provider. The model provider and its cost are the operator's responsibility.
 - **Approval is not a security boundary.** Allowed lists and `observe` mode limit who may ask and what the agent does, but they do not sandbox the process. Keep the allowed lists short and review the first Tickets.
@@ -148,6 +148,36 @@ It checks the profile patch, the install receipt, the model key, that no other p
 | The panel does not open | Open the URL in `<stateDir>/panel-url.txt`; the token changes on restart. Read `install.log` in the same directory for the startup error. |
 | `status`/self-check fails after a credential change | Re-run the installer, then the self-check. |
 
+## Personal resource account and upgrade
+
+Optional activity, mailbox, task and calendar Sources share the `dsh-superagent-lark-account` plugin. Configure the owner's `configDir`, native `larkCli` and `expectedUserId` there. Keep the bot's CLI configuration separate; the host and workers can keep their normal user default. Resource scope and event switches stay in each Source's settings.
+
+The account's optional `eventCommand` selects one SDK transport for this profile. Supply a trusted credential-broker argument array invoking `node <package>/scripts/lark-event-bridge.mjs <app-id>`, with only `FEISHU_APP_SECRET` injected into its child environment. Without this command, the bot uses its existing CLI event consumer. Remove a former external CLI consumer only after checking who uses it. Publish application events and subscribe the selected resources; a connected socket is not proof that a resource has delivered an event.
+
+When upgrading a profile that configured personal credentials in the activity or workspace plugin, prepare a migrated patch before activation:
+
+```sh
+node scripts/migrate-lark-account.mjs --input <profile>/cordis.patch.yml --output <private-staging>/cordis.patch.yml
+```
+
+The helper moves account settings into their single owner, preserves native expressions, refuses conflicting accounts and writes only a new candidate file. Review and back up the existing patch before applying it to a stopped profile. No user authorization, bot configuration, Source scope or stored progress is changed. Existing bot-only installations need no account migration.
+
+## Updating an owner-managed Windows installation
+
+For an installation already using `owner-launcher.py`, the versioned `scripts/activate-release.py` replaces per-version activation scripts. This is a separate operation from installation or merging source. Run it from the reviewed release archive's `scripts` directory in an external developer terminal, so stopping DSH does not stop the activator itself:
+
+```sh
+python scripts/activate-release.py --config <private-launcher.json> --release <immutable-release-directory> --pnpm-js <pinned-pnpm-cli.mjs> --receipt <new-private-receipt.json> --preflight-only
+```
+
+The release directory must contain the archive and its SHA256/commit/version `release.json`. The launcher configuration must identify this installation's `stateDir`, profile, existing DSH installation and separate personal/bot CLI configurations. Remove `--preflight-only` to activate; use `--candidate-patch <reviewed-patch.yml>` when a release requires configuration migration. The activator never chooses new source scope or authorization. This flow currently supports the existing Windows owner launcher; it does not install a new service manager.
+
+Activation pauses new dispatch, waits for existing workers, takes a consistent database backup and stops only the PID and executable matching the launcher's receipt and listener. A busy timeout restores the original pause state without stopping work. It installs with lifecycle scripts disabled in the profile's existing pnpm store, validates peer resolution, starts through the credential broker and verifies the owned runtime build/setup. Source catch-up and provider incidents are recorded separately in the receipt's health observation; installation success does not claim those readers have completed or recovered. Pending work and tickets remain stored.
+
+Failed validation restores the prior package and configuration while keeping current business records. If the database schema changed, automatic rollback stops and retains the current data for explicit recovery; it never silently replaces it with an old snapshot. An OS lock excludes concurrent activators through recovery and receipt writing. Keep the immutable release directory and private receipt/backup; the launcher uses its verified helper there on future starts.
+
+For an older scheduled supervisor, point its existing action to this release's `activation-helpers/owner-supervisor.ps1` once. This supervisor follows the verified `launcherPath` in the private configuration on subsequent upgrades and rollbacks. A missing configured launcher fails visibly; it does not silently reuse a different version. No new scheduled task is installed by activation.
+
 ## What has been verified
 
-The installer, the self-check and the settings payloads have deterministic tests in `tests/test_install.py`. They replace `dsh`, `pnpm` and `git` with fixtures and serve the loopback API from memory, so they run without an account or a real Feishu app. A real installation additionally needs the operator's accounts and a model key; run the self-check on that machine before trusting the result.
+The installer, the self-check and the settings payloads have deterministic tests in `tests/test_install.py`. They replace `dsh`, `pnpm` and `git` with fixtures and serve the loopback API from memory, so they run without an account or a real Feishu app. The activator's tests cover drain timeout, retained backlog, artifact validation, configuration recovery and preservation of new data on rollback. A real installation additionally needs the operator's accounts and a model key; run the self-check on that machine before trusting the result.

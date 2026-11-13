@@ -20,7 +20,7 @@ type Headers = Record<string, string | undefined>
 it('reports the actual executor model source and server prepare shell', async () => {
   for (const codex of [undefined, { command: 'native-codex', model: 'codex-test-model' }]) {
     const call = serve({ machine: testMachine({ codex }), configured: () => false, masterId: 'master', health: {},
-      executor: { activeCount: () => 0 }, store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } } })
+      executor: { activeCount: () => 0 }, store: { triageHandoffStatus: () => ({ held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } } })
     expect(await call('GET', 'state')).toMatchObject({ status: 200, body: { setup: { machine: {
       executor: { kind: codex ? 'codex' : 'dsh', model: codex?.model ?? null },
       prepareShell: process.platform === 'win32' ? 'powershell' : 'sh',
@@ -29,7 +29,7 @@ it('reports the actual executor model source and server prepare shell', async ()
 })
 it('reports the running package build and its activation time', async () => {
   const call = serve({
-    store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } },
+    store: { triageHandoffStatus: () => ({ held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } },
     machine: { promptMaxChars: { get: () => 100_000 }, admissionContextMaxPages: { get: () => 10 },
       admissionContextTimeoutMs: { get: () => 15_000 } },
     executor: { activeCount: () => 0 }, startedAt: '2026-11-09T01:00:00.000Z', health: {}, configured: () => false,
@@ -112,7 +112,7 @@ it('closes a Ticket with an optional panel reason and refuses an overlong one', 
 it('decodes path parameters and parses each route\'s query', async () => {
   const seen: unknown[] = []
   const call = serve({
-    store: { triageHandoffStatus: () => ({ held: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}),
+    store: { triageHandoffStatus: () => ({ held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}),
       read: { decisions: (filter: unknown, offset: number, limit: number) => { seen.push({ filter, offset, limit }); return { items: [], more: false } } } },
     links: () => () => ({ url: '', label: { zh: '', en: '' } }),
     engine: { unsubscribe: (key: string) => { seen.push(key); return true } },

@@ -83,9 +83,9 @@ def state(config, timeout=15):
 
 
 @contextmanager
-def launch_guard(root):
+def launch_guard(root, name='owner-launch.lock'):
     # OS file locks release on process exit, including a crashed launcher.
-    with (root / 'owner-launch.lock').open('a+b') as lock:
+    with (root / name).open('a+b') as lock:
         lock.seek(0, 2)
         if lock.tell() == 0:
             lock.write(b'0'); lock.flush()
@@ -254,6 +254,49 @@ def open_panel(config):
     urls = re.findall(r'dsh web:\s+(http://127\.0\.0\.1:' + str(config['port']) + r'/\S+)', log)
     if not urls or not webbrowser.open(urls[-1].split('#', 1)[0] + '#main-conversation', new=0):
         raise RuntimeError('Could not open the native panel')
+
+
+def stop_owned(config):
+    """Stop only the Windows listener recorded by this launcher, after a fresh identity and idle check."""
+    if os.name != 'nt':
+        raise RuntimeError('Owner-managed activation currently supports Windows only')
+    current = state(config)
+    if current is None:
+        (Path(config['runtime']) / config['stopMarker']).write_text('Controlled release activation\n', encoding='utf-8')
+        return None
+    if current.get('paused') is not True or current.get('load', {}).get('running', 0):
+        raise RuntimeError('Stop refused: pause dispatch and drain running workers first')
+    root = Path(config['runtime'])
+    receipt = json.loads((root / config['receiptName']).read_text(encoding='utf-8'))
+    if receipt.get('profile') != config['profile'] or type(receipt.get('pid')) is not int:
+        raise RuntimeError('Stop refused: the startup receipt does not identify this profile')
+    script = r'''
+$ErrorActionPreference = 'Stop'
+$target = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$listeners = @(Get-NetTCPConnection -State Listen -LocalPort $target.port -ErrorAction SilentlyContinue)
+if (-not $listeners.Count -or @($listeners | Where-Object OwningProcess -ne $target.pid).Count) { throw 'Listener ownership changed' }
+$owned = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $target.pid)
+$entry = [regex]::Escape($target.entry).Replace('\\', '[\\/]')
+$profile = '(?:^|\s)' + [regex]::Escape($target.profile) + '(?:\s|$)'
+if (-not $owned -or $owned.ExecutablePath -ne $target.node -or $owned.CommandLine -notmatch $entry -or $owned.CommandLine -notmatch $profile) { throw 'Process identity does not match the owned DSH profile' }
+[IO.File]::WriteAllText($target.marker, 'Controlled release activation', [Text.UTF8Encoding]::new($false))
+Stop-Process -Id $target.pid -Force
+$deadline = (Get-Date).AddSeconds(60)
+while (Get-NetTCPConnection -State Listen -LocalPort $target.port -ErrorAction SilentlyContinue) {
+  if ((Get-Date) -ge $deadline) { throw 'Owned port did not close' }
+  Start-Sleep -Milliseconds 500
+}
+'''
+    shell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    target = {'port': config['port'], 'pid': receipt['pid'], 'profile': config['profile'], 'node': str(Path(config['node']).resolve()),
+              'entry': str(root / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'marker': str(root / config['stopMarker'])}
+    try:
+        subprocess.run([str(shell), '-NoProfile', '-Command', script], input=json.dumps(target).encode('utf-8'),
+                       check=True, capture_output=True, timeout=90,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f'Owned stop failed ({type(error).__name__}); inspect the listener before recovery') from None
+    return receipt['pid']
 
 
 def main():

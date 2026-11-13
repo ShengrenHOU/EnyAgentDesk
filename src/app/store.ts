@@ -264,7 +264,20 @@ export class Store implements Repositories {
     const held = Number(this.db.prepare('SELECT COUNT(*) AS n FROM disposition WHERE held IS NOT NULL').get()!.n)
     const owners = this.db.prepare('SELECT DISTINCT held AS owner FROM disposition WHERE held IS NOT NULL ORDER BY held LIMIT 20')
       .all().map(row => String(row.owner))
-    return { held, owners, contextComplete: false as const, state: held ? 'held_awaiting_judgment' as const : 'empty' as const }
+    const blockedIntake = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM disposition d
+      JOIN kv accumulation ON accumulation.key = 'automatic-triage-group:' || d.held
+      WHERE d.held IS NOT NULL AND accumulation.value ->> '$.state' = 'blocked'`).get()!.n)
+    const blockedProduction = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM kv production
+      JOIN json_each(production.value, '$.inputs') input
+      JOIN disposition d ON d.id = input.value ->> '$.triggerId'
+      WHERE production.key >= 'triage-production:' AND production.key < 'triage-production;'
+        AND production.value ->> '$.state' = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
+        AND production.value ->> '$.id' = d.value ->> '$.triage.batchId'
+        AND production.value ->> '$.owner' = d.value ->> '$.triage.owner'
+        AND production.value ->> '$.ownerGeneration' = d.value ->> '$.triage.generation'`).get()!.n)
+    const blocked = blockedIntake + blockedProduction
+    return { held, blocked, owners, contextComplete: false as const,
+      state: blocked ? 'blocked' as const : held ? 'held_awaiting_judgment' as const : 'empty' as const }
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>

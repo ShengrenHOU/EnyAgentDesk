@@ -245,9 +245,9 @@ export class Runtime extends Service implements SourceHost {
     }
   }
   get health(): Readonly<Record<string, Health>> {
-    const { held, owners } = this.store.triageHandoffStatus()
-    return { ...this.board.all, ...(held ? { triageHandoff: { state: 'error' as const,
-      detail: `${held} IM evidence held awaiting context and production judgment (not processed). Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
+    const { held, blocked, owners } = this.store.triageHandoffStatus()
+    return { ...this.board.all, ...(held || blocked ? { triageHandoff: { state: blocked || held && !this.machine.triageHandoff ? 'error' as const : 'ready' as const,
+      detail: `${held} IM evidence held awaiting context and production judgment (not processed); ${blocked} blocked. Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
   }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }

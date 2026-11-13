@@ -473,6 +473,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-context.ts` | Repository-scoped command targets, KV checkpoints, subscription views and object identifiers |
 | `src/sources/activity.ts`, `src/sources/activity-types.ts` | Owner-delegated recent-activity Source, durable scan ranges, source health and private delivery audience checks |
 | `src/sources/activity-lark.ts`, `src/sources/activity-wechat.ts` | Existing user Lark CLI and native read-only WeChat MCP adapters; source-owned acknowledgment after durable intake. Feishu messages in a chat the bot Source receives are left to that Source |
+| `src/sources/lark-account.ts` | Profile-owned Cordis service for the canonical personal account and one application event transport; Sources own domain delivery and subscriptions |
 | `src/sources/lark-user.ts` | The shared user-identity lark-cli reader: account verification, envelope parsing and page cursors used by the activity and workspace Sources |
 | `src/sources/lark-events.ts` | Brokered native SDK event transport, with durable parent confirmation, bounded reconnect and graceful lifecycle |
 | `src/sources/lark-event-inbox.ts` | Source delivery receipts and pending resource notifications in the existing Store, confirmed before upstream acknowledgment |
@@ -580,6 +581,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/github-identity.spec.ts` | Repository-qualified object lookup, channel links and rejection of mismatched outbound targets |
 | `tests/activity.spec.ts`, `tests/activity-lark.spec.ts`, `tests/activity-wechat.spec.ts` | Activity ownership, pause/stop, independent checkpoints, private audience, user-identity Lark reads, the Feishu chat split and isolated named MCP dispatch |
 | `tests/lark-workspace.spec.ts` | Mail watermark, pending queue and bulk filter; task and calendar baselines and change versions; the workspace Sources' scope and Policy rows |
+| `tests/lark-account.spec.ts` | Native Cordis account reload joins the old transport, rebinds dependent Sources, and keeps resource counters separate |
+| `tests/lark-account-migration.spec.ts` | Offline profile migration preserves native YAML expressions, refuses conflicting accounts and is idempotent |
 | `tests/lark-event-bridge.spec.ts` | Pinned SDK event metadata, removal of verification tokens and acknowledgment after durable intake |
 | `tests/workbench.spec.ts` | Native delegation identity, owner and context boundaries, replay, isolated task threads and captured-context pagination |
 | `tests/workbench-session.spec.ts` | Native Session evidence boundaries, notice/reasoning exclusion, attachment identity, bounded context capture and the owner-conversation window |

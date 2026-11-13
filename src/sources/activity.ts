@@ -13,8 +13,10 @@ import type { ActivityBindings, ActivityEvent, ActivityProvider, ActivityRange, 
 import { scanLarkMessages, scanLarkDocuments, readLarkActivityContext, readLarkImContext, readLarkWindow, resolveLarkConversation } from './activity-lark.ts'
 import { scanWechatActivity, readWechatActivityContext, readWechatImContext, readWechatWindow, waitWechatChange } from './activity-wechat.ts'
 import { imDedupKey, imMessageId, imObjectId } from './im-identity.ts'
+import type { LarkEventStatus } from './lark-account.ts'
+import { runLarkSubscriptions } from './lark-subscriptions.ts'
 import { documentEventChanges } from './document-events.ts'
-import { pendingLarkEvents, larkReconcileToken, finishLarkReconcile } from './lark-event-inbox.ts'
+import { queueLarkEvent, requestLarkReconcile, pendingLarkEvents, larkReconcileToken, finishLarkReconcile } from './lark-event-inbox.ts'
 
 export const SOURCE = 'activity'
 const PROVIDERS = ['feishu-messages', 'feishu-documents', 'wechat'] as const
@@ -351,16 +353,14 @@ export async function scanActivityRound(ctx: SourceContext, bindings: ActivitySo
       assertActive()
       // A retained document notification must fail inside this provider's boundary; otherwise its retry would stop the readers after it.
       if (provider === 'feishu-documents' && config.documentEvents) {
-        const events = await documentEventChanges(ctx, bindings.lark, config, signal)
-        for (const event of events.events) {
+        await documentEventChanges(ctx, bindings.lark, config, signal, async event => {
           const trigger = activityTrigger(event, config)
           const channel = ownerDiscussionChannel(ctx)
           if (channel) trigger.channel = channel
           const received = await ctx.receive(trigger)
           if (received !== 'stored' && received !== 'duplicate') throw new Error('Document event was not persisted')
           if (received === 'stored') changes++
-        }
-        events.confirm()
+        })
       }
       if (previous.nextAt && Date.parse(previous.nextAt) > clock() && !(wake && !previous.failures) && reconnect === undefined) {
         providerHealth(ctx, provider, previous, previous.failures >= config.failuresBeforeError ? 'error' : 'ready')
@@ -458,24 +458,42 @@ export async function runActivity(ctx: SourceContext, bindings: ActivitySourceBi
 }
 
 export const name = 'dsh-superagent-activity'
-export const inject = ['orchestrator', 'tools']
+export const inject = ['orchestrator', 'tools', 'larkAccount']
 export const Config = s.object({
-  configDir: s.string().default('').description('Existing user lark-cli configuration directory; no credentials.'),
-  larkCli: s.string().default('').description('Absolute path of the native lark-cli used for owner reads; empty reuses the Feishu Source CLI.'),
-  expectedOwner: s.string().default('').description('Feishu open_id of the owner who delegated the monitor.'),
+  configDir: s.string().default('').hidden().description('Legacy migration input; configure lark-account.'),
+  larkCli: s.string().default('').hidden().description('Legacy migration input; configure lark-account.'),
+  expectedOwner: s.string().default('').hidden().description('Legacy migration input; configure lark-account.'),
   ownerChatId: s.string().default('').description('Previously verified owner-and-bot-only Feishu control chat.'),
   serverName: s.string().default('wechat_readonly').description('Existing native MCP server name for read-only WeChat.'),
 })
 export type ActivityPluginConfig = ReturnType<typeof Config>
 export function apply(ctx: Context, config: ActivityPluginConfig): void {
-  const bindings: ActivitySourceBindings = { ownerChatId: config.ownerChatId, lark: { expectedUserId: config.expectedOwner, ...config.configDir ? { configDir: config.configDir } : {}, ...config.larkCli ? { cli: config.larkCli } : {} },
-    wechat: { serverName: config.serverName } }
+  const account = ctx.larkAccount
+  account.checkLegacy({ expectedUserId: config.expectedOwner, configDir: config.configDir, cli: config.larkCli })
+  const bindings: ActivitySourceBindings = { ownerChatId: config.ownerChatId, lark: account.binding, wechat: { serverName: config.serverName } }
   const kind = createActivityKind(bindings, ctx.tools)
   ctx.effect(() => ctx.orchestrator.sources.register(kind), 'activity: source kind')
+  const source = sourceContext(ctx.orchestrator, kind)
+  let status: LarkEventStatus, failure: string | undefined
+  const report = () => {
+    const enabled = source.config<ActivityConfig>('activity')?.documentEvents
+    const problem = failure || (enabled && account.mode !== 'sdk' ? 'Configure the account event command' : undefined)
+    source.report('activity:events', { state: !enabled ? 'paused' : problem ? 'error' : status.state,
+      detail: !enabled ? 'Document events disabled' : problem ?? `${status.detail}; received ${status.received}, accepted ${status.accepted}, failed ${status.failed} deliveries`, at: new Date().toISOString() })
+  }
+  ctx.effect(() => account.subscribe(['drive.file.edit_v1', 'drive.file.title_updated_v1', 'drive.file.deleted_v1',
+    'drive.file.bitable_record_changed_v1', 'drive.file.bitable_field_changed_v1'], async event => {
+    if (!source.config<ActivityConfig>('activity')?.documentEvents) return false
+    queueLarkEvent(source, bindings.lark.expectedUserId, 'documents', event)
+    return true
+  }, value => { status = value; report() }, () => requestLarkReconcile(source, bindings.lark.expectedUserId, 'documents')))
+  ctx.effect(() => ctx.orchestrator.runSource(async signal => {
+    await source.ready
+    if (source.configured() && account.mode === 'sdk') await runLarkSubscriptions(source, bindings.lark, ['activity'], signal, failures => { failure = failures.activity; report() })
+  }))
   ctx.effect(() => ctx.tools.guard(execution => execution.agent && execution.name === `mcp__${bindings.wechat.serverName}__wechat_incremental_ack`
     ? 'Only the activity Source may acknowledge its durable evidence batches' : undefined))
   ctx.effect(() => ctx.orchestrator.runSource(async signal => {
-    const source = sourceContext(ctx.orchestrator, kind)
     await Promise.all([runActivity(source, bindings, ctx.tools, signal), watchWechatActivity(source, bindings, ctx.tools, signal)])
   }))
 }

@@ -3,10 +3,11 @@ param([Parameter(Mandatory=$true)][string]$Config)
 # The launcher owns instance identity, the launch lock and manual stop intent.
 $ErrorActionPreference = 'Stop'
 $settings = Get-Content -LiteralPath $Config -Raw -Encoding UTF8 | ConvertFrom-Json
-$launcher = Join-Path $PSScriptRoot 'owner-launcher.py'
+$launcher = if ($settings.launcherPath) { $settings.launcherPath } else { Join-Path $PSScriptRoot 'owner-launcher.py' }
 $receiptDirectory = Join-Path $settings.runtime 'watchdog'
 New-Item -ItemType Directory -Force -Path $receiptDirectory | Out-Null
 try {
+  if (-not [IO.Path]::IsPathRooted($launcher) -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw 'Configured launcher is unavailable' }
   $output = & $settings.python $launcher --config $Config --start-only --respect-stop 2>&1
   if ($LASTEXITCODE -ne 0) { throw 'Launcher failed' }
   $state = ($output -join "`n") | ConvertFrom-Json

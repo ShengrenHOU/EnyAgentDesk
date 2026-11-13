@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { LarkAccount } from '../src/sources/lark-account.ts'
 import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thread, type Ticket, type Trigger } from '../src/core/index.ts'
 import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
@@ -251,12 +253,15 @@ describe('feishu source', () => {
       // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
       const value = host({ sources: emptyRegistry(), ...overrides })
       const disposers: (() => unknown)[] = []
-      applyFeishu({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+      const accountContext = new Context()
+      const larkAccount = new LarkAccount(accountContext, { configDir: '', larkCli: '', expectedUserId: '', eventCommand: [] })
+      applyFeishu({ orchestrator: value, larkAccount, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
       await vi.waitFor(() => expect(value.health.history).toBeDefined())
       const registered = value.sources.kind('feishu')
       // Snapshot health before disposal clears the registered entries.
       const health = { ...value.health }
-      for (const dispose of disposers) await dispose()
+      for (const dispose of disposers.reverse()) await dispose()
+      await accountContext.fiber.dispose()
       return { ...value, registered, health }
     }
     const unset = await run({ deployment: testDeployment({ feishu: undefined }) })

@@ -169,7 +169,7 @@ function sourceStatuses(): SourceStatusRow[] {
   })
 }
 const stateView = (): StateView => ({
-  triageHandoff: { held: 0, owners: [], contextComplete: false, state: 'empty' },
+  triageHandoff: { held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' },
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
   masterId: server.masterId, paused: server.settings.paused, runtime: server.runtime,
   // The panel does not read health; the service script does.
