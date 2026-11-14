@@ -42,6 +42,20 @@ it('acknowledges consumed A with unrelated unread B; missing/cancelled input is 
   // No user/message history exists for cancelled: a retry queues it again instead of returning an ACK.
   await expect(f.send('cancelled')).rejects.toBeInstanceOf(Later)
 })
+it('retains injected idle notices while admitting an assessment that can wake the Main Session', async () => {
+  const f = fixture()
+  const injected = createUserMessage({ content: [{ type: 'text', text: 'Ticket ended' }],
+    source: { kind: 'dsh-superagent', form: 'notice', summary: 'Ticket ended' } })
+  f.inbox.nextStep.push(injected)
+  expect(await f.sessions.candidateState('candidate:next')).toBe('ready')
+  await expect(f.send()).rejects.toBeInstanceOf(Later)
+  expect(f.agent.followup).toHaveBeenCalledOnce()
+  expect(f.inbox.nextStep).toEqual([injected])
+  expect(f.inbox.nextTurn).toHaveLength(1)
+  f.consume(f.inbox.nextTurn[0]!)
+  f.inbox.nextStep.push(createUserMessage({ content: injected.content, source: { kind: 'user' } }))
+  expect(await f.sessions.candidateState('candidate:other')).toBe('blocked')
+})
 it('rechecks unread admission immediately before enqueue when owner input arrives during history loading', async () => {
   const f = fixture(); let release!: () => void
   f.read.mockImplementationOnce(async () => { await new Promise<void>(resolve => { release = resolve }); return { events: [] } })

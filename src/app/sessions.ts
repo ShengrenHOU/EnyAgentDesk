@@ -224,6 +224,11 @@ export class Sessions {
       if (notice && !this.host.assessmentCurrent(notice)) agent.inbox.remove(message.id)
     }
   }
+  /** User input, relays and queued assessments retain priority over new assessment admission. */
+  private blockingAssessmentInput(agent: Agent): UserMessage[] {
+    // Injected notices do not wake an idle Agent; let an assessment wake it without removing those notices.
+    return this.agentDelivery.unread(agent).filter(message => message.source.kind !== 'dsh-superagent' || message.source.form !== 'notice')
+  }
   /** Cheap pre-card check; final admission still uses the shared assessment transport below. */
   async candidateState(requestId: string): Promise<'consumed' | 'ready' | 'blocked'> {
     const result = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
@@ -231,7 +236,7 @@ export class Sessions {
     const agent = result.agent
     if (await this.agentDelivery.consumedAt(agent, key(requestId)) !== undefined) return 'consumed'
     this.pruneAssessments()
-    return this.agentDelivery.unread(agent).length ? 'blocked' : 'ready'
+    return this.blockingAssessmentInput(agent).length ? 'blocked' : 'ready'
   }
   /** Shared legacy/production admission. A consumed request is acknowledged even with unrelated unread input. */
   async assessment(requestId: string, text: string, authorize: () => void): Promise<string> {
@@ -245,7 +250,7 @@ export class Sessions {
       authorize()
       // No await separates this check from inbox insertion in AgentDelivery.send. Concurrent assessments and
       // owner/report arrivals during history loading therefore cannot both pass an empty-inbox check.
-      if (this.agentDelivery.unread(agent).some(message => message.id !== this.promptedId(requestId))) throw new Later('Main Session has unread input')
+      if (this.blockingAssessmentInput(agent).some(message => message.id !== this.promptedId(requestId))) throw new Later('Main Session has unread input')
     })
     const accepted = await this.agentDelivery.consumedAt(agent, key(requestId))
     if (accepted === undefined) throw new Later('Assessment queued but not durably consumed')
