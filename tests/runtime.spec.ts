@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { Setup } from '../src/app/setup.ts'
+import { deferred } from './fixtures/async.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -1055,6 +1057,32 @@ it('waits for setup when the shim directory holds a file dsh-superagent did not 
   expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
   expect(readFileSync(join(directory, 'worker-bin', 'my-script'), 'utf8')).toBe('#!/bin/sh\n')
   await next.stop()
+})
+
+it('does not install, create the main Session, or sync policy after a stop reaches a startup still in setup', async () => {
+  const gate = deferred()
+  const run = Setup.prototype.run
+  vi.spyOn(Setup.prototype, 'run').mockImplementationOnce(async function (this: Setup, settings) {
+    await gate.promise
+    return run.call(this, settings)
+  })
+  const starting = await restart()
+  const sessionsInstall = vi.spyOn(starting.sessions, 'install')
+  const executorInstall = vi.spyOn(starting.executor, 'install')
+  const sync = vi.spyOn(starting.settings, 'sync')
+  const closed = vi.spyOn(starting.store, 'close')
+  const stopping = starting.stop()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  // Startup is still waiting for setup, so shutdown must not have closed the Store it will read.
+  expect(closed).not.toHaveBeenCalled()
+  gate.resolve()
+  await stopping
+  expect(sessionsInstall).not.toHaveBeenCalled()
+  expect(executorInstall).not.toHaveBeenCalled()
+  expect(sync).not.toHaveBeenCalled()
+  expect(closed).toHaveBeenCalledOnce()
+  // Any startup continuation after the close would write a closed database or reject unhandled here.
+  await new Promise(resolve => setTimeout(resolve, 10))
 })
 
 it('rewrites the blocked-command shims when the Executor settings change them, without a restart', async () => {

@@ -352,7 +352,7 @@ export class ProductionTriage {
       const complete = same ? read!.complete === true || read!.next === null || next === null : next === null
       batch.reads ??= {}; batch.reads[triggerId] = { generation, revision: context.revision, hash: context.manifest.hash, signature, next, complete }
       this.host.store.set(batches(id), batch)
-      return { triggerId, generation, revision: context.revision, hash: context.manifest.hash, text: text.slice(offset, offset + 8000), next_offset: next }
+      return { triggerId, generation, binding: batch.binding, revision: context.revision, hash: context.manifest.hash, text: text.slice(offset, offset + 8000), next_offset: next }
     })
   }
 
@@ -361,7 +361,7 @@ export class ProductionTriage {
     const result = ProductionResultSchema.parse(value)
     return this.host.store.atomic(() => {
       const batch = this.validate(id, generation)
-      if (batch.binding !== binding) throw new Error('Stale context binding')
+      if (batch.binding !== binding) throw new Error('Stale context binding; read orchestrator_triage_production_read for the current generation and binding, then reread its input contexts before resubmitting')
       if (batch.state === 'completed') {
         if (JSON.stringify(batch.result) !== JSON.stringify(result)) throw new Error('Production result already committed')
         return batch
@@ -542,6 +542,7 @@ export function productionOverview(store: Store, evidence?: Host['evidence'], pa
     })
     const firstHeader = items[0]?.header
     return { id: batch.id, owner: batch.owner, generation: batch.generation,
+      ...(batch.state === 'completed' && batch.result?.items.some(item => item.kind === 'unknown' && currentIds.has(item.triggerId)) ? { retryable: true } : {}),
       ...(firstHeader ? { header: firstHeader } : {}),
       state: batch.state, window: batch.window, ...(readable && batch.coverage ? { coverage: batch.coverage } : {}), at: batch.updatedAt, messages: currentIds.size,
       newerKnownEvidence: newerKnownEvidence(store, batch),

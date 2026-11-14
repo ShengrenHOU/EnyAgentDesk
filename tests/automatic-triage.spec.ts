@@ -30,7 +30,7 @@ function setup() {
     context: trigger => ({ assertActive() { if (!source) throw new Error('Source revoked') }, async read(input) { const anchor = { id: input.anchor.message, version: input.anchor.version, text: trigger.text, createdAt: trigger.at }; return { start: input.start, end: input.end, provider: input.anchor.provider, account: input.anchor.account, conversation: input.anchor.conversation, consistency: 'live_paginated' as const, gaps: ['account_visible_only'], anchor, messages: [anchor] } } }) })
   restartAutomatic()
 }
-function restartAutomatic() { automatic = new AutomaticTriage({ store, engine, handoffs, production, evidence, enabled: () => enabled, historical: () => historical, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now }) }
+function restartAutomatic(resolveEvidence = evidence) { automatic = new AutomaticTriage({ store, engine, handoffs, production, evidence: resolveEvidence, enabled: () => enabled, historical: () => historical, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now }) }
 const rows = () => store.db.prepare("SELECT value FROM kv WHERE key LIKE 'triage-production:%' ORDER BY rowid").all().map(row => JSON.parse(String(row.value)) as ProductionBatch)
 const advance = (ms = 3000) => { now = new Date(Date.parse(now) + ms).toISOString() }
 async function drain() { effects.start(); await effects.idle('triageAssessment') }
@@ -326,4 +326,19 @@ it('recovers bounded blocked groups through explicit main tool with all-or-nothi
   expect(store.triggers.disposition('a')!.triage).toBeDefined()
   await tool.execute({owners,action:'retry'},signal); expect(automatic.status().owners.every(owner=>owner.state==='sealed')).toBe(true)
   automatic.maintain(); await drain(); expect(rows()[0]!.state).toBe('awaiting')
+})
+
+it('lets operators isolate unavailable source owners without releasing them or blocking healthy owners', () => {
+  let unavailable = false
+  restartAutomatic(trigger => unavailable && trigger.meta.chat === 'a' ? undefined : evidence(trigger))
+  automatic.receive(make('a', 'a')); automatic.receive(make('b', 'b'))
+  configuration = 'changed'; advance(); automatic.maintain(); automatic.maintain()
+  unavailable = true
+  const owners = automatic.status().owners
+  expect(owners.map(owner => owner.recoverable)).toEqual([false, true])
+  expect(() => automatic.recover(owners, 'retry')).toThrow('Source or exclusive owner')
+  const selected = owners.filter(owner => owner.recoverable)
+  expect(automatic.recover(selected, 'retry')).toMatchObject([{ state: 'sealed' }])
+  expect(automatic.status().owners[0]).toMatchObject({ state: 'blocked', recoverable: false })
+  expect(store.triggers.disposition('a')!.triage).toBeDefined()
 })

@@ -60,7 +60,8 @@ it('decomposes explicitly named goals and recovers partial intake without duplic
   expect(triggers.map(item => item.text)).toEqual(tasks.map(item => item.owner_instruction_quote))
   expect(triggers[0]!.threads).not.toEqual(triggers[1]!.threads)
   expect(triggers.every(item => item.meta.context === undefined || (item.meta.context as WorkbenchContext).throughSeq === snapshot.throughSeq)).toBe(true)
-  await expect(delegateDiscussionTasks(source, owner, input, snapshot, [tasks[1]!, tasks[0]!], at)).rejects.toThrow('different task plan')
+  expect((await delegateDiscussionTasks(source, owner, input, snapshot, [tasks[1]!, tasks[0]!], at)).tasks.map(item => item.received))
+    .toEqual(['duplicate', 'duplicate'])
   await expect(delegateDiscussion(source, owner, input, snapshot, at)).rejects.toThrow('already has a task plan')
 })
 
@@ -71,6 +72,20 @@ it('rejects invented batch goals before any intake', async () => {
     [{ id: 'outside', owner_instruction_quote: 'Publish production changes' }], at)).rejects.toThrow('original owner instruction')
   expect(receive).not.toHaveBeenCalled()
   receive.mockRestore()
+})
+
+it('appends goals confirmed together without replacing earlier receipts', async () => {
+  const source = h.runtime.context(workbenchKind)
+  const first = { id: 'first', owner_instruction_quote: request.instruction }
+  const second = { id: 'second', owner_instruction_quote: request.instruction }
+  const receipt = await delegateDiscussionTasks(source, owner, request, snapshot, [first], at)
+  expect((await delegateDiscussionTasks(source, owner, request, snapshot, [second], at)).tasks[0]!.received).toBe('stored')
+  const retry = await delegateDiscussionTasks(source, owner, request, snapshot, [first, second], at)
+  expect(retry.tasks.map(item => item.received)).toEqual(['duplicate', 'duplicate'])
+  expect(retry.tasks[0]!.triggerId).toBe(receipt.tasks[0]!.triggerId)
+  expect(retry.tasks.map(item => h.runtime.store.triggers.get(item.triggerId)!.meta.task)).toEqual([first, second])
+  await expect(delegateDiscussionTasks(source, owner, request, snapshot,
+    [{ ...first, owner_instruction_quote: 'research report' }], at)).rejects.toThrow('different task plan')
 })
 
 it('refuses wrong owners, mismatched sessions, and context beyond the selected boundary', async () => {

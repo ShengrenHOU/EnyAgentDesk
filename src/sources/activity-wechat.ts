@@ -78,7 +78,7 @@ async function call<T>(tools: ActivityTools, binding: WechatActivityBinding, too
     const message = result.error.message
     if (tool === 'wechat_read_window') throw new ImContextReadError(
       !/permission|forbidden|unauthori[sz]ed|access denied|\b40[13]\b/i.test(message)
-      && /unavailable|temporar|disconnected|timed?\s*out|timeout|ECONNRESET|ECONNREFUSED|\b(?:429|502|503|504)\b/i.test(message))
+      && /unavailable|temporar|disconnected|connection closed|timed?\s*out|timeout|ECONNRESET|ECONNREFUSED|\b(?:429|502|503|504)\b/i.test(message))
     throw new Error(`WeChat ${tool} failed: ${message}`)
   }
   const envelope = Envelope.parse(result.value), structured = envelope.structuredContent

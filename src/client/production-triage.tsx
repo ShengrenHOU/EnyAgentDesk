@@ -4,17 +4,20 @@ import type { productionOverview } from '../app/production-triage.ts'
 import { useHistoryPage } from './api.ts'
 import type { T } from './text.ts'
 type View = ReturnType<typeof productionOverview>
-export function ProductionJudgments({ view, t, loadPage, onDiscuss, discussionDisabled = false }: {
+export function ProductionJudgments({ view, t, loadPage, onDiscuss, onRetry, onRecoverIntake, discussionDisabled = false }: {
   view: View; t: T; loadPage?: (before: number, unresolved?: boolean) => Promise<View>
   onDiscuss?: (id: string, generation: number) => void; discussionDisabled?: boolean
+  onRetry?: (id: string, generation: number) => Promise<void>
+  onRecoverIntake?: () => Promise<string>
 }) {
+  const [recovery, setRecovery] = useState<{ pending: boolean; target: string; error?: string; message?: string }>()
   const [before, setBefore] = useState<number>()
   const [unresolved, setUnresolved] = useState(false)
   // The selected page refreshes on its own cursor-scoped schedule; latest overview changes no longer gate its freshness.
   const { page, error, reload } = useHistoryPage(before, loadPage && (cursor => unresolved ? loadPage(cursor, true) : loadPage(cursor)))
   const busy = before !== undefined && !page && !error
   const shown = before === undefined ? view : page ?? { ...view, groups: [], nextBefore: null }
-  if (!view.total && !unresolved) return null
+  if (!view.total && !unresolved && !onRecoverIntake) return null
   const zh = t('lang').startsWith('zh')
   const label = (en: string, cn: string) => zh ? cn : en
   const stateLabels: Record<string, string> = { queued: label('Queued', '等待判断'), preparing: label('Reading context', '补充上下文'),
@@ -23,9 +26,23 @@ export function ProductionJudgments({ view, t, loadPage, onDiscuss, discussionDi
     unknown: label('Needs more information', '待补充信息'), suggested_action: label('Suggested follow-up', '建议跟进'),
     informational: label('Reference information', '参考信息'), none: label('Recorded', '已记录') }
   const stateLabel = (state: string) => stateLabels[state] ?? state
+  const recover = async (target: string, action: () => Promise<unknown>) => {
+    if (recovery?.pending) return
+    setRecovery({ target, pending: true })
+    try {
+      const result = await action()
+      setRecovery({ target, pending: false, ...(typeof result === 'string' ? { message: result } : {}) })
+      void reload()
+    }
+    catch (error) { setRecovery({ target, pending: false, error: error instanceof Error ? error.message : String(error) }) }
+  }
   return <section className="pw-section" aria-label={label('IM judgments', 'IM 分诊')}>
     <h2>{label('Information follow-up', '信息跟进')}</h2>
     <p className="pw-muted">{label('Review unfinished judgments and suggested follow-ups, then discuss their next step in the main conversation.', '查看尚待判断、补充或复核的信息，可沿原记录到主对话讨论下一步。')}</p>
+    {onRecoverIntake && <button type="button" className="dt-textlink" disabled={recovery?.pending}
+      onClick={() => void recover(label('Intake backlog', '分诊积压'), onRecoverIntake)}>{label('Recover an intake batch', '恢复一批分诊积压')}</button>}
+    {recovery && <p role={recovery.error ? 'alert' : 'status'}>{recovery.target}: {recovery.pending
+      ? label('Submitting recovery…', '正在提交恢复…') : recovery.error ?? recovery.message ?? label('Recovery received; judgment and business progress are not complete.', '已收到恢复请求；不代表判断或业务推进已完成。')}</p>}
     {loadPage && <div className="pw-actions">
       <button type="button" className="dt-textlink" aria-pressed={unresolved} onClick={() => { setUnresolved(true); setBefore(Number.MAX_SAFE_INTEGER) }}>
         {label('Unresolved information', '查看待处理信息')}</button>
@@ -44,6 +61,9 @@ export function ProductionJudgments({ view, t, loadPage, onDiscuss, discussionDi
       {group.historical && <p>{label('Historical receipt, not a current pending item.', '历史回执，不是当前待处理项。')}</p>}
       <p>{group.window.start} – {group.window.end}</p>
       <p className="pw-muted">{label('Receipt', '回执')}: {group.id} · {label('Attempt', '轮次')} {group.generation} · {group.at}</p>
+      {onRetry && !group.historical && (group.state === 'blocked' || group.state === 'completed' && (group.retryable || (group.counts.unknown ?? 0) > 0)) && <button type="button" className="dt-textlink" disabled={recovery?.pending}
+        onClick={() => void recover(group.id, () => onRetry(group.id, group.generation))}>{group.redacted
+          ? label('Recheck source and retry', '核对来源并重试') : label('Retry judgment', '重新判断')}</button>}
       {!group.redacted && <>
         {group.problem && <p role="status">{group.problem}</p>}
         {onDiscuss && !group.historical && <button type="button" className="dt-textlink" disabled={discussionDisabled}

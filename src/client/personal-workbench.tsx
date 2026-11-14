@@ -418,6 +418,25 @@ export function Workbench(props: Props) {
       {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
         openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
       {data?.productionTriage && <ProductionJudgments view={data.productionTriage} t={t}
+        onRetry={state?.triageRecovery?.production ? async (id, generation) => { await call('POST production-triage/:id/retry', { id, body: { generation } }); await reload() } : undefined}
+        onRecoverIntake={state?.triageRecovery?.intake ? async () => {
+          const owners: { owner: string; generation: number }[] = []
+          const unavailable: string[] = []
+          let after = 0
+          while (owners.length < 10) {
+            const page = await call('GET automatic-triage', { query: { after } })
+            unavailable.push(...page.owners.filter(owner => owner.state === 'blocked' && !owner.recoverable).map(owner => `${owner.source}: ${owner.owner}`))
+            owners.push(...page.owners.filter(owner => owner.state === 'blocked' && owner.recoverable).slice(0, 10 - owners.length)
+              .map(({ owner, generation }) => ({ owner, generation })))
+            if (page.next === null) break
+            after = page.next
+          }
+          if (owners.length) await call('POST automatic-triage/recover', { body: { owners, action: 'retry' } })
+          await reload()
+          return t('lang').startsWith('zh')
+            ? `已提交恢复 ${owners.length} 组，不代表判断或业务已完成。${unavailable.length ? `当前读取范围内有 ${unavailable.length} 组来源或归属不可用，继续保留：${unavailable.join('；')}` : ''}`
+            : `Recovery submitted for ${owners.length} groups; judgments and business work are not complete.${unavailable.length ? ` ${unavailable.length} unavailable owners in the inspected pages remain retained: ${unavailable.join('; ')}` : ''}`
+        } : undefined}
         loadPage={(before, unresolved) => call('GET production-triage', { query: { before, unresolved } })}
         discussionDisabled={busy || !ready || !!reply && !!instruction.trim()}
         onDiscuss={(id, generation) => void discuss(`请用 orchestrator_read 读取 triage/receipt/${id}/${generation}，只读核对这组信息及原始来源。说明当前判断、未完成原因和已有工作线关联，结合证据建议下一步；已有事项沿原工作线继续讨论。若回执已变更，先读取 triage/receipts 获取当前引用。此请求用于核对与讨论，执行动作沿已有授权。`)} />}

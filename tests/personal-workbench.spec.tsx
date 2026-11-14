@@ -62,6 +62,22 @@ it('keeps the Lines section when the optional queue endpoint fails', async () =>
   expect(document.body.textContent).toContain('Native workbench is disabled')
 })
 
+it('offers intake recovery only when the runtime advertises that capability', async () => {
+  let enabled = false
+  const original = globalThis.fetch
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const response = await original(input, init)
+    if (input.split('?')[0]!.endsWith('/state')) return Response.json({ ...JSON.parse(await response.text()),
+      triageRecovery: enabled ? { intake: true, production: false } : undefined })
+    return response
+  }))
+  await mount()
+  expect(document.body.textContent).not.toContain('恢复一批分诊积压')
+  enabled = true
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  expect(document.body.textContent).toContain('恢复一批分诊积压')
+})
+
 it('shows a Lines read failure with a retry instead of an empty goal list', async () => {
   await mount()
   const original = globalThis.fetch

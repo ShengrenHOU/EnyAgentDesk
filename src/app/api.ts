@@ -1,5 +1,7 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { TriageMatters } from './triage-matters.ts'
+import type { AutomaticTriage } from './automatic-triage.ts'
+import type { ProductionTriage } from './production-triage.ts'
 import type { productionOverview } from './production-triage.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PromptConfig, Prompts } from './prompts.ts'
@@ -24,6 +26,9 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET automatic-triage': { query?: { after?: number }; response: ReturnType<AutomaticTriage['status']> }
+  'POST automatic-triage/recover': { body: { owners: Parameters<AutomaticTriage['recover']>[0]; action: 'retry' | 'release' }; response: ReturnType<AutomaticTriage['recover']> }
+  'POST production-triage/:id/retry': { body: { generation: number }; response: Pick<ReturnType<ProductionTriage['retry']>, 'id' | 'generation' | 'state'> }
   'GET state': { response: StateView }
   'GET production-triage': { query?: { before?: number; limit?: number; unresolved?: boolean }; response: ReturnType<typeof productionOverview> }
   'GET triage-matters': { query?: { before?: number; limit?: number; active?: boolean }; response: ReturnType<TriageMatters['overview']> }

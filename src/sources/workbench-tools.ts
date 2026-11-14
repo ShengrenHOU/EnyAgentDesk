@@ -42,12 +42,17 @@ export function registerWorkbenchTool(ctx: Context): () => void {
         && !('form' in event.data.source && event.data.source.form === 'notice'))
       if (latestMessage !== lastUser) throw new Error('The latest message is not an original owner instruction')
       const text = lastUser.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
-      if (!request.owner_instruction_quote || !text.includes(request.owner_instruction_quote)) throw new Error('The instruction must quote the latest original owner message')
+      const quotes = request.tasks ? request.tasks.map(task => task.owner_instruction_quote) : [request.owner_instruction_quote]
+      if (quotes.some(quote => !quote || !text.includes(quote))
+        || request.owner_instruction_quote !== undefined && !text.includes(request.owner_instruction_quote)) {
+        throw new Error('The instruction must quote the latest original owner message')
+      }
       const input = { sessionId, throughSeq: lastUser.seq,
         requestId: key('discussion-action', lastUser.data.id, request.action, request.ticket_id ?? ''), instruction: text }
       execution.signal.throwIfAborted()
       if (request.action === 'answer' || (request.action === 'update' && request.attention_id)) {
         if (!request.ticket_id || !request.attention_id) throw new Error('An answer requires the current ticket_id and attention_id')
+        if (!request.owner_instruction_quote) throw new Error('An answer requires the original owner instruction')
         return { ...source.tickets.answerAttention(request.ticket_id, request.attention_id, request.owner_instruction_quote),
           nextAction: 'The answer is saved. End this turn; the worker processes it separately. Do not poll or repeat execution.' }
       }

@@ -181,6 +181,24 @@ it('hands off natural-language requests using original owner evidence and dedupl
   await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution)).rejects.toThrow('not owner discussions')
 })
 
+it('accepts nested original quotes for two goals approved by the same owner message', async () => {
+  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const tasks = [{ id: 'first', owner_instruction_quote: 'Original owner discussion' },
+    { id: 'second', owner_instruction_quote: 'Original owner discussion' }]
+  const args = { action: 'delegate', tasks }
+  const first = await discussionTool.execute(args, execution) as { tasks: { triggerId: string }[] }
+  expect(first.tasks).toHaveLength(2)
+  expect(first.tasks[0]!.triggerId).not.toBe(first.tasks[1]!.triggerId)
+  expect(await discussionTool.execute(args, execution)).toMatchObject({ tasks: [
+    { triggerId: first.tasks[0]!.triggerId, received: 'duplicate' },
+    { triggerId: first.tasks[1]!.triggerId, received: 'duplicate' },
+  ] })
+  await expect(discussionTool.execute({ ...args, tasks: [{ id: 'invented', owner_instruction_quote: 'Invented' }] }, execution))
+    .rejects.toThrow('latest original owner message')
+  await expect(discussionTool.execute({ ...args, owner_instruction_quote: 'Invented' }, execution))
+    .rejects.toThrow('latest original owner message')
+})
+
 it('registers on DSH authenticated transport, uses stored history and routes into one persistent ticket', async () => {
   expect(route).toMatchObject({ path: '/api/superagent-workbench/delegate', methods: ['POST'], requestBody: 'buffered' })
   const response = await send(input)
@@ -252,6 +270,25 @@ it('delivers an explicit update only to its task and rejects stale decisions or 
   expect((await submit({ ...request, requestId: 'stale', attentionId: 'old-question' })).status).toBe(409)
   h.runtime.engine.stopTicket(ticketId)
   expect((await submit({ ...request, requestId: 'stopped' })).status).toBe(409)
+})
+
+it('persists a conversational supplement on the original ticket and returns a deduplicated receipt', async () => {
+  const receipt = await (await send(input)).json()
+  await h.runtime.idle()
+  const accepted = await h.route({ kind: 'accept', trigger_id: receipt.triggerId, title: 'Repair', worktree_name: 'repair', acknowledgement: 'Received' })
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
+  const record = await inspect(SessionId('discussion'))
+  const text = 'Include the other three problems in this repair.'
+  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+    data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }) }] })
+  const args = { action: 'update', ticket_id: ticketId, owner_instruction_quote: text }
+  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const first = await discussionTool.execute(args, execution) as { triggerId: string }
+  await h.runtime.idle()
+  expect(h.runtime.store.triggers.disposition(first.triggerId)?.fanout).toEqual([ticketId])
+  expect(h.runtime.store.tickets.get(ticketId)!.inputs).toEqual(expect.arrayContaining([expect.objectContaining({ triggerId: first.triggerId })]))
+  expect(await discussionTool.execute(args, execution)).toMatchObject({ triggerId: first.triggerId, received: 'duplicate' })
+  expect(h.runtime.store.tickets.list()).toHaveLength(1)
 })
 
 it('publishes verified task files and rejects unreported, escaped or changed file content', async () => {

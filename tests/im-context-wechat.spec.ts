@@ -12,6 +12,15 @@ const request: ImContextRequest = { anchor: { provider: 'wechat', account: 'test
   message: 'wx1.anchor', version: 'observed-version', partial: false }, anchorText: 'Please handle this',
 start: '2026-11-01T00:00:00.000Z', end: '2026-11-01T01:00:00.000Z' }
 const signal = () => new AbortController().signal
+it.each([['Connection closed', true], ['permission denied: Connection closed', false], ['Invalid arguments', false]])(
+  'classifies native read failure %s without acknowledging evidence', async (message, retryable) => {
+    const execute = vi.fn().mockResolvedValue({ isError: true, error: { message } })
+    const tools = { execute } as unknown as ActivityTools
+    await expect(readWechatImContext(tools, binding, request, undefined, signal())).rejects.toMatchObject({ retryable })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute.mock.calls[0]![0].name).toBe('mcp__wechat_readonly__wechat_read_window')
+  },
+)
 function original(id = 'anchor', seconds = 0, extra: object = {}) {
   const timestamp = Date.parse(request.start) / 1000 + seconds
   return { account: request.anchor.account, conversation: request.anchor.conversation, record_id: `record-${id}`,

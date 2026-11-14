@@ -96,7 +96,8 @@ export interface FollowupsHost {
 
 /** Uses the existing orchestration pass and transactional input delivery, with no separate timer process. */
 export class Followups {
-  private maintaining = false
+  /** The reconciliation `maintain` started, kept so concurrent callers join it and a stopping Runtime can wait for it. */
+  private maintaining?: Promise<void>
   private readonly reconciling = new Set<string>()
   /** In-flight migrations by marker: concurrent callers join the same Host Schedule write instead of creating a second task. */
   private readonly migrations = new Map<string, Promise<FollowupReceipt>>()
@@ -218,13 +219,19 @@ export class Followups {
    * Retry what a crash or an unavailable Schedule left behind: an uncommitted migration intent, and a task deletion that
    * failed when its Ticket ended. The orchestration pass calls this; it never creates a second task for one intent.
    */
-  async maintain(): Promise<void> {
-    if (this.maintaining) return
-    this.maintaining = true
-    try {
-      await this.reconcileMigrations()
-      await this.reconcileCleanups()
-    } finally { this.maintaining = false }
+  maintain(): Promise<void> {
+    return this.maintaining ??= this.reconcile().finally(() => { this.maintaining = undefined })
+  }
+
+  /**
+   * Resolves once the reconciliation `maintain` started has finished. A stopping Runtime awaits it so a Host Schedule
+   * read already under way cannot write the Store after the database closes.
+   */
+  drain(): Promise<void> { return this.maintaining ?? Promise.resolve() }
+
+  private async reconcile(): Promise<void> {
+    await this.reconcileMigrations()
+    await this.reconcileCleanups()
   }
 
   private commitMigration(intent: MigrationIntent, automationId: string, scheduledAt: string): FollowupReceipt {

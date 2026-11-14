@@ -1,5 +1,6 @@
 /** Automatic read-only IM ownership, bounded accumulation and restart-safe legacy capture. */
 import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import type { Engine, Trigger } from '../core/index.ts'
 import { family, record, KV } from '../kv.ts'
 import { SettingsSchema, type Settings } from '../policy.ts'
@@ -9,6 +10,7 @@ import type { TriageHandoffs } from './triage-handoffs.ts'
 import type { ProductionTriage } from './production-triage.ts'
 import { imScope, observeImEvidence } from './im-evidence-revisions.ts'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+export const AutomaticRecoverySchema = z.object({ owners: z.array(z.object({ owner: z.string().min(1), generation: z.number().int().positive() }).strict()).min(1).max(20), action: z.enum(['retry','release']) }).strict()
 type Lane = 'live' | 'historical'
 interface Group {
   owner: string; scope: string; source: string; lane: Lane; state: 'open' | 'sealed' | 'transferred' | 'blocked' | 'released'
@@ -168,6 +170,13 @@ export class AutomaticTriage {
       store.set(served(`source:${group.source}`), turn.sequence + 1); store.set(served(`conversation:${group.scope}`), turn.sequence + 1)
     })
   }
+  private retryAvailable(group: Group, generation: number): boolean {
+    const { store } = this.host
+    return group.ids.every(id => {
+      const trigger = store.triggers.get(id), marker = store.triggers.disposition(id)?.triage
+      return !!trigger && !!this.host.evidence(trigger) && marker?.owner === group.owner && marker.generation === generation && !marker.phase
+    })
+  }
   /** Explicit bounded operator recovery, never an automatic reclassification or source acknowledgment. */
   recover(owners: { owner: string; generation: number }[], action: 'retry' | 'release') {
     if (!owners.length || owners.length > 20 || new Set(owners.map(item => item.owner)).size !== owners.length) throw new Error('Choose 1..20 distinct owners')
@@ -176,10 +185,7 @@ export class AutomaticTriage {
       if (!group || manifest.generation !== generation || manifest.state !== 'held' || !['open', 'sealed', 'blocked'].includes(group.state)) throw new Error('Owner is not an unfinished accumulation; use production recovery if transferred')
       if (action === 'release') { handoffs.release(owner, generation); group.state = 'released' }
       else {
-        for (const id of group.ids) {
-          const trigger = store.triggers.get(id), marker = store.triggers.disposition(id)?.triage
-          if (!trigger || !this.host.evidence(trigger) || marker?.owner !== owner || marker.generation !== generation || marker.phase) throw new Error('Source or exclusive owner is unavailable')
-        }
+        if (!this.retryAvailable(group, generation)) throw new Error('Source or exclusive owner is unavailable')
         group.fingerprint = this.snapshot(group.ids); group.fingerprintVersion = 2; group.state = 'sealed'; delete group.problem
       }
       store.set(groups(owner), group)
@@ -191,7 +197,12 @@ export class AutomaticTriage {
     const { store } = this.host
     const rows = store.db.prepare("SELECT value ->> '$.state' AS state, COUNT(*) AS groups, SUM(json_array_length(value,'$.ids')) AS messages, MIN(value ->> '$.oldestAt') AS oldestAt FROM kv WHERE key LIKE 'automatic-triage-group:%' GROUP BY state").all()
     const page = store.db.prepare("SELECT rowid,value FROM kv WHERE key LIKE 'automatic-triage-group:%' AND value ->> '$.state' IN ('open','sealed','blocked') AND rowid > ? ORDER BY rowid LIMIT 51").all(after)
-    const owners = page.slice(0, 50).map(row => { const group = JSON.parse(String(row.value)) as Group; return { owner: group.owner, generation: this.host.handoffs.read(group.owner).generation, state: group.state, lane: group.lane, messages: group.ids.length, oldestAt: group.oldestAt, problem: group.problem } })
+    const owners = page.slice(0, 50).map(row => {
+      const group = JSON.parse(String(row.value)) as Group, manifest = this.host.handoffs.read(group.owner)
+      return { owner: group.owner, generation: manifest.generation, state: group.state, lane: group.lane, source: group.source,
+        recoverable: manifest.state === 'held' && this.retryAvailable(group, manifest.generation),
+        messages: group.ids.length, oldestAt: group.oldestAt, problem: group.problem }
+    })
     return { owners, next: page.length > 50 ? Number(page[49]!.rowid) : null, enabled: this.host.enabled(), historical: this.host.historical(), scan: store.get(scanKey), groups: rows, contextComplete: false as const }
   }
 }

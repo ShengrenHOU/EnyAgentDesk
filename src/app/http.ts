@@ -1,6 +1,9 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import { TriageMatters } from './triage-matters.ts'
 import { productionOverview } from './production-triage.ts'
+import type { ProductionTriage } from './production-triage.ts'
+import type { AutomaticTriage } from './automatic-triage.ts'
+import { AutomaticRecoverySchema } from './automatic-triage.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -38,6 +41,8 @@ import { ManagementPatchSchema, updateTicketManagement } from './management.ts'
 import { detail as lineDetail, linesView, MembershipConflict, reassign } from './lines.ts'
 
 export interface HttpHost {
+  readonly automaticTriage: Pick<AutomaticTriage, 'status' | 'recover'>
+  readonly productionTriage: Pick<ProductionTriage, 'retry'>
   continueStopped?(id: string, instruction: string): { continued: true; ticketId: string; executor: 'dsh' }
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
@@ -137,6 +142,8 @@ export function stateView(runtime: HttpHost) {
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
     triageHandoff: runtime.store.triageHandoffStatus(),
+    ...(runtime.machine.triageHandoff || runtime.machine.triageProduction ? { triageRecovery: {
+      intake: !!runtime.machine.triageHandoff, production: !!runtime.machine.triageProduction } } : {}),
     masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
     runtime: runtimeVersion(packageIdentity(), runtime.startedAt, sourceHead(runtime)) }
 }
@@ -187,6 +194,24 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET state': () => stateView(runtime),
+    'GET automatic-triage': ({ query }) => {
+      if (!runtime.machine.triageHandoff) throw new RouteError(400, 'Triage handoff is disabled')
+      return runtime.automaticTriage.status(z.object({ after: count.default(0) }).parse(query).after)
+    },
+    'POST automatic-triage/recover': async ({ body }) => {
+      if (!runtime.machine.triageHandoff) throw new RouteError(400, 'Triage handoff is disabled')
+      const input = AutomaticRecoverySchema.parse(await body())
+      const result = runtime.automaticTriage.recover(input.owners, input.action)
+      runtime.requestPass()
+      return result
+    },
+    'POST production-triage/:id/retry': async ({ params, body }) => {
+      if (!runtime.machine.triageProduction) throw new RouteError(400, 'Production triage is disabled')
+      const { generation } = z.object({ generation: z.number().int().positive() }).strict().parse(await body())
+      const result = runtime.productionTriage.retry(params.id, generation)
+      runtime.requestPass()
+      return { id: result.id, generation: result.generation, state: result.state }
+    },
     'GET followups': () => runtime.followups.pending(),
     'GET followups/automations': () => runtime.followups.automations(),
     'GET production-triage': ({ query }) => productionOverview(store, trigger => runtime.sources.imEvidence(trigger),

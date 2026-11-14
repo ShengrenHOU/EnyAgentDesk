@@ -309,6 +309,9 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET automatic-triage': { query: ['after'], answer: () => ({ owners: [], next: null, enabled: false, historical: false, scan: undefined, groups: [], contextComplete: false }) },
+  'POST automatic-triage/recover': { body: true, answer: () => { throw new Refusal(400, { error: 'Triage handoff is disabled in this fixture' }) } },
+  'POST production-triage/:id/retry': { body: true, answer: () => { throw new Refusal(400, { error: 'Production triage is disabled in this fixture' }) } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET triage-matters': { query: ['before', 'limit', 'active'], answer: () => overviewView().triageMatters },

@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,9 +14,40 @@ import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
 import { testMachine } from './fixtures/deployment.ts'
+import { startRuntime } from './fixtures/host.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
+it('connects the live Runtime intake service to management discovery', async () => {
+  const host = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
+  try {
+    expect(await host.api('GET', 'state')).toMatchObject({ status: 200, body: { triageRecovery: { intake: true, production: true } } })
+    expect(await host.api('GET', 'automatic-triage')).toMatchObject({ status: 200, body: { owners: [], next: null, contextComplete: false } })
+    expect(await host.api('POST', 'production-triage/missing/retry', { generation: 0 })).toMatchObject({ status: 400 })
+  } finally { await host.stop(); vi.restoreAllMocks() }
+})
+it('recovers exact triage generations through the protected operator carrier without bypassing feature gates', async () => {
+  const recover = vi.fn(() => [{ owner: 'owner', generation: 2 }])
+  const retry = vi.fn(() => ({ id: 'batch', generation: 3, state: 'queued' }))
+  const requestPass = vi.fn()
+  const status = vi.fn(() => ({ owners: [], next: null }))
+  const runtime = { store: {}, sources: {}, machine: { triageHandoff: true, triageProduction: true },
+    automaticTriage: { status, recover }, productionTriage: { retry }, requestPass }
+  const call = serve(runtime)
+  const body = { owners: [{ owner: 'owner', generation: 1 }], action: 'retry' }
+  expect(await call('POST', 'automatic-triage/recover', body, { 'x-orchestrator-request': undefined })).toMatchObject({ status: 403 })
+  expect(await call('POST', 'automatic-triage/recover', { ...body, owners: Array(21).fill(body.owners[0]) })).toMatchObject({ status: 400 })
+  expect(recover).not.toHaveBeenCalled()
+  expect(await call('POST', 'automatic-triage/recover', body)).toMatchObject({ status: 200 })
+  expect(recover).toHaveBeenCalledWith(body.owners, 'retry')
+  expect(await call('POST', 'production-triage/batch/retry', { generation: 2 })).toMatchObject({ status: 200, body: { id: 'batch', generation: 3, state: 'queued' } })
+  expect(retry).toHaveBeenCalledWith('batch', 2)
+  expect(requestPass).toHaveBeenCalledTimes(2)
+  const disabled = serve({ ...runtime, machine: { triageHandoff: false, triageProduction: false } })
+  expect(await disabled('POST', 'automatic-triage/recover', body)).toMatchObject({ status: 400 })
+  expect(await disabled('POST', 'production-triage/batch/retry', { generation: 2 })).toMatchObject({ status: 400 })
+  expect(retry).toHaveBeenCalledTimes(1)
+})
 it('reports the actual executor model source and server prepare shell', async () => {
   for (const codex of [undefined, { command: 'native-codex', model: 'codex-test-model' }]) {
     const call = serve({ machine: testMachine({ codex }), configured: () => false, masterId: 'master', health: {},

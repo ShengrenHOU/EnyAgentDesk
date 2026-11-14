@@ -1,6 +1,7 @@
 /** Concurrent runtime behavior across overlapping triggers, deliveries, and worker launches. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
+import { latestAssignment, key, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
+import { migrationIntents } from '../src/app/followups.ts'
 import { Later } from '../src/app/effects.ts'
 import { reportRelay } from '../src/app/notices.ts'
 import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
@@ -46,6 +47,30 @@ it('waits for an aborted source to finish its state writes before closing the da
   release.resolve()
   await stopping
   expect(finished).toBe(true)
+  expect(closed).toHaveBeenCalledOnce()
+})
+
+it('waits for a pass\'s follow-up reconciliation to finish its Host Schedule read and Store write before closing the database', async () => {
+  const name = migrationIntents('stale', 'check')
+  h.runtime.store.set(name, { ticketId: 'stale', requestId: 'check', sessionId: h.runtime.masterId, title: '自动化检查',
+    prompt: 'Automation stale:check', at: new Date(Date.now() + 60_000).toISOString(), marker: key('stale', 'check'),
+    createdAt: new Date(Date.now() - 120_000).toISOString() })
+  const entered = deferred(), release = deferred()
+  h.schedule.catalog.mockImplementation(async () => { entered.resolve(); await release.promise; return [] })
+  const removed = vi.spyOn(h.runtime.store, 'delete')
+  const closed = vi.spyOn(h.runtime.store, 'close')
+  const pump = h.runtime.pump()
+  await entered.promise
+  const stopping = h.runtime.stop()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  expect(closed).not.toHaveBeenCalled()
+  expect(removed).not.toHaveBeenCalledWith(name)
+  release.resolve()
+  await stopping
+  await pump
+  // The stale intent, whose no-match decision came after the slow read, was removed before the Store closed.
+  expect(removed).toHaveBeenCalledWith(name)
+  expect(removed.mock.invocationCallOrder.at(-1)!).toBeLessThan(closed.mock.invocationCallOrder[0]!)
   expect(closed).toHaveBeenCalledOnce()
 })
 

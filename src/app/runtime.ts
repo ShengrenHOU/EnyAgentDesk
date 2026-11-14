@@ -316,9 +316,12 @@ export class Runtime extends Service implements SourceHost {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
     if (!await this.setup.run(this.store.settings())) {
+      if (this.closing()) return
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
     }
+    // Stop may have begun while setup was still resolving; from here on no installer, Session, or policy sync starts.
+    if (this.closing()) return
     const deployment = this.setup.deployment
     if (deployment.github && (deployment.githubRepositories?.length || this.store.get('github-identity-repository'))) {
       deployment.githubRepositories ??= [deployment.repository.toLowerCase()]
@@ -331,7 +334,11 @@ export class Runtime extends Service implements SourceHost {
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'Superagent 主对话', 'orchestrator')
-    for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
+    if (this.closing()) return
+    for (const id of this.settings.syncable()) {
+      await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
+      if (this.closing()) return
+    }
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     this.executor.resume()
@@ -342,7 +349,8 @@ export class Runtime extends Service implements SourceHost {
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, get health() { return runtime.health }, machine, masterId, startedAt: this.startedAt, ready, sourceLinks,
+    return { store, sources, prompts, sessions, settings, engine, executor, automaticTriage: this.automaticTriage, productionTriage: this.productionTriage,
+      get health() { return runtime.health }, machine, masterId, startedAt: this.startedAt, ready, sourceLinks,
       get deployment() { return setup.deployment }, followups: this.followups, transferExecutor: (id, request) => this.transferExecutor(id, request),
       continueStopped: (id, instruction) => this.continueStopped(id, instruction),
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
@@ -356,11 +364,17 @@ export class Runtime extends Service implements SourceHost {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
     try {
       await Promise.allSettled(this.sourceRuns)
+      // Startup may still be resolving setup or creating the main Session. It checks `closing()` after each await;
+      // waiting here keeps its Store writes ahead of the close instead of racing it.
+      await this.ready.catch(error => { this.ctx.logger.warn('dsh-superagent startup ended with an error while stopping: %s', String(error)) })
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      // A pass starts follow-up reconciliation without waiting for it; that work can still read the Host Schedule and
+      // then write the Store, so it finishes before the Store closes.
+      await this.followups.drain().catch(error => { this.ctx.logger.warn('dsh-superagent could not finish follow-up reconciliation while stopping: %s', String(error)) })
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()

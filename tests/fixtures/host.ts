@@ -350,6 +350,6 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     }
   }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, consumeMain, runTool, route, acceptedTicket, acceptedLegacyTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim, consume, workspaces, workspaceRegistry }
+    jobs, subagents, step, claim, consume, workspaces, workspaceRegistry, schedule }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

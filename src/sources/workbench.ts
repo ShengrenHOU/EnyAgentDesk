@@ -16,8 +16,7 @@ export const WorkbenchRequestSchema = z.object({
 export type WorkbenchRequest = z.infer<typeof WorkbenchRequestSchema>
 export const DelegatedTasksSchema = z.array(z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,60}$/),
   owner_instruction_quote: z.string().trim().min(1).max(20_000),
-}).strict()).min(1).max(20).refine(items => new Set(items.map(item => item.id)).size === items.length
-  && new Set(items.map(item => item.owner_instruction_quote)).size === items.length, 'Task IDs and goals must be distinct')
+}).strict()).min(1).max(20).refine(items => new Set(items.map(item => item.id)).size === items.length, 'Task IDs must be distinct')
 const taskPlan = (ownerId: string, sessionId: string, throughSeq: number) => record<{
   requestId: string; tasks: z.infer<typeof DelegatedTasksSchema>
 }>(`workbench-task-plan:${key(ownerId, sessionId, String(throughSeq))}`)
@@ -129,7 +128,8 @@ export async function delegateDiscussion(ctx: SourceContext, ownerId: string, re
   const snapshot = WorkbenchContextSchema.parse(context)
   if (input.sessionId !== snapshot.sessionId || input.throughSeq !== snapshot.throughSeq) throw new Error('Discussion context does not match the delegation')
   const plan = ctx.state.get(taskPlan(ownerId, input.sessionId, input.throughSeq))
-  if (plan && !plan.tasks.some(task => input.requestId === key(plan.requestId, task.id) && input.instruction === task.owner_instruction_quote)) {
+  const plannedTask = plan?.tasks.find(task => input.requestId === key(plan.requestId, task.id) && input.instruction === task.owner_instruction_quote)
+  if (plan && !plannedTask) {
     throw new Error('This owner message already has a task plan; reuse its original tasks')
   }
   const id = key(WORKBENCH, ownerId, input.sessionId, input.requestId)
@@ -146,14 +146,15 @@ export async function delegateDiscussion(ctx: SourceContext, ownerId: string, re
     // Separate delegations in one discussion must never share an automatic fanout thread.
     threads: [{ source: WORKBENCH, id }], human: true, addressed: 'direct',
     at: z.iso.datetime().parse(at), text: input.instruction,
-    meta: { ownerId, sessionId: input.sessionId, throughSeq: input.throughSeq, requestId: input.requestId, context: snapshot } }
+    meta: { ownerId, sessionId: input.sessionId, throughSeq: input.throughSeq, requestId: input.requestId, context: snapshot,
+      ...(plannedTask ? { task: plannedTask } : {}) } }
   const received = await ctx.receive(trigger)
   if (received === 'filtered') throw new Error('Workbench delegation was filtered; no task acceptance is claimed')
   ctx.state.set(discussionRequests(input.sessionId)(input.requestId), { triggerId: id, at: trigger.at })
   return { triggerId: id, received }
 }
 
-/** A multi-goal owner message has one immutable plan; independent intake retries reuse each original request ID. */
+/** Accepted goals keep their identity; later additions and retries reuse the same owner-message plan. */
 export async function delegateDiscussionTasks(ctx: SourceContext, ownerId: string, request: WorkbenchRequest,
   context: WorkbenchContext, tasks: z.infer<typeof DelegatedTasksSchema>, at: string) {
   const input = WorkbenchRequestSchema.parse(request)
@@ -165,7 +166,13 @@ export async function delegateDiscussionTasks(ctx: SourceContext, ownerId: strin
   ctx.atomic(() => {
     const name = taskPlan(ownerId, input.sessionId, input.throughSeq)
     const previous = ctx.state.get(name)
-    if (previous && JSON.stringify(previous) !== JSON.stringify(value)) throw new Error('This owner message already has a different task plan')
+    if (previous) {
+      if (previous.requestId !== value.requestId || planned.some(task => {
+        const accepted = previous.tasks.find(item => item.id === task.id)
+        return accepted && accepted.owner_instruction_quote !== task.owner_instruction_quote
+      })) throw new Error('This owner message already has a different task plan')
+      value.tasks = DelegatedTasksSchema.parse([...previous.tasks, ...planned.filter(task => !previous.tasks.some(item => item.id === task.id))])
+    }
     if (ctx.triggers.get(key(WORKBENCH, ownerId, input.sessionId, input.requestId))) throw new Error('This owner message was already delegated as one task')
     ctx.state.set(name, value)
   })

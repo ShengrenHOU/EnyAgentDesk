@@ -68,9 +68,11 @@ Infer stage from request/context; do not ask for stage, model, tool or directory
 
 
 ## Personal workbench
-Main discussion creates no candidate. Answers use workbench action answer with the current ticket_id, attention_id and exact owner_instruction_quote; return receipt and end. Ask which Ticket if ambiguous; never delegate/attach answers. Other explicit work/updates use workbench delegate before investigation/writing, then end. Route its candidate to the named Ticket across Sources, including completed work not human-stopped. Independent goals need stable task IDs, exact quotes, shared context and retry plan. Check ownership; observations cannot replace human-stopped work.
+Main discussion creates no candidate automatically. Answers use workbench action answer with the current ticket_id, attention_id and exact owner_instruction_quote. For an explicit addition to a Ticket from this owner discussion, call workbench update with ticket_id and the exact quote now; do not promise to attach it when a candidate arrives. New work uses delegate. Cross-Source updates use delegate and route its candidate to the named Ticket. Return the actual receipt and end; receipt means received, not completed. Ask which Ticket only if ambiguous. Independent goals use stable task IDs and the shared discussion context; one confirmation can authorize several discussed goals with the same quote. Retry with the original IDs, adding only missing goals. Check ownership; observations cannot replace human-stopped work.
 
 Focus is a read-only Chinese projection: read current reports/threads via focus_context, publish focus with actual evidenceAt; never date unread evidence as new. Source changes warn of staleness; execution rechecks authority/facts. Use runtime.packageVersion over historical report versions. Refresh after material results/decisions. Projection grants nothing.
+
+Before asking again, read the owner's latest decision and the Ticket's ended reason. A deliberate stop does not authorize further execution. Render event times in the owner's configured timezone; UTC timestamps are not local clock times. State unavailable or stale source coverage explicitly; an enabled Source does not prove that all updates were collected.
 
 Domains classify evidence, not workers or authority; separate MLE/forecast from Quant/strategy and report actual coverage. Keep one Ticket per goal and existing system/colleague owners; ask only for evidenced choices or missing authority. Prefer authorized checks and wait conditions.
 

@@ -221,7 +221,11 @@ it('recomputes coverage gaps on retry instead of retaining the failed attempt', 
   await drain()
   const reread = service.read(retry.id)
   expect(reread.coverage!.gaps).not.toContain('page_budget')
-  consume(retry); expect(service.submit(retry.id, retry.generation, reread.binding!, result(retry)).state).toBe('completed')
+  const context = service.context(retry.id, retry.generation, 'a')
+  expect(context.binding).toBe(reread.binding)
+  expect(context.binding).not.toBe(live.binding)
+  expect(() => service.submit(retry.id, retry.generation, live.binding!, result(retry))).toThrow('Stale context binding')
+  expect(service.submit(retry.id, retry.generation, context.binding!, result(retry)).state).toBe('completed')
 })
 
 it('rolls back unfinished batches with original age and leaves new arrivals intact', async () => {
@@ -277,6 +281,17 @@ it('blocks native read failures once and permits explicit source-configuration r
   expect(service.retry(batch!.id, 1).generation).toBe(2)
   store.triggers.save({ ...store.triggers.get('a')!, text: 'mutated' })
   expect(() => service.retry(batch!.id, 2)).toThrow('Immutable')
+})
+
+it('retains metadata-only retry eligibility when a completed unknown receipt is redacted by configuration change', async () => {
+  add('a'); const [batch] = start(); await drain(); consume(batch!)
+  const live = service.read(batch!.id)
+  service.submit(live.id, 1, live.binding!, result(batch!, 'unknown'))
+  configuration = 'changed'
+  const view = productionOverview(store, evidence).groups[0]!
+  expect(view).toMatchObject({ state: 'completed', redacted: true, retryable: true, counts: { unknown: 0 } })
+  expect(view.matters).toEqual([])
+  expect(service.retry(live.id, 1)).toMatchObject({ state: 'queued', generation: 2, previous: live.id })
 })
 
 it('retries a transient read through Effects and preserves the attempt limit across restart', async () => {
