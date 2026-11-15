@@ -15,6 +15,7 @@ import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
 import { registerWorkbenchTool } from '../sources/workbench-tools.ts'
+import { registerMemoryTools } from './memory-tools.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
@@ -361,6 +362,7 @@ export class Sessions {
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    binding.disposers.push(...registerMemoryTools(this.ctx, agent.ctx))
     if (master) {
       // Scoped registration survives the router preset's intersecting global-tool masks.
       if (host.store.settings().sources.workbench?.enabled) {

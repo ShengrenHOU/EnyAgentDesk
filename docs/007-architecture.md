@@ -410,6 +410,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
+| `src/app/memory-tools.ts` | Scoped forwarding of installed native memory tools, preserving provider execution and refusing stale bindings |
 | `src/infra/delivery.ts` | `AgentDelivery`: shared DSH transport for Sessions and Source plugins; delivers once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -552,6 +553,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/routing-requirements.spec.ts` | Coordinator route omissions require correction before accepting work |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/assessment-delivery.spec.ts` | Shared legacy/production unread admission, durable per-request consumption, exact generated-notice cancellation and model pre-step validation |
+| `tests/memory-tools.spec.ts` | Native scoped memory visibility, unrelated-tool exclusion and removed-provider execution refusal |
 | `tests/automatic-triage.spec.ts` | 500-message consumed batching, Runtime interception, fair migration, opt-out, recovery, timestamps and revision fencing |
 | `tests/production-projection.spec.ts` | Complete paginated history, global unresolved counts, ownership and source redaction |
 | `tests/production-pagination-panel.spec.tsx` | Actual older/latest-page UI consumer, refreshing and stale authorization handling |
