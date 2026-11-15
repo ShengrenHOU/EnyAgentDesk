@@ -6,12 +6,13 @@ import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
 import { SettingsSchema } from '../src/policy.ts'
+import { translator } from './fixtures/panel.tsx'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 type Entry = { options: { name: string; id?: string; key?: string; order?: number; locale?: string; label?: () => string }; component: ComponentType<Record<string, unknown>> }
-const t = ((key: keyof typeof zh) => zh[key] ?? key) as never
+const t = translator(zh)
 function fixture(listed: string[]) {
   const entries: Entry[] = []
   const dictionaries: Record<string, unknown> = {}
@@ -72,6 +73,30 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(nav.options.label?.()).toBe(zh.homeTitle)
   expect(entries.some(entry => entry.options.name === 'sidebar.panellist' && entry.options.id === 'dsh-superagent')).toBe(false)
   expect(entries.find(entry => entry.options.id === 'dsh-main-conversation')!.options).toMatchObject({ order: -100 })
+})
+
+it('quotes the native closing message identity and visible text through the existing send', async () => {
+  serve()
+  const { entries } = fixture(['master'])
+  const entry = entries.find(item => item.options.name === 'conversation.chat.turnTail')!
+  const send = vi.fn(async (_text: string) => {})
+  const view = await render(entry, { sessionId: 'master', t, seq: 99, send,
+    turn: { turn: 8, data: { get: () => ({ closing: { finalNode: { seq: 92,
+      blocks: [{ kind: 'reasoning', text: 'private reasoning' }, { kind: 'text', text: '平台检查通过，可以继续。' }] } } }) } } })
+  try {
+    await act(async () => {
+      const input = view.container.querySelector('input')!
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '继续推进')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { view.container.querySelector<HTMLButtonElement>('.dt-quick button')!.click() })
+    const message = send.mock.calls[0]![0]
+    expect(message).toContain('消息 92')
+    expect(message).toContain('第 9 轮')
+    expect(message).toContain('平台检查通过，可以继续。')
+    expect(message).toContain('继续推进')
+    expect(message).not.toContain('private reasoning')
+  } finally { view.dispose() }
 })
 
 it('opens the existing main Session from its standalone entry without creating a session', async () => {

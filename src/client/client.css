@@ -256,6 +256,11 @@ details.pw-runtime-note > .dt-section { margin-top: 16px; }
 .dt-quick input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -1px; }
 .dt-quick button { flex: none; }
 .dt-turn-reply { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px; }
+.dt-reply-target { display: flex; align-items: flex-start; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dt-reply-target details { flex: 1; min-width: 0; }
+.dt-reply-target summary { cursor: pointer; overflow-wrap: anywhere; }
+.dt-reply-target blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid var(--dsw-alias-border-l3); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; }
+.dt-reply-target button { flex: none; }
 .dt-workbench-linked { display: flex; flex-direction: column; gap: 8px; }
 .dt-workbench-heading { margin: 0; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--dsw-alias-label-tertiary); }
 .dt-workbench-requests { display: flex; flex-direction: column; gap: 10px; }

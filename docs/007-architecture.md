@@ -495,7 +495,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/owner-desk.tsx` | Owner work projected beside the native conversation from the existing overview, with a one-line answer on each Ticket that carries a Question |
 | `src/client/reply-form.tsx` | Shared required multiline reply form for the daily, conversation and Ticket views |
 | `src/client/reply-draft.ts` | Unsent long replies are kept under their exact Ticket, Question or correction identity for the mounted panel, so reopening or switching restores the right text and a replacement Question starts apart |
-| `src/client/quick-reply.tsx` | One-line reply control: on a Ticket card, and under the newest completed Turn of the main Session, sending into the same Question or Session the composer would |
+| `src/client/quick-reply.tsx` | One-line Ticket replies and Main Turn quote replies; drafts stay with the source message, only the active editor polls, and native Session send retains the bounded quote |
 | `src/client/personal-workbench.tsx` | Today's decision queue: one row per pending Question with the agent's recommendation and draft, one-click accept, revise, defer or no action, folded corrections, running work below, and the open lines with their active Ticket, latest result and recorded judgements; detailed discussion opens the main Session |
 | `src/client/line.tsx` | One work line's existing detail — goal, recorded judgements, stages and membership correction — shared by Today and the `line/:id` route that the global search opens |
 | `src/sources/workbench-focus.ts` | Model-written reading projection of the owner focus, while Tickets and Threads remain the source of business state; the panel keeps it as a manually refreshed reference |
@@ -591,7 +591,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workbench-host.spec.ts` | Native carrier registration, persisted history delegation into a real ticket, caller-field rejection and unavailable-source failures |
 | `tests/workbench-client.spec.tsx` | Discussion action, no implicit submission, uncertain-submit replay and navigation to linked work |
 | `tests/owner-desk.spec.tsx` | Owner desk rendering of the existing overview rows, and the one-line answer that leaves the full editor closed |
-| `tests/quick-reply.spec.tsx` | The one-line reply control, the single reply under a Session's newest Turn, its send, and no reply outside the main Session |
+| `tests/quick-reply.spec.tsx` | Main quote reply selection, stable editor/focus across new Turns, per-message drafts, failed sends and in-flight submission; no reply outside Main |
 | `tests/personal-workbench.spec.tsx` | The decision queue's advice and one-click outcomes, folded corrections, silence when empty, the running work and reference sections, and the line list with its recorded judgement |
 | `tests/lines.spec.ts` | Work-line grouping and search evidence, one line per Ticket, closure only after every stage ended, explicit reopen, the derived line view, and open Tickets on no line |
 | `tests/lines-tool.spec.ts` | `orchestrator_line` search, view, open, attach, continue and close; accepting a new stage into a line atomically; and a closed line refusing work until an explicit reopen |
