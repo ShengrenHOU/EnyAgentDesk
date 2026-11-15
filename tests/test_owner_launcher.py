@@ -50,6 +50,21 @@ class OwnerLauncherTest(unittest.TestCase):
                 launcher.check_start_credential(self.config)
         self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', str(caught.exception))
 
+    def test_explicit_direct_route_reaches_startup_credential_consumer(self):
+        self.credential_probe.stop()
+        inherited = {'HTTP_PROXY': 'http://127.0.0.1:1', 'HTTPS_PROXY': 'http://127.0.0.1:1',
+                     'NO_PROXY': 'localhost', 'no_proxy': 'localhost'}
+        config = self.platform_config(noProxy='*')
+        with patch.dict(os.environ, inherited), patch.object(launcher.subprocess, 'run') as run:
+            launcher.check_start_credential(config)
+            env = run.call_args.kwargs['env']
+            self.assertEqual(env['NO_PROXY'], '*')
+            self.assertEqual(env['no_proxy'], '*')
+            self.assertEqual(os.environ['NO_PROXY'], 'localhost')
+            self.assertEqual(os.environ['HTTPS_PROXY'], inherited['HTTPS_PROXY'])
+        with self.assertRaises(ValueError):
+            launcher.validate_config(self.platform_config(noProxy=['*']))
+
     def test_dependency_consumer_failure_keeps_activation_and_start_from_spawning(self):
         config = launcher.validate_config(self.platform_config(
             preflightCommands=[[sys.executable, '-c', 'raise SystemExit(1)']]))

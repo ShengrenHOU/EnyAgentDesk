@@ -21,6 +21,8 @@ def validate_config(config):
         if not Path(config[key]).is_absolute() or not Path(config[key]).exists():
             raise ValueError('Supply existing absolute runtime and executable paths')
     root = Path(config['runtime']).resolve()
+    if 'noProxy' in config and not isinstance(config['noProxy'], str):
+        raise ValueError('noProxy must be a proxy bypass string')
     bot_config = config.get('feishuBotConfigDir')
     if bot_config and (not Path(bot_config).is_absolute() or not Path(bot_config).is_dir()):
         raise ValueError('feishuBotConfigDir must be an existing absolute directory')
@@ -102,6 +104,8 @@ def launch_guard(root, name='owner-launch.lock'):
 def launch_environment(config):
     root = Path(config['runtime'])
     env = os.environ.copy()
+    if 'noProxy' in config:
+        env['NO_PROXY'] = env['no_proxy'] = config['noProxy']
     for key in ['CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'CODEX_TOOL_CALL_ID', 'CODEX_APP_TOOLS_PIPE_PATH',
                 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY', 'CODEX_PERMISSION_PROFILE']:
         env.pop(key, None)
@@ -122,6 +126,7 @@ def check_start_credential(config):
     try:
         subprocess.run([config['broker'], 'run', '--map', 'DEEPSEEK_API_KEY=DEEPSEEK_API_KEY', '--',
                         config['python'], '-c', program], check=True, capture_output=True, timeout=45,
+                       env=launch_environment(config),
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     except (OSError, subprocess.SubprocessError) as error:
         raise RuntimeError(f'Credential consumer preflight failed ({type(error).__name__}); run enyq-secret doctor before activation') from None
@@ -242,6 +247,7 @@ def ensure_running(config, config_path, respect_stop=False):
         if result is None:
             started = subprocess.run([config['broker'], 'run', '--map', 'DEEPSEEK_API_KEY=DEEPSEEK_API_KEY', '--',
                             config['python'], str(Path(__file__).resolve()), '--config', str(config_path), '--spawn'],
+                           env=launch_environment(config),
                            check=True, capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             result = json.loads(started.stdout)
         if result is None:

@@ -1635,36 +1635,45 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
-it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
+it('refuses the main Session a sleep command and a long job wait, but not a timeout the router caps, and no worker', async () => {
   const bash = (command: string) => ({ name: 'bash', arguments: { command, description: 'x' } })
   const main = guards.get(runtime.masterId)!
   for (const command of ['sleep 60; echo done', 'cd x && sleep 5', 'gh pr checks 7 || sleep 30', 'echo a\nsleep 90', 'while true; do sleep 30; done',
     '(sleep 5)', '/bin/sleep 240', 'while sleep 30; do gh pr checks 7; done', 'if sleep 5; then gh pr view 7; fi', '{ sleep 60; }', '! sleep 5',
     'nohup sleep 60', 'exec sleep 60', 'time sleep 60', 'until sleep 1; do :; done', 'command sleep 5', 'env sleep 5'])
-    expect(main(bash(command)), command).toMatch(/^Reports, follow_up notices, new candidates and a background job's end/)
+    expect(main(bash(command)), command).toMatch(/^Refused \(the call did not run\): it runs sleep/)
   // A command that names sleep as data, not at a command position, runs.
   for (const command of ['gh api repos/acme/widgets/pulls', 'echo "sleep"', 'grep sleep file', 'sleeper --help', 'command -v sleep'])
     expect(main(bash(command)), command).toBeUndefined()
-  // A command that asks to hold the step longer than 30 seconds, however it waits, under any preset.
+  // A timeout is a ceiling. Under the router preset the shell caps it at 5 seconds and moves a longer command to the
+  // background, so it cannot hold the step and is not refused. Regression: a lark-cli network read with a 60-second ceiling
+  // was refused as though it were waiting, and the unrelated refusal read as a network interception.
   const timed = (command: string, args: { timeoutMs?: number; run_in_background?: boolean } = {}) =>
     ({ name: 'bash', arguments: { command, description: 'x', ...args } })
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000 }))).toMatch(/^Reports/)
-  expect(main(timed("python3 -c 'import time;time.sleep(240)'", { timeoutMs: 600_000 }))).toMatch(/^Reports/)
+  expect(main(timed('lark-cli calendar +agenda --as user --start 2026-11-14 --end 2026-11-15', { timeoutMs: 60_000 }))).toBeUndefined()
+  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000 }))).toBeUndefined()
+  expect(main(timed("python3 -c 'import time;time.sleep(240)'", { timeoutMs: 600_000 }))).toBeUndefined()
   expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
+  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000, run_in_background: true }))).toBeUndefined()
   // Under the router preset, the shell moves a command without a timeout to a background job after 5 seconds, and a job
   // wait without one ends after 5 seconds too; a longer job wait waits for nothing that arrives that way.
   expect(main(timed('gh pr checks 7 --watch'))).toBeUndefined()
   expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 30_000 } })).toMatch(/^Reports/)
+  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 30_000 } }))
+    .toMatch(/^Refused \(the call did not run\): a job wait here ends after 5 seconds/)
   expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
   expect(main({ name: 'job_output', arguments: { job_id: 'j' } })).toBeUndefined()
-  // A main Session created before runs under standard, whose shell waits 60 seconds by default and whose job waits last 30:
-  // a command without a timeout runs in the background or names one, and a job wait names one.
+  // A main Session created before runs under standard, whose shell waits 60 seconds by default: a command without a timeout
+  // runs in the background or names one, and one that asks to hold the step longer than 30 seconds is refused, unless it is a
+  // background command, whose timeout does not apply.
   ;(agents.get(runtime.masterId) as unknown as { session: { header: { agentPreset: string } } }).session.header = { agentPreset: 'standard' }
   expect(main(timed('gh pr checks 7 --watch'))).toMatch(/^This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000/)
   expect(main(timed('gh pr checks 7 --watch', { run_in_background: true }))).toBeUndefined()
+  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000 })))
+    .toMatch(/^Refused \(the call did not run\): it asks to hold the step longer than 30 seconds/)
+  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000, run_in_background: true }))).toBeUndefined()
   expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toMatch(/^Reports/)
+  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toMatch(/^Refused \(the call did not run\): a job wait here ends after 5 seconds/)
   expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
   // A worker waits for its own work as it needs.
   const { sessionId } = await acceptedTicket()

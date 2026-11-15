@@ -73,25 +73,34 @@ const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
+/** A refusal that names why the tool call did not run, so its text is not mistaken for the command's own result. */
+const refuse = (reason: string): string => `Refused (the call did not run): ${reason}. ${NO_WAIT}`
 /** What a main Session under `standard` is told when its command would wait the shell's default. */
 const DEFAULT_WAIT = 'This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000, or run_in_background, '
   + 'as a waiting step holds back new candidates.'
 /** `sleep` at a command position: the start, after ; & | ( { ! ` or a newline, or after a keyword or a command that runs it. */
 const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|nohup|command|env)\s)\s*(?:\S*\/)?sleep\b/
 /**
- * The main Session's guard: it refuses a bash command that runs sleep or asks to hold the step longer than 30 seconds, and a
- * job wait longer than 5 seconds. Under `standard`, as a main Session created before the router preset runs, the shell holds
- * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
- * job wait its timeout; the router preset ends both after 5 seconds.
+ * The main Session's guard: it refuses a command that runs sleep, and under `standard` a command that asks to hold the step
+ * longer than 30 seconds or names no timeout, and a job wait longer than 5 seconds or one without a timeout. Under `standard`,
+ * as a main Session created before the router preset runs, the shell holds a command 60 seconds, so a command needs a timeout
+ * or the background. The router preset caps the shell at 5 seconds and a job wait at 5, so a larger timeout cannot hold the
+ * step; it is a ceiling the cap applies, not a wait to refuse.
  */
 function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
   const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
+  const capped = routed()
   if (name === 'bash' || name === 'pwsh') {
     const sleeps = typeof args.command === 'string' && SLEEP.test(args.command)
-    if (sleeps || typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000) return NO_WAIT
-    if (args.timeoutMs === undefined && args.run_in_background !== true && !routed()) return DEFAULT_WAIT
+    const background = args.run_in_background === true
+    if (sleeps) return refuse('it runs sleep, which holds the step to wait')
+    if (!capped && !background && typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000)
+      return refuse('it asks to hold the step longer than 30 seconds; pass timeoutMs of at most 30000 or run_in_background')
+    if (args.timeoutMs === undefined && !background && !capped) return DEFAULT_WAIT
   }
-  if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
+  if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !capped)) {
+    return refuse('a job wait here ends after 5 seconds; pass timeout_ms of at most 5000 or continue without waiting')
+  }
   return undefined
 }
 

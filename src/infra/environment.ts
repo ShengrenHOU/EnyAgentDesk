@@ -133,13 +133,14 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
 /**
  * Proxy variables for worker and probe commands, in the uppercase and lowercase spellings clients read
  * (curl gives lowercase precedence). An empty setting returns explicit `undefined`s so a proxy inherited
- * from the launching shell is removed rather than silently reused. `ALL_PROXY` is cleared in both cases
+ * from the launching shell is removed rather than silently reused. A wildcard bypass also prevents clients
+ * such as Python urllib from falling back to the Windows system proxy. `ALL_PROXY` is cleared in both cases
  * so an inherited fallback cannot bypass the configured value.
  */
 export function proxyVariables(proxy: string): Record<string, string | undefined> {
   const url = proxy.trim()
-  if (!url) return { HTTPS_PROXY: undefined, HTTP_PROXY: undefined, ALL_PROXY: undefined, NO_PROXY: undefined,
-    https_proxy: undefined, http_proxy: undefined, all_proxy: undefined, no_proxy: undefined }
+  if (!url) return { HTTPS_PROXY: undefined, HTTP_PROXY: undefined, ALL_PROXY: undefined, NO_PROXY: '*',
+    https_proxy: undefined, http_proxy: undefined, all_proxy: undefined, no_proxy: '*' }
   const noProxy = 'localhost,127.0.0.1,::1'
   return { HTTPS_PROXY: url, HTTP_PROXY: url, ALL_PROXY: undefined, NO_PROXY: noProxy,
     https_proxy: url, http_proxy: url, all_proxy: undefined, no_proxy: noProxy }

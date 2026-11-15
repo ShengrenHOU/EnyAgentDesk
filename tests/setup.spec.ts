@@ -64,7 +64,9 @@ it('updates the command environment that host commands already hold when setup a
   // A host command spawned through the Commands built before setup uses the same value, as GitHub and Feishu polling do.
   expect(await seenProxy()).toBe('http://127.0.0.1:7897')
   await expect(setup.run(settings(''))).resolves.toBe(true)
-  for (const name of PROXY_VARIABLES) expect(commandEnvironment[name]).toBeUndefined()
+  for (const name of PROXY_VARIABLES.filter(name => !['NO_PROXY', 'no_proxy'].includes(name))) expect(commandEnvironment[name]).toBeUndefined()
+  expect(commandEnvironment.NO_PROXY).toBe('*')
+  expect(commandEnvironment.no_proxy).toBe('*')
   expect(process.env.HTTPS_PROXY).toBeUndefined()
   expect(process.env.http_proxy).toBeUndefined()
   expect(await seenProxy()).toBeNull()
