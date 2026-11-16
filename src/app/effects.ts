@@ -9,7 +9,7 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
-  /** Bounded production IM judgment, sharing the inferred main-session lane. */
+  /** Bounded production IM judgment in its own native session. */
   triageAssessment: { generation: number }
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string; /** Explicit owner work outranks inferred candidates; 0 when absent. */ priority?: number }

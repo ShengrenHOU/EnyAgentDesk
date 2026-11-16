@@ -21,6 +21,7 @@ let provider: string
 let enabled: boolean, paused: boolean, source: boolean, configuration: string, version: string, prompt: string, now: string
 let native: (id: string) => ImContextReader
 const deliver = vi.fn(async (_id: string, _text: string, authorize: () => void) => { authorize(); return now })
+const completed = vi.fn()
 const policy = (): Policy => ({ version, paused, evalTimeoutMs: 60000, revalidate: () => true, admitsInferred: () => true,
   gate: trigger => ({ admissible: true, strength: trigger.addressed ? 'explicit' : 'inferred', basis: { via: 'followup' } }) })
 const evidence = (trigger: Trigger) => source ? { provider, account: 'owner', conversation: String(trigger.meta.chat ?? 'chat'), message: trigger.id, version: 'v1', partial: false, configuration } : undefined
@@ -32,7 +33,7 @@ function setup(header?: (trigger: Trigger) => ImMessageHeader) {
   effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never)
   handoffs = new TriageHandoffs({ store, engine, enabled: () => true, evidence, policyVersion: () => version, now: () => now })
   service = new ProductionTriage({ store, engine, handoffs, effects, evidence, context: trigger => native(trigger.id), header,
-    enabled: () => enabled, paused: () => paused, policy: () => version, prompt: () => prompt, now: () => now, deliver })
+    enabled: () => enabled, paused: () => paused, policy: () => version, prompt: () => prompt, now: () => now, deliver, completed })
 }
 const add = (id: string, chat = 'chat', addressed = false) => engine.receive({ id, source: 'im', threads: [{ source: 'im', id: chat }],
   at: now, actor: { source: 'im', id: 'sender' }, human: true, text: `private ${id}`, meta: { chat }, ...(addressed ? { addressed: 'mention' as const } : {}) })
@@ -60,9 +61,34 @@ beforeEach(() => {
     return { provider: request.anchor.provider, account: request.anchor.account, conversation: request.anchor.conversation,
       start: request.start, end: request.end, consistency: 'live_paginated', gaps: ['account_visible_only'], anchor, messages: [anchor] }
   } })
-  setup()
+  completed.mockReset(); setup()
 })
 afterEach(async () => { await effects.drain(); store.close(); rmSync(directory, { recursive: true, force: true }) })
+
+it('resumes an awaiting batch through its original delivery identity without extending its deadline', async () => {
+  add('a'); const [created] = start(); await drain()
+  const before = service.read(created!.id)
+  expect(before.consumedAt).toBe(now)
+  deliver.mockClear(); now = '2026-11-10T01:00:01.000Z'
+  service.resume(); await drain()
+  expect(deliver).toHaveBeenCalledTimes(1)
+  expect(deliver.mock.calls[0]![0]).toBe(`production-triage:${before.id}:1`)
+  expect(service.read(before.id)).toMatchObject({ generation: 1, consumedAt: before.consumedAt, deadline: before.deadline })
+})
+
+it('commits one completion handoff atomically and never repeats it for duplicate submission', async () => {
+  add('a'); const [created] = start(); await drain(); consume(created!)
+  const batch = service.read(created!.id), judgment = result(created!)
+  completed.mockImplementationOnce(() => { throw new Error('handoff failed') })
+  expect(() => service.submit(batch.id, 1, batch.binding!, judgment)).toThrow('handoff failed')
+  expect(service.read(batch.id).state).toBe('awaiting')
+  completed.mockClear()
+  service.submit(batch.id, 1, batch.binding!, judgment)
+  service.submit(batch.id, 1, batch.binding!, judgment)
+  expect(completed).toHaveBeenCalledTimes(1)
+  service.resume(); await drain()
+  expect(completed).toHaveBeenCalledTimes(1)
+})
 
 it('exposes event time for retained batches without rewriting their binding or adding tool-output undefined values', async () => {
   add('a'); const [created] = start(); await drain()
@@ -423,9 +449,17 @@ it('real Runtime settings pause/resume preserves unconsumed production attempt d
     runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources, 'other-im': { allowed: [{ id: 'sender' }] } } } })
     runtime.engine.receive({ id: 'runtime-a', source: 'other-im', threads: [{ source: 'other-im', id: 'chat' }], actor: { source: 'other-im', id: 'sender' }, human: true, text: 'reference', at: now, meta: {} })
     runtime.triageHandoffs.adopt('runtime-owner', ['runtime-a'], runtime.triageHandoffs.preview(['runtime-a']).fingerprint)
-    const agent = host.agents.get(runtime.masterId)!; agent.status = 'running'
+    const main = host.agents.get(runtime.masterId)!; main.status = 'running'
+    const originalCreate = vi.mocked(host.ctx.agents.create).getMockImplementation()!
+    vi.mocked(host.ctx.agents.create).mockImplementationOnce(async options => {
+      const handle = await originalCreate(options)
+      host.agents.get(handle.agent.id)!.status = 'running'
+      return handle
+    })
     const [batch] = runtime.productionTriage.start('runtime-owner', 1, { start: '2026-11-10T00:00:00Z', end: '2026-11-11T00:00:00Z' })
     await runtime.idle(); const before = runtime.productionTriage.read(batch!.id)
+    const agent = [...host.agents.values()].find(agent => agent.id.startsWith('assessment-'))!
+    expect(host.relays(runtime.masterId).some(item => item.kind === 'im_production_judgment')).toBe(false)
     expect(before.state).toBe('awaiting'); expect(before.consumedAt).toBeUndefined(); expect(agent.inbox.nextTurn).toHaveLength(1)
     await runtime.settings.pause(true, 'tool'); runtime.productionTriage.maintain(); runtime.sessions.pruneAssessments()
     expect(agent.inbox.nextTurn).toHaveLength(1); expect(runtime.productionTriage.noticeCurrent(batch!.id, 1)).toBe(true)
@@ -448,6 +482,17 @@ it('real Runtime settings pause/resume preserves unconsumed production attempt d
     expect(Date.parse(confirmed.deadline!)).toBeGreaterThan(Date.now())
     runtime.productionTriage.maintain()
     expect(runtime.productionTriage.read(batch!.id)).toMatchObject({ state: 'awaiting', deadline: confirmed.deadline, confirmedAt: confirmed.confirmedAt })
+    runtime.productionTriage.context(batch!.id, 1, 'runtime-a', 0)
+    runtime.productionTriage.submit(batch!.id, 1, confirmed.binding!, { model: 'reported', items: [{ triggerId: 'runtime-a',
+      kind: 'suggested_action', reason: 'protected-reason', context: { revision: confirmed.contexts['runtime-a']!.revision, hash: confirmed.contexts['runtime-a']!.hash }, matterIds: ['local'] }],
+      matters: [{ id: 'local', title: 'protected-title', reason: 'protected-reason', triggerIds: ['runtime-a'] }] })
+    const settingsAfter = runtime.store.settings()
+    runtime.store.saveSettings({ ...settingsAfter, sources: { ...settingsAfter.sources, 'other-im': { enabled: false, config: {} } } })
+    await runtime.idle()
+    const handoffs = host.relays(runtime.masterId).filter(item => item.kind === 'im_triage_result')
+    expect(handoffs).toHaveLength(1)
+    expect(handoffs[0]).toMatchObject({ batchId: batch!.id, generation: 1, read: `triage/receipt/${batch!.id}/1` })
+    expect(JSON.stringify(handoffs)).not.toContain('protected-')
   } finally { await host.stop() }
 })
 

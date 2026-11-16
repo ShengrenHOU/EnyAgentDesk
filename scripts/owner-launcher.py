@@ -66,8 +66,8 @@ def ready(result):
     setup = result['setup']
     if setup.get('problem') or setup.get('feishuProblem'):
         return False
-    feishu = (setup.get('accounts') or {}).get('feishu')
-    return not feishu or result['health'].get('feishu', {}).get('state') == 'ready'
+    # Provider transport health is reported separately; it must not block an otherwise valid runtime repair.
+    return True
 
 
 def state(config, timeout=15):

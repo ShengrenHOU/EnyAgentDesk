@@ -238,14 +238,21 @@ class OwnerLauncherTest(unittest.TestCase):
             self.assertEqual(launcher.state(config), personal)
         self.assertTrue(launcher.ready(personal))
         personal['setup']['accounts']['feishu'] = {'appId': 'configured-bot'}
-        self.assertFalse(launcher.ready(personal))
+        self.assertTrue(launcher.ready(personal))
         personal['health']['feishu'] = {'state': 'ready'}
         self.assertTrue(launcher.ready(personal))
         personal['health']['feishu']['state'] = 'starting'
-        self.assertFalse(launcher.ready(personal))
+        self.assertTrue(launcher.ready(personal))
+        personal['health']['feishu']['state'] = 'error'
+        self.assertTrue(launcher.ready(personal))
         personal['health']['feishu']['state'] = 'ready'
         personal['setup']['feishuProblem'] = {'code': 'missing-scope'}
         self.assertFalse(launcher.ready(personal))
+
+    def test_core_failure_is_not_hidden_by_a_healthy_source(self):
+        current = {'setup': {'problem': None, 'feishuProblem': None},
+                   'health': {'runtime': {'state': 'error'}, 'feishu': {'state': 'ready'}}}
+        self.assertFalse(launcher.ready(current))
 
     def test_custom_manual_stop_is_independent_and_marked_by_the_normal_entry(self):
         config = self.platform_config()

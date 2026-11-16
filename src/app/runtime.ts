@@ -156,6 +156,7 @@ export class Runtime extends Service implements SourceHost {
           if (notice.kind === 'im_production_judgment') return this.productionTriage?.noticeCurrent(notice.id, notice.generation!) ?? false
           return store.threads.active().some(thread => thread.evaluating?.id === notice.id)
         },
+        productionTools: () => productionTriageTools(this.productionTriage),
         tools: (agent, ticket) => ticket ? [...executorTools(this.toolHost, ticket), ...followupTools(this.followups, ticket.id), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request(), ticket.id)] : [...mainTools(this.toolHost, agent), ...(machine.triageHandoff ? automaticTriageTools(this.automaticTriage) : []), ...(machine.triageProduction ? productionTriageTools(this.productionTriage) : []), ...(machine.triageShadow ? triageTools(this.triage) : []), ...(machine.triageHandoff ? triageHandoffTools(this.triageHandoffs) : []), ...followupTools(this.followups), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request()), ...machine.codex ? routingTools((id, request) => this.transferExecutor(id, request)) : []] })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
@@ -214,7 +215,13 @@ export class Runtime extends Service implements SourceHost {
         enabled: () => !!machine.triageProduction, automaticEnabled: () => !!machine.triageAutomatic, paused: () => this.paused(), policy: () => policy().version,
         prompt: () => String(prompts.current().revision),
         timeoutMs: () => policy().evalTimeoutMs, prune: () => sessions.pruneAssessments(),
-        deliver: (id, text, authorize) => sessions.assessment(id, text, authorize) })
+        deliver: (id, text, authorize) => sessions.productionAssessment(id, text, authorize),
+        completed: batch => {
+          if (!batch.result?.matters.length) return
+          sessions.relay(`triage-result:${batch.id}:${batch.generation}`, JSON.stringify({ kind: 'im_triage_result',
+            batchId: batch.id, generation: batch.generation, read: `triage/receipt/${batch.id}/${batch.generation}`,
+            instruction: 'Information judgment saved, not business completion or new authority. Read the canonical receipt and triage/matters. Associate meaningful updates with existing authorized work using its evidence/revision; admit new work only under policy. Resolve relevant identity gaps through existing Skills when needed. Ignore routine evidence silently; interrupt the owner only for important results or necessary decisions.' }))
+        } })
       this.automaticTriage = new AutomaticTriage({ store, engine, handoffs: this.triageHandoffs, production: this.productionTriage,
         evidence: trigger => sources.imEvidence(trigger), enabled: () => !!machine.triageAutomatic,
         historical: () => !!machine.triageHistorical, paused: () => this.paused(), policy: () => policy().version, prompt: () => String(prompts.current().revision) })
@@ -341,6 +348,7 @@ export class Runtime extends Service implements SourceHost {
     }
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
+    this.productionTriage.resume()
     this.executor.resume()
     this.passes.start()
     this.effects.start()
@@ -378,7 +386,7 @@ export class Runtime extends Service implements SourceHost {
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()
-      this.sessions.dispose()
+      await this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()
     } finally {

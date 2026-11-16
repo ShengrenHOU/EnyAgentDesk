@@ -21,6 +21,8 @@ import type { Machine } from '../../src/deployment.ts'
 import { sessionQueryFixture } from './session-query.ts'
 import { SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
+import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 
 export const MEMBER = 'ou_alice'
 export const CHAT = 'oc_team'
@@ -236,6 +238,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
         whenIdle: () => status === 'idle' ? Promise.resolve() : new Promise<void>(resolve => { idle.push(resolve) }) } as never)
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(resolveDefault), rename: vi.fn(async () => {}),
+    modelCatalog: vi.fn(async () => ({ default: { provider: 'fixture', model: 'small' }, groups: [], failures: [] })),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
     inspect: vi.fn(async (id: string, _signal?: AbortSignal): Promise<SessionInspection> => ({ meta: { id: SessionId(id), version: SESSION_FORMAT_VERSION,
       createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0), events: [] })),
@@ -269,6 +272,22 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     delete: vi.fn(async ({ id }: { sessionId: string; id: string }) => schedules.delete(id) ? { deleted: true } : { deleted: false, code: 'schedule_not_found' }),
     catalog: vi.fn(async () => [...schedules.values()]),
   }
+  Object.assign(agents, {
+    withoutInitiator: (run: () => unknown) => run(),
+    resume: vi.fn(async (options: ResumeAgentOptions) => { throw new SessionPersistenceNotFoundError(options.resumeSessionId) }),
+    create: vi.fn(async (options: CreateAgentOptions) => {
+      await controller.create({ sessionId: options.sessionId })
+      const agent = agents.get(options.sessionId)! as unknown as Agent
+      Object.assign(agent.session, { header: { id: options.sessionId, ...options.meta } })
+      await options.setup?.(agent.ctx, agent)
+      await ctx.serial('agent/created', { agent, source: 'startup' })
+      return { agent, dispose: async () => {
+        agent.cancel({ kind: 'user' }); await agent.whenIdle()
+        ctx.emit('agent/disposed', { agent })
+        agents.delete(options.sessionId); await agent.ctx.fiber.dispose()
+      } } as unknown as AgentHandle
+    }),
+  })
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
     sessionQuery: sessionQueryFixture((id, signal) => controller.inspect(id, signal)),
     sessionPersistence: persistence, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer,

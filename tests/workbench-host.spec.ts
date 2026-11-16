@@ -25,6 +25,17 @@ let artifact: ConnectionFetchRoute
 type Inspect = (id: SessionId, signal?: AbortSignal) => Promise<SessionInspection>
 let inspect = vi.fn<Inspect>()
 let discussionTool: ToolDefinition
+let liveInspection: SessionInspection
+function setInspection(value: SessionInspection): void {
+  liveInspection = value
+  inspect.mockResolvedValue(value)
+}
+function ownerExecution() {
+  return { agent: { id: SessionId('discussion'), session: {
+    get header() { return liveInspection.meta }, snapshotEvents: () => liveInspection.events,
+  } }, signal: new AbortController().signal } as never
+}
+
 it('registers a plain JSON schema without Zod method metadata', () => {
   const visit = (value: unknown): void => {
     if (!value || typeof value !== 'object') { expect(typeof value).not.toBe('function'); return }
@@ -57,7 +68,7 @@ beforeEach(async () => {
   const settings = h.runtime.store.settings()
   h.runtime.store.saveSettings({ ...settings, sources: { ...settings.sources, workbench: { enabled: true, config: { ownerId: 'owner' } } },
     policy: { ...settings.policy, sources: { ...settings.policy.sources, workbench: { allowed: [{ id: 'owner' }], admission: {} } } } })
-  inspect.mockResolvedValue({ meta: { version: SESSION_FORMAT_VERSION, id: SessionId('discussion'), createdAt: 0, isSeeded: false },
+  setInspection({ meta: { version: SESSION_FORMAT_VERSION, id: SessionId('discussion'), createdAt: 0, isSeeded: false },
     inheritedEventCount: SessionLogOffset(0), events: [{ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append',
       data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Original owner discussion' }] }) }] })
 })
@@ -140,12 +151,12 @@ it('reads the owner decision queue and applies defer, restore and “no action n
 it('routes the main discussion answer by current question identity and refuses background-message authority', async () => {
   const { ticket } = await h.acceptedTicket(feishu('answer-2', 'Prepare the note'))
   const attention = h.runtime.engine.report(ticket.id, { state: 'blocked', summary: 'Waiting', question: 'Which scope?' }).attention!
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   const args = { action: 'answer', ticket_id: ticket.id, attention_id: attention.id, owner_instruction_quote: 'Original owner discussion' }
   expect(await discussionTool.execute(args, execution)).toMatchObject({ saved: true })
   expect(h.runtime.store.tickets.get(ticket.id)?.attention).toBeUndefined()
   const record = await inspect(SessionId('discussion'))
-  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+  setInspection({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
     data: createUserMessage({ source: { kind: 'dsh-superagent' }, content: [{ type: 'text', text: 'Report quoting Original owner discussion' }] }) }] })
   await expect(discussionTool.execute(args, execution)).rejects.toThrow('not an original owner instruction')
   expect(() => h.runtime.context({ kind: 'feishu', health: [] }).tickets.answerAttention(ticket.id, attention.id, 'fake'))
@@ -170,7 +181,7 @@ it('reads all pending checks through the real management route and cancels only 
 })
 
 it('hands off natural-language requests using original owner evidence and deduplicates tool retries', async () => {
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Invented instruction' }, execution)).rejects.toThrow('latest original owner message')
   const first = await discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution) as { triggerId: string }
   expect(h.runtime.store.triggers.get(first.triggerId)?.text).toBe('Original owner discussion')
@@ -179,16 +190,34 @@ it('hands off natural-language requests using original owner evidence and dedupl
   const status = await discussionTool.execute({ action: 'status' }, execution)
   expect(status).toMatchObject({ requests: [{ triggerId: first.triggerId }] })
   const record = await inspect(SessionId('discussion'))
-  inspect.mockResolvedValue({ ...record, meta: { ...record.meta, origin: 'subagent' } })
+  setInspection({ ...record, meta: { ...record.meta, origin: 'subagent' } })
   await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution)).rejects.toThrow('not owner discussions')
+})
+
+it('reads own-session status without loading or scanning conversation history', async () => {
+  inspect.mockRejectedValue(new Error('Full-history reads are unavailable'))
+  const snapshotEvents = vi.fn(() => { throw new Error('Status must not scan events') })
+  const execution = { agent: { id: SessionId('discussion'), session: {
+    header: liveInspection.meta, snapshotEvents,
+  } }, signal: new AbortController().signal } as never
+  expect(await discussionTool.execute({ action: 'status' }, execution)).toMatchObject({ requests: [] })
+  expect(snapshotEvents).not.toHaveBeenCalled()
+  expect(inspect).not.toHaveBeenCalled()
+})
+
+it('captures live owner delegation without a detached full-journal query', async () => {
+  inspect.mockRejectedValue(new Error('Full-history reads are unavailable'))
+  const receipt = await discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, ownerExecution()) as { triggerId: string }
+  expect(h.runtime.store.triggers.get(receipt.triggerId)?.text).toBe('Original owner discussion')
+  expect(inspect).not.toHaveBeenCalled()
 })
 
 it.each(['runtime-context', 'time-context'])('keeps the latest owner request actionable after a %s snapshot', async kind => {
   const record = await inspect(SessionId('discussion'))
-  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+  setInspection({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
     data: createUserMessage({ source: { kind: 'dsh-superagent', form: 'snapshot', sections: [{ name: kind, text: 'Current host context' }] },
       content: [{ type: 'text', text: 'Snapshot material cannot authorize publication' }] }) }] })
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   const args = { action: 'delegate', owner_instruction_quote: 'Original owner discussion' }
   const receipt = await discussionTool.execute(args, execution) as { triggerId: string }
   expect(h.runtime.store.triggers.get(receipt.triggerId)?.text).toBe('Original owner discussion')
@@ -200,16 +229,16 @@ it.each(['runtime-context', 'time-context'])('keeps the latest owner request act
 
 it('does not reuse an earlier owner instruction after a newer owner correction', async () => {
   const record = await inspect(SessionId('discussion'))
-  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+  setInspection({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
     data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Stop; only discuss this.' }] }) }] })
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution))
     .rejects.toThrow('latest original owner message')
   expect(h.runtime.store.db.prepare('SELECT count(*) AS n FROM trigger').get()?.n).toBe(0)
 })
 
 it('accepts nested original quotes for two goals approved by the same owner message', async () => {
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   const tasks = [{ id: 'first', owner_instruction_quote: 'Original owner discussion' },
     { id: 'second', owner_instruction_quote: 'Original owner discussion' }]
   const args = { action: 'delegate', tasks }
@@ -306,10 +335,10 @@ it('persists a conversational supplement on the original ticket and returns a de
   const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
   const record = await inspect(SessionId('discussion'))
   const text = 'Include the other three problems in this repair.'
-  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+  setInspection({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
     data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }) }] })
   const args = { action: 'update', ticket_id: ticketId, owner_instruction_quote: text }
-  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const execution = ownerExecution()
   const first = await discussionTool.execute(args, execution) as { triggerId: string }
   await h.runtime.idle()
   expect(h.runtime.store.triggers.disposition(first.triggerId)?.fanout).toEqual([ticketId])

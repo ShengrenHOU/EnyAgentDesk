@@ -558,6 +558,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/automatic-triage.spec.ts` | 500-message consumed batching, Runtime interception, fair migration, opt-out, recovery, timestamps and revision fencing |
 | `tests/production-projection.spec.ts` | Complete paginated history, global unresolved counts, ownership and source redaction |
 | `tests/production-pagination-panel.spec.tsx` | Actual older/latest-page UI consumer, refreshing and stale authorization handling |
+| `tests/production-session.spec.ts` | Native owned background assessment lifecycle, batch-bound tools and corrupt-history refusal |
 | `tests/triage-matters.spec.ts` | Cross-batch continuation, related/split audit, citations, CAS, legacy paging, immutable receipts and revocation |
 | `tests/triage-matters-panel.spec.tsx` | Canonical projection UI, gaps/version uncertainty, full paging and refresh redaction |
 | `tests/production-triage.spec.ts` | Production effects, per-input read/commit CAS, native WeChat adapter, shared admission, revocation, retries/rollback and schema downgrade fencing |
@@ -899,3 +900,8 @@ Work evidence can cross native conversation scopes through an explicit associati
 GitHub objects marked `execution:external` retain their original request as filtered Source evidence. An open object handed back is assessed once. Closed objects receive a filtered disposition. The Source rereads native labels before either executor launches. Existing owned PRs can be adopted with `pr_adoption_reason`, preserving their branch identity and the one-active-Ticket binding. A running executor is stopped before an external takeover is declared.
 
 New automatic accumulation fingerprints use input evidence, policy and prompt identity. A legacy full-settings fingerprint is narrowed only after it matches retained settings against current evidence. Account or Source changes still require recovery. This preserves old groups when only unrelated execution settings changed.
+
+
+### Background information judgments
+
+Production batches use DSH AgentRegistry owned handles, resumed by their existing effect identity. Each native session has the minimal preset and six batch-bound read/submit tools; inherited tools are masked. Source evidence never grants execution authority. ProductionTriage retains the canonical batch, result and deadline. Restart re-enqueues only current awaiting batches without extending consumed deadlines. Native resume closes interrupted turns; a restored consumed-but-unfinished batch receives one deduplicated continuation in its existing session when no input or work is already pending. Completion and its result relay commit in the same Store transaction, so repeated submission cannot duplicate a handoff. Main receives compact saved-matter references for business association; routine classifications do not wake it. Completed or obsolete handles are released through the native lifecycle; persisted histories remain available. No Ticket, workspace, database or additional scheduler is created for a batch.

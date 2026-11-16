@@ -4,8 +4,7 @@ import { z } from 'zod'
 import { KV } from '../kv.ts'
 import { FocusSchema, focusContext, publishFocus } from './workbench-focus.ts'
 import { key } from '../core/index.ts'
-import { discussionContext } from './workbench-session.ts'
-import { inspectSession } from '../infra/session-inspection.ts'
+import { discussionContext, ownerDiscussion } from './workbench-session.ts'
 import { delegateDiscussion, delegateDiscussionTasks, DelegatedTasksSchema, discussionTasks, updateDiscussionTask, workbenchKind, type WorkbenchConfig } from './workbench.ts'
 
 const Request = z.object({ action: z.enum(['delegate', 'update', 'answer', 'status', 'focus', 'focus_context']), focus: FocusSchema.optional(), thread_key: z.string().min(1).optional(),
@@ -34,11 +33,15 @@ export function registerWorkbenchTool(ctx: Context): () => void {
         if (!request.focus) throw new Error('A focus summary is required')
         return publishFocus(source, request.focus, new Date().toISOString())
       }
-      const inspection = await inspectSession(ctx.sessionQuery, sessionId, execution.signal)
+      execution.signal.throwIfAborted()
+      const session = execution.agent.session
+      ownerDiscussion({ meta: session.header }, sessionId)
+      if (request.action === 'status') return { requests: discussionTasks(source, sessionId) }
+      // The calling Agent is already live; capture its bounded evidence synchronously without cloning the full journal.
+      const inspection = { meta: session.header, events: session.snapshotEvents() }
       const lastUser = inspection.events.findLast(event => event.type === 'user/message' && event.data.source.kind === 'user')
       if (!lastUser || lastUser.type !== 'user/message') throw new Error('No original owner message is available')
       const snapshot = discussionContext(inspection, sessionId, lastUser.seq, ctx.attachments)
-      if (request.action === 'status') return { requests: discussionTasks(source, sessionId) }
       const latestMessage = inspection.events.findLast(event => event.type === 'user/message'
         && !('form' in event.data.source && (event.data.source.form === 'notice' || event.data.source.form === 'snapshot')))
       if (latestMessage !== lastUser) throw new Error('The latest message is not an original owner instruction')

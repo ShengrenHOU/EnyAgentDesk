@@ -16,9 +16,10 @@ const TEXT_BUDGET = 200_000
 
 type OwnerMessage = SessionEvent<'user/message' | 'assistant/message'>
 type AttachmentReads = Pick<AttachmentStore, 'fileHostPath' | 'imageHostPath'>
+type DiscussionInspection = Pick<SessionInspection, 'meta' | 'events'>
 
 /** Refuses another Session's inspection and managed execution, which is never the owner's one face. */
-function ownerDiscussion(inspection: SessionInspection, sessionId: string): void {
+export function ownerDiscussion(inspection: Pick<SessionInspection, 'meta'>, sessionId: string): void {
   if (inspection.meta.id !== sessionId) throw new Error('Session inspection returned another discussion')
   // The Main Session is the owner's one face; worker Sessions and subagents remain managed execution.
   const managed = inspection.meta.agentPreset?.startsWith('dsh-superagent-')
@@ -53,7 +54,7 @@ function capture(event: OwnerMessage, store: AttachmentReads | undefined, remain
 }
 
 /** Original user and assistant messages are evidence; injected notices and reasoning are excluded. */
-export function discussionContext(inspection: SessionInspection, sessionId: string, throughSeq: number,
+export function discussionContext(inspection: DiscussionInspection, sessionId: string, throughSeq: number,
   store?: AttachmentReads): WorkbenchContext {
   ownerDiscussion(inspection, sessionId)
   if (!Number.isSafeInteger(throughSeq) || throughSeq < 0 || !inspection.events.some(event => event.seq === throughSeq)) {
@@ -63,7 +64,8 @@ export function discussionContext(inspection: SessionInspection, sessionId: stri
   const attachments = new Map<string, WorkbenchContext['attachments'][number]>()
   let partial = false, remaining = TEXT_BUDGET
   // Start at the latest selected evidence so the user's most recent corrections survive the bounded capture.
-  for (const event of [...inspection.events].reverse()) {
+  for (let index = inspection.events.length - 1; index >= 0; index--) {
+    const event = inspection.events[index]!
     if (event.seq > throughSeq) continue
     if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
     if (event.type === 'user/message' && event.data.source.kind !== 'user') continue
@@ -104,7 +106,7 @@ export interface DiscussionWindow {
  * Managed worker and subagent Sessions are refused, as are injected notices and reasoning. This grants no authority:
  * it neither receives a message nor creates or executes work.
  */
-export function discussionWindow(inspection: SessionInspection, sessionId: string,
+export function discussionWindow(inspection: DiscussionInspection, sessionId: string,
   options: { now?: Date; offset?: number; limit?: number; attachments?: AttachmentReads } = {}): DiscussionWindow {
   ownerDiscussion(inspection, sessionId)
   const now = options.now ?? new Date()
@@ -114,7 +116,8 @@ export function discussionWindow(inspection: SessionInspection, sessionId: strin
   const candidates: OwnerMessage[] = []
   let partial = false
   // Events append in time order, so the first event before the cutoff ends the scan; newer evidence is kept first.
-  for (const event of [...inspection.events].reverse()) {
+  for (let index = inspection.events.length - 1; index >= 0; index--) {
+    const event = inspection.events[index]!
     if (event.time < cutoff) break
     if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
     if (event.type === 'user/message' && event.data.source.kind !== 'user') continue
