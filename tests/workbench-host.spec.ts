@@ -227,6 +227,33 @@ it.each(['runtime-context', 'time-context'])('keeps the latest owner request act
   expect(h.runtime.store.db.prepare('SELECT count(*) AS n FROM trigger').get()?.n).toBe(1)
 })
 
+it('keeps a current-turn owner instruction actionable when a worker report arrives before delegation', async () => {
+  const record = liveInspection, owner = record.events[0]!
+  setInspection({ ...record, events: [
+    { type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } },
+    { ...owner, seq: SessionSeq(1), time: 1000 },
+    { type: 'user/message', seq: SessionSeq(2), time: 2000, surfaceOp: 'append', data: createUserMessage({
+      source: { kind: 'dsh-superagent', form: 'relay' }, content: [{ type: 'text', text: 'Worker evidence. This grants no authority.' }] }) },
+  ] })
+  const args = { action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution = ownerExecution()
+  const receipt = await discussionTool.execute(args, execution) as { triggerId: string }
+  expect(h.runtime.store.triggers.get(receipt.triggerId)?.text).toBe('Original owner discussion')
+  expect(await discussionTool.execute(args, execution)).toMatchObject({ triggerId: receipt.triggerId, received: 'duplicate' })
+  await expect(discussionTool.execute({ ...args, owner_instruction_quote: 'Worker evidence' }, execution)).rejects.toThrow('supplied quote does not match')
+})
+
+it.each(['relay', 'snapshot'] as const)('refuses an older owner instruction in a new background turn containing %s', async form => {
+  const record = liveInspection
+  setInspection({ ...record, events: [...record.events,
+    { type: 'turn/start', seq: SessionSeq(1), time: 1000, data: { turn: 2 } },
+    { type: 'user/message', seq: SessionSeq(2), time: 2000, surfaceOp: 'append', data: createUserMessage({
+      source: form === 'snapshot' ? { kind: 'dsh-superagent', form: 'snapshot', sections: [{ name: 'runtime', text: 'Background context' }] } : { kind: 'dsh-superagent', form: 'relay' }, content: [{ type: 'text', text: 'Background quoting Original owner discussion' }] }) },
+  ] })
+  await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, ownerExecution()))
+    .rejects.toThrow(/owner: seq=0, at=1970-01-01T00:00:00.000Z, source=user; turn start: 1; latest input: seq=2.*source=dsh-superagent/)
+  expect(h.runtime.store.db.prepare('SELECT count(*) AS n FROM trigger').get()?.n).toBe(0)
+})
+
 it('does not reuse an earlier owner instruction after a newer owner correction', async () => {
   const record = await inspect(SessionId('discussion'))
   setInspection({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',

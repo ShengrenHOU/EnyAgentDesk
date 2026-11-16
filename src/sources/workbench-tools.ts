@@ -1,5 +1,6 @@
 /** Natural-language handoff uses original owner messages, not model-authored task authority. */
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { z } from 'zod'
 import { KV } from '../kv.ts'
 import { FocusSchema, focusContext, publishFocus } from './workbench-focus.ts'
@@ -40,17 +41,24 @@ export function registerWorkbenchTool(ctx: Context): () => void {
       // The calling Agent is already live; capture its bounded evidence synchronously without cloning the full journal.
       const inspection = { meta: session.header, events: session.snapshotEvents() }
       const lastUser = inspection.events.findLast(event => event.type === 'user/message' && event.data.source.kind === 'user')
-      if (!lastUser || lastUser.type !== 'user/message') throw new Error('No original owner message is available')
-      const snapshot = discussionContext(inspection, sessionId, lastUser.seq, ctx.attachments)
+      const latestInput = inspection.events.findLast(event => event.type === 'user/message')
+      const describe = (event: SessionEvent | undefined): string => event?.type === 'user/message'
+        ? `seq=${event.seq}, at=${new Date(event.time).toISOString()}, source=${event.data.source.kind}` : 'none'
+      if (!lastUser || lastUser.type !== 'user/message') throw new Error(`No original owner message is available (latest input: ${describe(latestInput)})`)
       const latestMessage = inspection.events.findLast(event => event.type === 'user/message'
         && !('form' in event.data.source && (event.data.source.form === 'notice' || event.data.source.form === 'snapshot')))
-      if (latestMessage !== lastUser) throw new Error('The latest message is not an original owner instruction')
+      const turn = inspection.events.findLast(event => event.type === 'turn/start')
+      // A same-turn report adds evidence; a later background turn cannot borrow an earlier owner's authority.
+      if (turn ? lastUser.seq < turn.seq : latestMessage !== lastUser) {
+        throw new Error(`The latest message is not an original owner instruction for this turn (owner: ${describe(lastUser)}; turn start: ${turn?.seq ?? 'unavailable'}; latest input: ${describe(latestInput)})`)
+      }
       const text = lastUser.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       const quotes = request.tasks ? request.tasks.map(task => task.owner_instruction_quote) : [request.owner_instruction_quote]
       if (quotes.some(quote => !quote || !text.includes(quote))
         || request.owner_instruction_quote !== undefined && !text.includes(request.owner_instruction_quote)) {
-        throw new Error('The instruction must quote the latest original owner message')
+        throw new Error(`The instruction must quote the latest original owner message (${describe(lastUser)}; supplied quote does not match)`)
       }
+      const snapshot = discussionContext(inspection, sessionId, lastUser.seq, ctx.attachments)
       const input = { sessionId, throughSeq: lastUser.seq,
         requestId: key('discussion-action', lastUser.data.id, request.action, request.ticket_id ?? ''), instruction: text }
       execution.signal.throwIfAborted()
