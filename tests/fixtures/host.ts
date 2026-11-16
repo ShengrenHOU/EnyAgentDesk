@@ -253,7 +253,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
   /** Registered workspaces, as DSH's registry lists them; a test attaches a Session by editing `sessionIds`. */
-  const workspaces = new Map<string, { id: string; path: string; sessionIds: string[]; detachSession(sessionId: string): Promise<void> }>()
+  const workspaces = new Map<string, { id: string; path: string; sessionIds: string[]; attachSession(sessionId: string): Promise<void>; detachSession(sessionId: string): Promise<void> }>()
   const archivedSessionIds: string[] = []
   const workspaceRegistry = {
     archivedSessionIds,
@@ -264,6 +264,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
       const existing = [...workspaces.values()].find(workspace => workspace.path === cwd)
       if (existing) return existing
       const workspace = { id: `workspace-${workspaces.size + 1}`, path: cwd, sessionIds: [] as string[],
+        attachSession: async (sessionId: string) => { if (!workspace.sessionIds.includes(sessionId)) workspace.sessionIds.push(sessionId) },
         detachSession: async (sessionId: string) => { workspace.sessionIds = workspace.sessionIds.filter(id => id !== sessionId) } }
       workspaces.set(workspace.id, workspace)
       return workspace

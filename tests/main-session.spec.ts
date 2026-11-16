@@ -61,6 +61,23 @@ it('prepares a native Main with a non-authoritative handoff and retires only the
   } finally { await host.stop() }
 })
 
+it('keeps an entirely quiet new Main in the same native Workspace before any wake', async () => {
+  const host = await startRuntime()
+  try {
+    const workspace = [...host.workspaces.values()][0]!
+    const previous = largeMain(host)
+    host.runtime.mainSessions.maintain(); await host.runtime.idle()
+    expect(host.runtime.masterId).not.toBe(previous.id)
+    expect(host.workspaces.size).toBe(1)
+    expect(workspace.sessionIds).toContain(host.runtime.masterId)
+    const current = host.ctx.agents.get(host.runtime.masterId as SessionId)!
+    expect(current.followup).not.toHaveBeenCalled()
+    await host.runtime.sessions.ensure(current.id, host.directory, 'Main', 'orchestrator')
+    expect(host.workspaces.size).toBe(1)
+    expect(workspace.sessionIds.filter(id => id === current.id)).toHaveLength(1)
+  } finally { await host.stop() }
+})
+
 it('preserves genuine input arriving during quiescence and forwards it with original attribution', async () => {
   const host = await startRuntime()
   try {

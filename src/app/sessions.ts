@@ -5,7 +5,7 @@ import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persis
 import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname, resolve } from 'node:path'
+import { dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -60,11 +60,6 @@ declare module '@deepseek-ai/cordis' {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
     'agent-preset/selected'(sessionId: string, agentPreset: string): void
   }
-}
-/** Compares a Workspace path with a Session's directory, case-insensitively on Windows. */
-function samePath(left: string, right: string): boolean {
-  const normalize = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
-  return normalize(left) === normalize(right)
 }
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
@@ -192,22 +187,11 @@ export class Sessions {
       if (typeof ctx.workspaceRegistry.pinSession === 'function') {
         await ctx.workspaceRegistry.pinSession(id as SessionId).catch(() => { /* already pinned or archived */ })
       }
-      await this.unbindMain(id, cwd)
+      // DSH disables a blank native composer without a Workspace; all Main segments reuse this one cwd.
+      const workspace = await ctx.workspaceRegistry.create(cwd, 'Superagent')
+      await workspace.attachSession(id as SessionId)
     }
     return result.agent
-  }
-  /**
-   * Keeps the main Session out of every Workspace: it is the owner's one global entry, not a folder's Session. An
-   * earlier version registered its directory as a Workspace, so remove that accounting, and the registration itself
-   * once no other Session is left in it. Worker Sessions retain their ticket-local directories.
-   */
-  private async unbindMain(sessionId: string, cwd: string): Promise<void> {
-    const registry = this.ctx.workspaceRegistry, session = sessionId as SessionId
-    for (const workspace of registry.list()) {
-      if (!workspace.sessionIds.includes(session)) continue
-      await workspace.detachSession(session)
-      if (workspace.sessionIds.length === 0 && samePath(workspace.path, cwd)) await registry.delete(workspace.id)
-    }
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

@@ -312,7 +312,7 @@ Validation inherits an omitted base from the saved override, drops removed parts
 
 ### Sessions
 
-`Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles. `ensure` creates a Session with its role's model. The main Session records only its directory and belongs to no Workspace, so the owner's global entry is not a folder's Session; worker Sessions join the one Workspace that holds the ticket directories. `ensure` also detaches an older main-Session Workspace registration and removes that registration once it holds no other Session. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
+`Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles. `ensure` creates a Session with its role's model. Main segments reuse one native Workspace at their unchanged directory, preserving the first editable composer even before a turn exists. The pinned Main remains the owner's global entry; native Workspace membership does not bind its business scope to a repository. Worker Sessions keep their ticket-local directories without creating additional sidebar Workspaces. Existing Workspace titles and other sessions are retained. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
 
 `prompt` delivers once per request id. `relay` and `notify` enqueue main-Session messages handled by the `relay` and `notice` effects. `src/app/notices.ts` defines their content; `delivery` checks whether a message arrived.
 
@@ -601,7 +601,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/lines.spec.ts` | Work-line grouping and search evidence, one line per Ticket, closure only after every stage ended, explicit reopen, the derived line view, and open Tickets on no line |
 | `tests/lines-tool.spec.ts` | `orchestrator_line` search, view, open, attach, continue and close; accepting a new stage into a line atomically; and a closed line refusing work until an explicit reopen |
 | `tests/workbench-queue.spec.ts` | Pending Questions with advice, deferrals until due, reversible “no action needed”, and stale-question refusal |
-| `tests/session-workspace.spec.ts` | Main and worker Sessions keep their execution directories without creating sidebar Workspaces; legacy main registrations are detached |
+| `tests/session-workspace.spec.ts` | Main reuses one canonical native Workspace across ensures and rotations; worker directories stay separate without additional Workspace registrations |
 | `tests/workbench-focus.spec.ts` | Reading projection of the owner focus, including absent optional fields |
 | `tests/workbench-registration.spec.tsx` | Native workbench registration inside the client slot tree |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
@@ -912,7 +912,7 @@ Production batches use DSH AgentRegistry owned handles, resumed by their existin
 
 ### Bounded Main segments
 
-The Profile/Superagent remains one logical coordinator. `master-id` selects its current native interactive session. HTTP state, prompt views, resources, relays and follow-ups resolve that same pointer instead of retaining a startup copy. `MainSessions` uses the existing pass and Effects, with no second scheduler or identity database.
+The Profile/Superagent remains one logical coordinator. Main segments share one native Workspace at their existing cwd, so DSH permits the first input in a blank segment; the registry reuses that canonical directory rather than creating a Workspace per segment. The pinned Main entry remains the owner entry, and worker directories are unchanged. `master-id` selects its current native interactive session. HTTP state, prompt views, resources, relays and follow-ups resolve that same pointer instead of retaining a startup copy. `MainSessions` uses the existing pass and Effects, with no second scheduler or identity database.
 
 After an idle Main reaches 20,000 native records, a `mainRotate` effect takes an input barrier. Native jobs or unsettled reminder migrations defer the handoff. Quiet context notices can move without waking the next Main. Preparation mounts the existing router preset on an owned native root Agent, preserves the current model route, and persists at most 1 MB of visible working-conversation context through the native inbox, letting DSH establish its protected system-message head before consumption. Reasoning and full tool bodies stay in historical source records. The handoff is a producer notice, never a new user instruction or new business mandate; a larger working conversation requires native compaction rather than silent truncation.
 

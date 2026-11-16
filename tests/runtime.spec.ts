@@ -64,7 +64,7 @@ async function api(method: string, path: string): Promise<{ status: number; body
 }
 let agents: Map<string, { id: string; status: string; inbox: { nextTurn: UserMessage[]; nextStep: UserMessage[] }; cancel: ReturnType<typeof vi.fn>; inject: ReturnType<typeof vi.fn> }>
 /** A Workspace as DSH's registry lists it; a test attaches a Session by editing `sessionIds`. */
-type FakeWorkspace = { id: string; path: string; sessionIds: string[]; detachSession(sessionId: string): Promise<void> }
+type FakeWorkspace = { id: string; path: string; sessionIds: string[]; attachSession(sessionId: string): Promise<void>; detachSession(sessionId: string): Promise<void> }
 const runTool = async (sessionId: string, name: string, args: unknown) => {
   const tool = tools.get(sessionId)?.get(name)
   if (!tool) throw new Error(`Tool ${name} is not registered for ${sessionId}`)
@@ -231,6 +231,7 @@ beforeEach(async () => {
       const existing = [...workspaces.values()].find(workspace => workspace.path === cwd)
       if (existing) return existing
       const workspace = { id: `workspace-${workspaces.size + 1}`, path: cwd, sessionIds: [] as string[],
+        attachSession: async (sessionId: string) => { if (!workspace.sessionIds.includes(sessionId)) workspace.sessionIds.push(sessionId) },
         detachSession: async (sessionId: string) => { workspace.sessionIds = workspace.sessionIds.filter(id => id !== sessionId) } }
       workspaces.set(workspace.id, workspace)
       return workspace
