@@ -55,7 +55,11 @@ export class MainSessions {
     host.effects.handle('mainForward', forward, { ordered: true })
     // Quiet context must never hold the lane whose owner input wakes its consumption.
     host.effects.handle('mainContext', forward)
-    host.effects.handle('mainRetire', (_payload, id) => this.retire(id), { ordered: true })
+    host.effects.handle('mainRetire', (_payload, id) => this.retire(id))
+  }
+  private awaitingHandoff(agent: Agent): boolean {
+    const parent = agent.session.header.parentSession
+    return !!parent && !!this.host.store.get(KV.runtime.mainTransition(parent))?.handoff
   }
   private current(): string { return this.host.store.get(KV.runtime.masterId)! }
   /** Transient native view leases contain no editor text or attachment data. */
@@ -97,11 +101,11 @@ export class MainSessions {
       return { kind: 'reject' }
     }, { prepend: true })
   }
-  /** Called by the existing pass; one pending retirement holds the next rotation. */
+  /** Called by the existing pass; an unconsumed handoff holds the next rotation. */
   maintain(): void {
     const { context: ctx, effects } = this.host, id = this.current(), agent = ctx.agents.get(id as SessionId)
     if (!agent || agent.status !== 'idle' || !(agent.session.seq >= MAIN_SEGMENT_EVENTS) || this.host.paused()
-      || effects.pending('mainRotate') || effects.pending('mainRetire') || effects.pending('mainForward')) return
+      || this.awaitingHandoff(agent) || effects.pending('mainRotate') || effects.pending('mainForward')) return
     effects.enqueue('mainRotate', id, {})
   }
   /** An uncommitted candidate never replaces the current segment after a restart. */
@@ -152,7 +156,7 @@ export class MainSessions {
     if (from !== this.current()) return
     const agent = ctx.agents.get(from as SessionId)
     if (!agent || agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.some(message => !passiveContext(message))
-      || effects.pending('relay') || effects.pending('notice') || effects.pending('assessment') || effects.pending('mainRetire') || effects.pending('mainForward')) throw new Later('Main still has work')
+      || this.awaitingHandoff(agent) || effects.pending('relay') || effects.pending('notice') || effects.pending('assessment') || effects.pending('mainForward')) throw new Later('Main still has work')
     const activity = await ctx.waterfall('workspace/session-activity', { sessionId: from as SessionId }, async () => [])
     if (activity.some(item => item.kind !== 'schedule') || store.keys(migrationIntents).length) throw new Later('Main has active native work or reminder migration')
     // Recheck after the native activity waterfall before taking the input barrier.

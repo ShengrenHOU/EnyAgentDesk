@@ -1,5 +1,5 @@
 /** Browser plugin entry point registering the sidebar icon, main management panel, and Plugin Manager config view. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -50,12 +50,16 @@ function EntryIcon({ size, kind, t }: SidebarPanelIconOwnerProps & { kind: 'conv
 }
 
 /** Mounted panel wrapper; cancels any pending Session navigation when a new one starts or the panel unmounts. */
-function MainConversationEntry({ openSession }: { openSession(id: string): Promise<void> }) {
+function MainConversationEntry({ openSession, sessions }: { openSession(id: string): Promise<void>; sessions: Pick<ISessions, 'list'> }) {
   const { t } = usePanel()
   const { state, error } = usePanelData()
   const [failure, setFailure] = useState<Error>()
   const open = useCallback(() => state ? openSession(state.masterId).catch(error => setFailure(error instanceof Error ? error : new Error(String(error)))) : Promise.resolve(), [state?.masterId, openSession])
-  useEffect(() => { void open() }, [open])
+  const availability = useSyncExternalStore(listener => sessions.list.subscribe(listener), () => {
+    const list = sessions.list.getSnapshot()
+    return `${list.phase}:${!!state && !!list.byId[state.masterId]}`
+  })
+  useEffect(() => { setFailure(undefined); void open() }, [open, availability])
   return <div className="dt-panel"><LoadState loading={!error && !failure} error={error ?? failure} />
     {!!failure && <Button onClick={() => { setFailure(undefined); void open() }}>{t('openMaster')}</Button>}</div>
 }
@@ -79,6 +83,7 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
     try {
       await openNativeSession(ctx, id, request.signal)
     } catch (error) {
+      if (request.signal.aborted) return
       if (error instanceof SessionNavigationError) throw new Error(t(error.code === 'not-ready' ? 'sessionListNotReady' : 'sessionNotListed'))
       throw error
     }
@@ -90,7 +95,7 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
   }, [ctx])
   const form = usePageForm(ctx.get('configForms')?.get<Record<string, unknown>>(ENTRY))
   if (conversation) return <PanelProvider t={t} openSession={openSession} navigate={() => ctx.layout.selectPanel(WORKBENCH_ID)}>
-    <MainConversationEntry openSession={openSession} />
+    <MainConversationEntry openSession={openSession} sessions={ctx.sessions} />
   </PanelProvider>
   return <App t={t} openSession={openSession} deploymentForm={form}
     home={<DailyHome t={t} send={send} openSession={openSession} />} />

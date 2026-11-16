@@ -308,3 +308,36 @@ it('does not replay an owner RPC already durably consumed in its original segmen
     expect(host.runtime.effects.pending('mainForward')).toBe(false)
   } finally { await host.stop() }
 })
+
+
+it('keeps an unconsumed handoff as the next-rotation barrier', async () => {
+  const host = await startRuntime()
+  try {
+    largeMain(host); host.runtime.mainSessions.maintain(); await host.runtime.idle()
+    const next = host.runtime.masterId; largeMain(host)
+    host.runtime.mainSessions.maintain(); await host.runtime.idle()
+    expect(host.runtime.masterId).toBe(next)
+    await confirmHandoff(host)
+    host.runtime.mainSessions.maintain(); await host.runtime.idle()
+    expect(host.runtime.masterId).not.toBe(next)
+  } finally { await host.stop() }
+})
+
+it('rotates again and retires later segments while a historical view keeps the first open', async () => {
+  const host = await startRuntime()
+  try {
+    const first = largeMain(host)
+    host.runtime.mainSessions.view({ sessionId: first.id, viewId: 'historical-page', active: true })
+    host.runtime.mainSessions.maintain(); await host.runtime.idle(); await confirmHandoff(host)
+    expect(host.runtime.effects.pending('mainRetire')).toBe(true)
+    const second = largeMain(host)
+    const reminder = await host.schedule.create({ title: 'Keep timer', prompt: 'Read only', timing: { kind: 'at', at: '2099-01-01T00:00:00Z' },
+      target: { kind: 'session', sessionId: second.id } })
+    host.runtime.mainSessions.maintain(); await host.runtime.idle()
+    expect(host.runtime.masterId).not.toBe(second.id)
+    await confirmHandoff(host)
+    expect(host.workspaceRegistry.archivedSessionIds).not.toContain(first.id)
+    expect(host.workspaceRegistry.archivedSessionIds).toContain(second.id)
+    expect((await host.schedule.catalog()).find(item => item.id === reminder.id)?.target).toEqual({ kind: 'session', sessionId: host.runtime.masterId })
+  } finally { await host.stop() }
+})

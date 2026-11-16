@@ -13,14 +13,15 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 type Entry = { options: { name: string; id?: string; key?: string; order?: number; locale?: string; label?: () => string }; component: ComponentType<Record<string, unknown>> }
 const t = translator(zh)
-function fixture(listed: string[]) {
+function fixture(listed: string[], phase: 'pending' | 'ready' = 'ready') {
+  const catalogListeners = new Set<() => void>()
   const entries: Entry[] = []
   const dictionaries: Record<string, unknown> = {}
   const ctx = {
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
     effect: (effect: () => unknown) => { effect() },
-    sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
+    sessions: { list: { getSnapshot: () => ({ phase, byId: Object.fromEntries(listed.map(id => [id, {}])) }), subscribe: (listener: () => void) => { catalogListeners.add(listener); return () => { catalogListeners.delete(listener) } } }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn(), startSession: vi.fn(), unarchiveSession: vi.fn(async () => {}) },
     layout: { selectPanel: vi.fn() },
     // Omit config form service so Deployment renders read-only.
@@ -28,7 +29,7 @@ function fixture(listed: string[]) {
   }
   apply(ctx as never)
   const entry = (name: string) => entries.find(item => item.options.name === name)!
-  return { ctx, entries, dictionaries, main: entry('main'), nav: entries.find(item => item.options.name === 'sidebar.panellist' && item.options.id === 'dsh-personal-workbench')! }
+  return { ctx, entries, dictionaries, publishCatalog: (next: typeof phase, ids: string[]) => { phase = next; listed = ids; catalogListeners.forEach(listener => listener()) }, main: entry('main'), nav: entries.find(item => item.options.name === 'sidebar.panellist' && item.options.id === 'dsh-personal-workbench')! }
 }
 async function render(entry: Entry, props: Record<string, unknown>) {
   const container = document.createElement('div'); document.body.append(container)
@@ -107,6 +108,41 @@ it('opens the existing main Session from its standalone entry without creating a
   expect(ctx.uiWorkspace.openSession).toHaveBeenCalledWith('master')
   expect(ctx.uiWorkspace.startSession).not.toHaveBeenCalled()
   view.dispose()
+})
+
+it.each(['pending', 'ready'] as const)('recovers the Main entry when a %s catalog later lists its target', async phase => {
+  serve()
+  const { entries, ctx, publishCatalog } = fixture([], phase)
+  const entry = entries.find(item => item.options.name === 'main' && item.options.key === 'dsh-main-conversation')!
+  const view = await render(entry, { t })
+  try {
+    expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
+    expect(view.container.textContent).toContain(phase === 'pending' ? zh.sessionListNotReady : zh.sessionNotListed)
+    await act(async () => { publishCatalog('ready', ['master']) })
+    await vi.waitFor(() => expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master'))
+    expect(view.container.textContent).not.toContain(zh.sessionListNotReady)
+    expect(view.container.textContent).not.toContain(zh.sessionNotListed)
+    await act(async () => { publishCatalog('ready', ['master', 'unrelated']) })
+    expect(ctx.uiWorkspace.openSession).toHaveBeenCalledOnce()
+    expect(ctx.uiWorkspace.startSession).not.toHaveBeenCalled()
+  } finally { view.dispose() }
+})
+
+it('ignores superseded navigation completion after a late catalog opens Main', async () => {
+  serve()
+  const { entries, ctx, publishCatalog } = fixture([], 'pending'), pending = Promise.withResolvers<void>()
+  ctx.sessions.refresh.mockImplementationOnce(() => pending.promise)
+  const entry = entries.find(item => item.options.name === 'main' && item.options.key === 'dsh-main-conversation')!
+  const view = await render(entry, { t })
+  try {
+    await act(async () => { publishCatalog('ready', ['master']) })
+    await vi.waitFor(() => expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master'))
+    await act(async () => { pending.resolve() })
+    for (let i = 0; i < 3; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(view.container.querySelector('.dt-error')).toBeNull()
+    expect(view.container.textContent).not.toContain('superseded')
+    expect(ctx.uiWorkspace.openSession).toHaveBeenCalledOnce()
+  } finally { pending.resolve(); view.dispose() }
 })
 
 it('uses one daily panel with four tabs and keeps source navigation inside it', async () => {
