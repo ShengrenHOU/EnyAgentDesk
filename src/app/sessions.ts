@@ -366,7 +366,7 @@ export class Sessions {
     if (master) {
       // Scoped registration survives the router preset's intersecting global-tool masks.
       if (host.store.settings().sources.workbench?.enabled) {
-        const ownerTools = agent.ctx.inject(['orchestrator', 'sessionController', 'attachments', 'tools'], child => {
+        const ownerTools = agent.ctx.inject(['orchestrator', 'sessionQuery', 'attachments', 'tools'], child => {
           child.effect(() => registerWorkbenchTool(child))
         })
         binding.disposers.push(() => { ownerTools.dispose().catch(error => this.ctx.logger.warn('Could not release owner tools: %s', String(error))) })

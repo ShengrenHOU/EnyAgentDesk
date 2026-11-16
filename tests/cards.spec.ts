@@ -39,7 +39,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
   ['A stop goes through orchestrator_route, not through an assessment', 'admission', [], ['decision=stop']],
   // A follow-up has one decider, the worker of the ticket it reached; the main Session only stops the work on a person's request.
   ['The worker owns follow-up work and the coordinator applies explicit controls', 'orchestrator',
-    ['goes straight to its workers and resumes an ended ticket a person did not stop', 'that ticket\'s worker decides it'],
+    ['follow-up resumes an ended Ticket unless human-stopped', 'its worker decides'],
     ['arrive to you as candidates too', 'dispatch says when it needs a tool call']],
   ['The worker owns follow-up work and the coordinator applies explicit controls', 'dispatch',
     ['A follow_up notice reports a person\'s message that already reached the workers it lists', 'do not forward it a second time',

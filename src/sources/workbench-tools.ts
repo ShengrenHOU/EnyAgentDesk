@@ -40,7 +40,7 @@ export function registerWorkbenchTool(ctx: Context): () => void {
       const snapshot = discussionContext(inspection, sessionId, lastUser.seq, ctx.attachments)
       if (request.action === 'status') return { requests: discussionTasks(source, sessionId) }
       const latestMessage = inspection.events.findLast(event => event.type === 'user/message'
-        && !('form' in event.data.source && event.data.source.form === 'notice'))
+        && !('form' in event.data.source && (event.data.source.form === 'notice' || event.data.source.form === 'snapshot')))
       if (latestMessage !== lastUser) throw new Error('The latest message is not an original owner instruction')
       const text = lastUser.data.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       const quotes = request.tasks ? request.tasks.map(task => task.owner_instruction_quote) : [request.owner_instruction_quote]

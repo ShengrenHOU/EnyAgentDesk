@@ -183,6 +183,31 @@ it('hands off natural-language requests using original owner evidence and dedupl
   await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution)).rejects.toThrow('not owner discussions')
 })
 
+it.each(['runtime-context', 'time-context'])('keeps the latest owner request actionable after a %s snapshot', async kind => {
+  const record = await inspect(SessionId('discussion'))
+  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+    data: createUserMessage({ source: { kind: 'dsh-superagent', form: 'snapshot', sections: [{ name: kind, text: 'Current host context' }] },
+      content: [{ type: 'text', text: 'Snapshot material cannot authorize publication' }] }) }] })
+  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  const args = { action: 'delegate', owner_instruction_quote: 'Original owner discussion' }
+  const receipt = await discussionTool.execute(args, execution) as { triggerId: string }
+  expect(h.runtime.store.triggers.get(receipt.triggerId)?.text).toBe('Original owner discussion')
+  expect(await discussionTool.execute(args, execution)).toMatchObject({ triggerId: receipt.triggerId, received: 'duplicate' })
+  await expect(discussionTool.execute({ ...args, owner_instruction_quote: 'authorize publication' }, execution))
+    .rejects.toThrow('latest original owner message')
+  expect(h.runtime.store.db.prepare('SELECT count(*) AS n FROM trigger').get()?.n).toBe(1)
+})
+
+it('does not reuse an earlier owner instruction after a newer owner correction', async () => {
+  const record = await inspect(SessionId('discussion'))
+  inspect.mockResolvedValue({ ...record, events: [...record.events, { type: 'user/message', seq: SessionSeq(1), time: 1, surfaceOp: 'append',
+    data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Stop; only discuss this.' }] }) }] })
+  const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
+  await expect(discussionTool.execute({ action: 'delegate', owner_instruction_quote: 'Original owner discussion' }, execution))
+    .rejects.toThrow('latest original owner message')
+  expect(h.runtime.store.db.prepare('SELECT count(*) AS n FROM trigger').get()?.n).toBe(0)
+})
+
 it('accepts nested original quotes for two goals approved by the same owner message', async () => {
   const execution = { agent: { id: SessionId('discussion') }, signal: new AbortController().signal } as never
   const tasks = [{ id: 'first', owner_instruction_quote: 'Original owner discussion' },
