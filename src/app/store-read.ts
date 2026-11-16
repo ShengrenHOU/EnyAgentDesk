@@ -1,6 +1,6 @@
 /** Read-only Store queries for views, tools, and Source polling. */
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
-import type { Decision, Thread, Trigger } from '../core/index.ts'
+import type { Decision, Thread, Ticket, Trigger } from '../core/index.ts'
 import type { Dropped, Receipt, TimelinePlace } from './store.ts'
 
 export function storeReads(db: DatabaseSync) {
@@ -72,6 +72,9 @@ export function storeReads(db: DatabaseSync) {
     .map(row => ({ ...JSON.parse(String(row.value)) as Receipt, attempts: Number(row.attempts), error: String(row.error) })),
   droppedReplies: (limit = 20): Dropped[] =>
     values('SELECT value FROM outbox WHERE dropped IS NOT NULL ORDER BY dropped DESC LIMIT ?', limit),
+  /** Tickets an executor completed or merged at or after `since`; the caller orders the small result for display. */
+  deliveredSince: (since: string): Ticket[] => values(`SELECT value FROM ticket WHERE value ->> '$.ended.by' = 'executor'
+    AND value ->> '$.ended.outcome' IN ('completed', 'merged') AND value ->> '$.ended.at' >= ?`, since),
   droppedSince: (since: string): number => Number(db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE dropped >= ?').get(since)?.n ?? 0),
   subscribedThreads: (source?: string): Thread[] => source
     ? values('SELECT value FROM thread WHERE subscribed = ? ORDER BY rowid', source)

@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { expect, it, vi } from 'vitest'
@@ -15,7 +15,7 @@ function fixture(history: UserMessage[] = []) {
   } }
   const steer = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
   const followup = vi.fn((message: UserMessage) => { inbox.nextTurn.push(message) })
-  const injected = vi.fn((_message: UserMessage) => {})
+  const injected = vi.fn((message: UserMessage) => { inbox.nextStep.push(message) })
   // Only the delivery-facing Agent methods participate in this fixture.
   const agent = { id: SessionId('delivery-test'), session: {}, inbox, steer, followup, inject: injected } as unknown as Agent
   const event = (message: UserMessage): SessionEvent => ({ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: message })
@@ -38,6 +38,40 @@ function fixture(history: UserMessage[] = []) {
   }
   return { ctx, delivery, agent, agents, inbox, steer, followup, injected, open, read, close, flush, send, inject, holds, consume, signal }
 }
+
+it('transfers a native input once across retry identities without rewriting user provenance', async () => {
+  const f = fixture(), message = createUserMessage({ source: { kind: 'user', rpcId: 'original-owner-request' }, content: [{ type: 'text', text: 'Owner input' }] })
+  const retry = createUserMessage({ source: message.source, content: message.content })
+  await f.delivery.transfer(f.agent, message, f.signal.signal)
+  await f.delivery.transfer(f.agent, retry, f.signal.signal)
+  expect(f.followup).toHaveBeenCalledOnce()
+  expect(f.followup.mock.calls[0]![0]).toBe(message)
+  f.consume(message)
+  await f.delivery.transfer(f.agent, retry, f.signal.signal)
+  expect(f.followup).toHaveBeenCalledOnce()
+})
+
+it('does not requeue a running native claim, but retries it if the turn ended without a durable message', async () => {
+  const f = fixture(), message = createUserMessage({ source: { kind: 'user', rpcId: 'claim-gap' }, content: [{ type: 'text', text: 'Real input' }] })
+  Object.defineProperty(f.agent, 'status', { value: 'running', writable: true })
+  await expect(f.delivery.transfer(f.agent, message, f.signal.signal)).resolves.toBe(false)
+  f.inbox.nextTurn.length = 0
+  agentEvents(f.ctx, f.agent).emit('agent/inbox/claimed', { message, turn: 1 })
+  await expect(f.delivery.transfer(f.agent, message, f.signal.signal)).resolves.toBe(false)
+  expect(f.followup).toHaveBeenCalledOnce()
+  Object.defineProperty(f.agent, 'status', { value: 'idle', writable: true })
+  agentEvents(f.ctx, f.agent).emit('agent/status', { status: 'idle' })
+  await f.delivery.transfer(f.agent, message, f.signal.signal)
+  expect(f.followup).toHaveBeenCalledTimes(2)
+})
+
+it('observes a restored native claim before its first producer history read', async () => {
+  const f = fixture(), message = createUserMessage({ source: { kind: 'user', rpcId: 'restored-claim' }, content: [] })
+  Object.defineProperty(f.agent, 'status', { value: 'running' })
+  agentEvents(f.ctx, f.agent).emit('agent/inbox/claimed', { message, turn: 1 })
+  await expect(f.delivery.transfer(f.agent, message, f.signal.signal)).resolves.toBe(false)
+  expect(f.followup).not.toHaveBeenCalled()
+})
 
 it.each(['queue', 'steer'] as const)('delivers %s as an orchestrator relay, deduplicating pending and consumed messages', async mode => {
   const f = fixture()

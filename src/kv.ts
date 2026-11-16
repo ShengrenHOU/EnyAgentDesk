@@ -22,6 +22,12 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
   return Object.assign((...name: A) => `${prefix}${format(...name)}` as Key<V>, { prefix })
 }
 
+export interface MainTransition {
+  from: string; to: string; throughSeq: number; at: string
+  phase: 'quiescing' | 'active' | 'abandoned'
+  handoff?: string
+}
+
 export const KV = {
   /** DSH executor: workspace path whose preparation started but has not been verified successfully. */
   dsh: { preparing: family<string, [ticket: string]>('dsh-preparing:') },
@@ -39,7 +45,8 @@ export const KV = {
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  runtime: { masterId: record<string>('master-id'), mainTransition: family<MainTransition>('main-transition:'),
+    mainForwarded: family<{ to: string; at: string }>('main-forwarded:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */

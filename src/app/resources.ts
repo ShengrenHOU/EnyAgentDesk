@@ -8,7 +8,7 @@ import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { WORKBENCH, workbenchKind, type WorkbenchConfig } from '../sources/workbench.ts'
-import { discussionWindow } from '../sources/workbench-session.ts'
+import { discussionWindow, ownerDiscussion } from '../sources/workbench-session.ts'
 import { inspectSession } from '../infra/session-inspection.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, reportHistory, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
@@ -32,7 +32,8 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'tickets', holds: 'newest cards: person/review, blocked, failed, answer or delivery needs attention; working/queued is pending; idle means no report; ended cards show outcome' },
   { name: 'triggers', holds: 'trigger cards with where each went, newest first' },
   { name: 'threads', holds: 'subscribed threads, newest activity first, with their labels, tickets, current assessment and polling errors' },
-  { name: 'conversation', holds: 'Owner\'s main discussion (24h, newest first, attachment references); workers: workbench improvement candidates only.', executor: true },
+  { name: 'conversation', holds: 'Owner discussion (24h, newest first, attachments); worker improvement candidates only.', executor: true },
+  { name: 'conversation/history/<session>[/<seq>]', holds: 'Previous Main history.' },
   { name: 'thread/<key>', holds: 'one thread: its label and link, its tickets and latest decisions, and its triggers, newest first', executor: true },
   { name: 'decisions', holds: 'decisions, newest first' },
   { name: 'decision/<id>', holds: 'one decision with its audit' },
@@ -171,6 +172,29 @@ const ROUTES: readonly Route[] = [
     return { session_id: window.sessionId, through_seq: window.throughSeq, window_start: window.windowStart,
       partial: window.partial, items: window.messages, attachments: window.attachments.filter(item => references.has(item.reference)),
       next_offset: window.nextOffset }
+  }],
+  ['conversation/history/', async read => {
+    main(read)
+    const { host, rest, signal } = read, [id, seq, extra] = rest.split('/')
+    if (!id || extra || host.store.get(KV.runtime.mainTransition(id))?.phase !== 'active') throw new Error('Unknown previous Main segment')
+    const source = host.context.orchestrator.context(workbenchKind)
+    await source.ready
+    if (!source.config<WorkbenchConfig>(WORKBENCH)?.ownerId) throw new Error('Owner conversation access is unavailable')
+    const inspection = await inspectSession(host.context.sessionQuery, id, signal)
+    ownerDiscussion(inspection, id)
+    if (seq !== undefined) {
+      if (!/^\d+$/.test(seq)) throw new Error('Invalid history sequence')
+      const event = inspection.events.find(event => event.seq === Number(seq)), entry = event && transcriptEntry(event)
+      if (!entry) throw new Error('Unknown history entry')
+      return text(read, JSON.stringify({ sessionId: id, seq: event!.seq, at: new Date(event!.time).toISOString(), ...entry }))
+    }
+    const events = inspection.events.filter(event => ['user/message', 'assistant/message', 'tool/result'].includes(event.type))
+    return list(read, (offset, count) => offset >= events.length ? [] : events.slice(Math.max(0, events.length - offset - count), events.length - offset).reverse().map(event => {
+      const entry = transcriptEntry(event)!
+      return { seq: event.seq, at: new Date(event.time).toISOString(), type: event.type,
+        preview: entry.message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join(' ').slice(0, 160),
+        read: `conversation/history/${id}/${event.seq}` }
+    }))
   }],
   ['thread/', read => {
     const { host, rest, ticketId } = read

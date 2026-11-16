@@ -48,7 +48,7 @@ import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
-import { Followups, type SchedulePort } from './followups.ts'
+import { Followups } from './followups.ts'
 import { followupTools } from './tools/followup.ts'
 import { managementTools } from './tools/management.ts'
 import { routingTools, type ExecutorTransfer } from './tools/routing.ts'
@@ -56,6 +56,8 @@ import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
+import { MainSessions, mainQuiescing } from './main-sessions.ts'
+import { followupSchedule, type HostSchedule } from './host-schedule.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -79,6 +81,7 @@ export class Runtime extends Service implements SourceHost {
   readonly sources: SourceRegistry
   readonly commands: Commands
   readonly sessions: Sessions
+  readonly mainSessions: MainSessions
   readonly settings: Settings
   readonly executor: DshExecutor | ExecutorRouter
   readonly assessor: MasterAssessor
@@ -93,7 +96,11 @@ export class Runtime extends Service implements SourceHost {
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
-  readonly masterId: string
+  get masterId(): string {
+    const id = this.store.get(KV.runtime.masterId)
+    if (!id) throw new Error('Main Session identity is not initialized')
+    return id
+  }
   /** When this instance started, reported as the running artifact's activation time. */
   readonly startedAt = new Date().toISOString()
   private readonly sourceLinks = new TextCache(200_000)
@@ -127,7 +134,7 @@ export class Runtime extends Service implements SourceHost {
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
-      const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
+      const masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
@@ -143,15 +150,16 @@ export class Runtime extends Service implements SourceHost {
       const links: LinkHost = { store, lines: store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
-      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, masterId, context: ctx,
+      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, sources, get masterId() { return runtime.masterId }, context: ctx,
         productionOverview: page => productionOverview(store, trigger => sources.imEvidence(trigger), page, trigger => sources.imHeader(trigger)),
         get matters() { return runtime.productionTriage?.matters },
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), get masterId() { return runtime.masterId },
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         assessmentsPaused: () => this.paused(),
+        mainAvailable: id => !mainQuiescing(store, id),
         assessmentCurrent: notice => {
           if (notice.kind === 'im_production_judgment') return this.productionTriage?.noticeCurrent(notice.id, notice.generation!) ?? false
           return store.threads.active().some(thread => thread.evaluating?.id === notice.id)
@@ -205,8 +213,10 @@ export class Runtime extends Service implements SourceHost {
           }
         } })
       const followups = this.followups = new Followups({ store, engine, paused: () => this.paused(),
-        masterId, schedule: () => ctx.get('schedule') as SchedulePort | undefined,
+        get masterId() { return runtime.masterId }, schedule: () => followupSchedule(ctx.get('schedule') as HostSchedule | undefined),
         authorized: ticket => policy().revalidate(ticket.mandate) })
+      this.mainSessions = new MainSessions({ context: ctx, store, effects, sessions, cwd: machine.stateDir, lifetime: this.lifetime,
+        paused: () => this.paused() })
       this.triageHandoffs = new TriageHandoffs({ store, engine, evidence: trigger => sources.imEvidence(trigger),
         policyVersion: () => policy().version, enabled: () => !!machine.triageHandoff })
       this.productionTriage = new ProductionTriage({ store, engine, handoffs: this.triageHandoffs, effects,
@@ -231,6 +241,7 @@ export class Runtime extends Service implements SourceHost {
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => {
         this.productionTriage.maintain(); this.automaticTriage.maintain(); sessions.pruneAssessments(); engine.evaluateDue(); followups.runDue(); evals.set(evalsHealth(store))
+        this.mainSessions.maintain()
         void followups.maintain().catch(error => ctx.logger.warn('dsh-superagent could not reconcile automations: %s', String(error)))
       }
       const passes = this.passes = new Passes({ engine: { receive: trigger => this.automaticTriage.receive(trigger), evaluateDue }, effects,
@@ -338,9 +349,12 @@ export class Runtime extends Service implements SourceHost {
       })?.settings.sources.github?.config.repository
       migrateGithubIdentity(this.store, typeof original === 'string' ? original : deployment.repository)
     }
+    this.mainSessions.recover()
+    this.mainSessions.install()
     this.sessions.install()
     this.executor.install()
     await this.sessions.ensure(this.masterId, this.machine.stateDir, 'Superagent 主对话', 'orchestrator')
+    await this.mainSessions.restoreHandoff()
     if (this.closing()) return
     for (const id of this.settings.syncable()) {
       await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
@@ -356,9 +370,10 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, machine, masterId, ready, sourceLinks, setup, passes } = this
+    const { store, sources, prompts, sessions, settings, engine, executor, machine, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, automaticTriage: this.automaticTriage, productionTriage: this.productionTriage,
-      get health() { return runtime.health }, machine, masterId, startedAt: this.startedAt, ready, sourceLinks,
+      get health() { return runtime.health }, machine, get masterId() { return runtime.masterId }, startedAt: this.startedAt, ready, sourceLinks,
+      mainView: input => this.mainSessions.view(input),
       get deployment() { return setup.deployment }, followups: this.followups, transferExecutor: (id, request) => this.transferExecutor(id, request),
       continueStopped: (id, instruction) => this.continueStopped(id, instruction),
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
@@ -386,6 +401,7 @@ export class Runtime extends Service implements SourceHost {
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()
+      await this.mainSessions.dispose()
       await this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()

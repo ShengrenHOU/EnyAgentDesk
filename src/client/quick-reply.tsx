@@ -58,6 +58,8 @@ function writeSending(sessionId: string, sending: boolean): void {
   else sessionSending.delete(sessionId)
   announce()
 }
+const turnReplyEditing = (sessionId: string): boolean => sessionSending.has(sessionId) || !!sessionDrafts.get(sessionId)?.size
+export const useTurnReplyEditing = (sessionId: string): boolean => useSyncExternalStore(watchTurns, () => turnReplyEditing(sessionId), none)
 const useSessionDraft = (sessionId: string, seq: number) =>
   useSyncExternalStore(watchTurns, () => sessionDrafts.get(sessionId)?.get(seq) ?? '', () => '')
 const useSessionSending = (sessionId: string) =>
@@ -90,7 +92,7 @@ function TurnReply({ sessionId, target, send }: { sessionId: string; target: Rep
     catch (error) { setFailure(errorText(error)) }
     finally { writeSending(sessionId, false) }
   }
-  if (state?.masterId !== sessionId) return null
+  if (state?.masterId !== sessionId && !text && !busy) return null
   return <div className="dt-turn-reply">
     <div className="dt-reply-target">
       <details><summary>{t('quickReplyTarget', { turn: target.turn + 1 })} · {target.quote.slice(0, 100) || t('quickReplyNoText')}</summary>
@@ -112,9 +114,9 @@ export function TurnQuickReply({ sessionId, turn, seq, quote, t, send }: {
   const target = { turn, seq, quote }
   const current = useSyncExternalStore(watchTurns, () => (selectedTurn.get(sessionId) ?? newestTurn.get(sessionId))?.seq === seq, none)
   const main = useSyncExternalStore(watchTurns, () => mainSessionId === sessionId, none)
-  const busy = useSessionSending(sessionId)
+  const busy = useSessionSending(sessionId), editing = useTurnReplyEditing(sessionId)
   useEffect(() => { reportTurn(sessionId, { turn, seq, quote }) }, [sessionId, turn, seq, quote])
-  if (!current) return main ? <Button size="sm" variant="ghost" disabled={busy}
+  if (!current) return main || editing ? <Button size="sm" variant="ghost" disabled={busy}
     onClick={() => selectTurn(sessionId, target)}>{t('quickReplySelect')}</Button> : null
   return <PanelProvider t={t}><TurnReply sessionId={sessionId} target={target} send={send} /></PanelProvider>
 }

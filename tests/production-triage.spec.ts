@@ -281,13 +281,13 @@ it('pauses, restores durable state across restart and does not duplicate judgmen
   consume(batch!); const live = service.read(batch!.id); expect(service.submit(live.id, 1, live.binding!, result(batch!)).state).toBe('completed')
 })
 
-it('migrates a schema11 held generated column and protects schema14 from old readers', () => {
+it('migrates a schema11 held generated column and protects schema15 from old readers', () => {
   add('a'); start(); store.db.exec('DROP INDEX disposition_held; ALTER TABLE disposition DROP COLUMN held; ALTER TABLE disposition ADD COLUMN held TEXT AS (value ->> \'$.triage.owner\'); CREATE INDEX disposition_held ON disposition(held) WHERE held IS NOT NULL')
   store.set(KV.store.schema, 11); store.close(); store = new Store(join(directory, 'state.sqlite')); setup()
-  expect(store.get(KV.store.schema)).toBe(14); expect(store.triageHandoffStatus().held).toBe(0)
+  expect(store.get(KV.store.schema)).toBe(15); expect(store.triageHandoffStatus().held).toBe(0)
   // The unchanged schema11 reader guard rejects this database before migration or state writes.
   const legacySchemaVersion = 11, persistedVersion = store.get(KV.store.schema)!
-  expect(() => { if (persistedVersion > legacySchemaVersion) throw new Error(`Unsupported orchestrator database version ${persistedVersion}`) }).toThrow('version 14')
+  expect(() => { if (persistedVersion > legacySchemaVersion) throw new Error(`Unsupported orchestrator database version ${persistedVersion}`) }).toThrow('version 15')
 })
 
 it('keeps page order and context hashes exact while accepting first-page reads', async () => {

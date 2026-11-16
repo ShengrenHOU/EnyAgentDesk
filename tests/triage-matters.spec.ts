@@ -298,9 +298,9 @@ it.each(['continue', 'related'] as const)('real WeChat native adapter → collec
 it('upgrades schema13 without rewriting receipts and fences pre-provenance schema13 readers', async () => {
   const a = await next('a'); const first = commit(a), receipt = JSON.stringify(store.get(`triage-production:${first.id}`))
   await effects.drain(); store.set(KV.store.schema, 13); store.close(); store = new Store(join(directory, 'state.sqlite')); setup()
-  expect(store.get(KV.store.schema)).toBe(14); expect(JSON.stringify(store.get(`triage-production:${first.id}`))).toBe(receipt)
+  expect(store.get(KV.store.schema)).toBe(15); expect(JSON.stringify(store.get(`triage-production:${first.id}`))).toBe(receipt)
   const oldSchema13Guard = () => { const version = store.get(KV.store.schema)!; if (version > 13) throw new Error(`Unsupported orchestrator database version ${version}`) }
-  expect(oldSchema13Guard).toThrow('version 14')
+  expect(oldSchema13Guard).toThrow('version 15')
 })
 it('rejects duplicate continue targets clearly before mutating a projection or receipt', async () => {
   const a = await next('a'); const first = commit(a), b = await next('b'); prior(b.batch, first); const proposal = link(b, first)

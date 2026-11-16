@@ -15,6 +15,23 @@ function deferred<T>() {
 }
 const model = { provider: 'worker-provider', model: 'worker-model' }
 
+it('acknowledges saved pause state without waiting for Main notification delivery', async () => {
+  h = await startRuntime()
+  const delivery = deferred<'injected' | 'pending'>()
+  vi.spyOn(h.runtime.sessions, 'delivery').mockImplementation(() => delivery.promise)
+  const notify = vi.spyOn(h.runtime.sessions, 'notify')
+  let finished = false
+  const request = h.api('POST', 'executor/pause', { paused: true }).then(response => { finished = true; return response })
+  try {
+    await vi.waitFor(() => expect(h!.runtime.store.settings().paused).toBe(true))
+    await vi.waitFor(() => expect(finished).toBe(true), { timeout: 300 })
+    expect((await request).body).toEqual({ paused: true })
+    expect(notify).toHaveBeenCalledWith('settings:pause', expect.anything(), expect.any(String))
+    expect((await h.api('POST', 'executor/pause', { paused: false })).body).toEqual({ paused: false })
+    expect(h.runtime.store.settings().paused).toBe(false)
+  } finally { delivery.resolve('injected'); await request }
+})
+
 it('exposes invalid stored Source fields, preserves repair values and holds replies until repair', async () => {
   h = await startRuntime()
   const { store, sources, outbox } = h.runtime

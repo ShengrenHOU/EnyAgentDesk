@@ -32,7 +32,7 @@ import type { TextCache } from './cache.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
 import { policyHistory } from './settings-history.ts'
-import { overview } from './views/overview.ts'
+import { overview, ownerDeskView } from './views/overview.ts'
 import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
@@ -50,6 +50,7 @@ export interface HttpHost {
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
+  mainView(input: { sessionId: string; viewId: string; active: boolean }): { held: boolean }
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   transferExecutor?(id: string, request: ExecutorTransfer): Promise<{ changed: boolean; executor: 'codex' | 'dsh' }>
   readonly followups: Pick<Followups, 'schedule' | 'cancel' | 'list' | 'pending' | 'migrate' | 'automations' | 'cancelAutomation'>
@@ -224,6 +225,7 @@ function routes(runtime: HttpHost): Routes {
         active: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+    'GET owner-desk': () => ownerDeskView(views(runtime)),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
@@ -325,6 +327,7 @@ function routes(runtime: HttpHost): Routes {
       return { stopped: true }
     },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
+    'POST main/view': async ({ body }) => runtime.mainView(z.object({ sessionId: z.string().min(1).max(200), viewId: z.string().min(1).max(100), active: z.boolean() }).strict().parse(await body())),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
       const known = !block.startsWith('source:') || runtime.sources.instances().some(instance => `source:${instance.id}` === block)

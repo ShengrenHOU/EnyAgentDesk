@@ -208,7 +208,6 @@ export class Settings {
       store.saveSettings({ ...old, paused }, record)
       if (origin !== 'tool') sessions.notify(...settingsNotice('pause', ['paused']))
     })
-    await sessions.delivery('settings:pause')
     this.host.requestPass()
     return { paused }
   }

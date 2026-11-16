@@ -37,6 +37,7 @@ export interface SessionsHost {
   readonly masterId: string
   readonly lifetime: AbortSignal
   assessmentsPaused?(): boolean
+  mainAvailable?(id: string): boolean
   assessmentCurrent?(notice: AssessmentNotice): boolean
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -216,9 +217,13 @@ export class Sessions {
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
     accepted?: () => void): Promise<void> {
+    if (this.host.mainAvailable?.(sessionId) === false) throw new Later('Main handoff is preparing')
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
-    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
+    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, () => {
+      if (this.host.mainAvailable?.(sessionId) === false) throw new Later('Main handoff is preparing')
+      authorize?.()
+    }, accepted)
   }
   /** Parse only this producer's exact generated ID and explicit assessment metadata, never user text. */
   private assessmentNotice(message: UserMessage): AssessmentNotice | undefined {
@@ -262,6 +267,7 @@ export class Sessions {
   }
   /** Legacy Main candidate admission. A consumed request is acknowledged even with unrelated unread input. */
   async assessment(requestId: string, text: string, authorize: () => void): Promise<string> {
+    if (this.host.mainAvailable?.(this.host.masterId) === false) throw new Later('Main handoff is preparing')
     const result = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
     if ('error' in result) throw result.error
     const agent = result.agent
@@ -270,6 +276,7 @@ export class Sessions {
     this.pruneAssessments()
     await this.agentDelivery.send(agent, key(requestId), text, 'queue', this.host.lifetime, () => {
       authorize()
+      if (this.host.mainAvailable?.(agent.id) === false) throw new Later('Main handoff is preparing')
       // No await separates this check from inbox insertion in AgentDelivery.send. Concurrent assessments and
       // owner/report arrivals during history loading therefore cannot both pass an empty-inbox check.
       if (this.blockingAssessmentInput(agent).some(message => message.id !== this.promptedId(requestId))) throw new Later('Main Session has unread input')
@@ -364,7 +371,9 @@ export class Sessions {
     if ('error' in resolved) return
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
-    await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime)
+    await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime, () => {
+      if (this.host.mainAvailable?.(resolved.agent.id) === false) throw new Later('Main handoff is preparing')
+    })
   }
   /** Returns the current prompt revision, the active prompt revision of each loaded Session, and whether the main Session still has a pending `'prompts'` notice. */
   status() {
@@ -417,7 +426,7 @@ export class Sessions {
     const production = this.productionAgents.get(agent.id)
     if (production) { this.bindings.set(agent, production.binding); return }
     const host = this.host
-    const master = agent.id === host.masterId
+    const master = agent.id === host.masterId || agent.session.header?.agentPreset === ROUTER_PRESET && agent.session.header.origin !== 'subagent'
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     if (master) this.pruneAssessments()

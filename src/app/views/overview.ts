@@ -5,7 +5,7 @@ import type { SetupProblem } from '../../setup.ts'
 import { anyoneAllowed } from '../../policy.ts'
 import { deferredUntil } from '../../sources/workbench-queue.ts'
 import type { Store } from '../store.ts'
-import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
+import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type Snapshot, type ViewHost } from './records.ts'
 import { sourceHealth, type HealthMap } from './sources.ts'
 import { ticketRow, type ExecutorLoad } from './tickets.ts'
 import { preview } from './text.ts'
@@ -34,6 +34,47 @@ export function evalsHealth(store: Store, now = Date.now()): Health {
   const latest = open[0]!.decision
   return { state: 'error', at: latest.at, detail: `${open.length} Eval(s) unavailable in the last hour without a later judgement; `
     + `the latest on ${latest.threadKey}: ${reasonText(latest.reason)}` }
+}
+/**
+ * The conversation dock's own bounded projection: the Tickets that need the owner now, the deferred Questions, and the
+ * working/waiting/delivered summary it lists. It deliberately omits triage matters, production receipts, source
+ * diagnostics and the 24-hour flow, which the dock does not render and which scan the whole trigger table.
+ */
+export type OwnerDeskView = {
+  person: ReturnType<typeof ticketRow>[]
+  personDeferred?: (ReturnType<typeof ticketRow> & { until: string })[]
+  work?: {
+    working: ReturnType<typeof ticketRow>[]; workingTotal: number
+    waiting: ReturnType<typeof ticketRow>[]; waitingTotal: number
+    delivered: ReturnType<typeof ticketRow>[]; deliveredTotal: number
+  }
+}
+export function ownerDeskView(host: ViewHost, nowMs = Date.now()): OwnerDeskView {
+  return deskOf(snapshot(host), nowMs, dayAgo()).desk
+}
+/**
+ * Builds the dock's slice once for both the dock and the full overview. Every "needs you now" count and list reads the
+ * same deferral: a deferred Question stays a Ticket waiting on its person, but leaves the immediate queue until its
+ * time and is listed separately with when it returns.
+ */
+function deskOf(view: Snapshot, nowMs: number, since: string) {
+  const { store } = view
+  const open = store.tickets.open().sort(compareTickets)
+  const person: OwnerDeskView['person'] = [], personDeferred: NonNullable<OwnerDeskView['personDeferred']> = []
+  for (const ticket of open.filter(item => ticketStage(item).stage === 'person')) {
+    const until = deferredUntil(store, ticket, nowMs)
+    if (until) personDeferred.push({ ...ticketRow(view, ticket), until })
+    else person.push(ticketRow(view, ticket))
+  }
+  const working = open.filter(ticket => !ticket.paused && ticketStage(ticket).stage === 'working')
+  const waiting = open.filter(ticket => ticket.paused || ticketStage(ticket).stage === 'idle')
+  const delivered = store.read.deliveredSince(since).sort(newestFirst)
+  const work: OwnerDeskView['work'] = open.length || delivered.length ? {
+    working: working.slice(0, 10).map(ticket => ticketRow(view, ticket)), workingTotal: working.length,
+    waiting: waiting.slice(0, 10).map(ticket => ticketRow(view, ticket)), waitingTotal: waiting.length,
+    delivered: delivered.slice(0, 10).map(ticket => ticketRow(view, ticket)), deliveredTotal: delivered.length,
+  } : undefined
+  return { open, desk: { person, ...(personDeferred.length ? { personDeferred } : {}), ...(work ? { work } : {}) } }
 }
 /**
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.
@@ -70,19 +111,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
       text: preview(item.text),
       attempts: item.attempts, error: item.error } })),
   ]
-  const open = store.tickets.open().sort(compareTickets)
-  // Every "needs you now" count and list reads the same deferral: a deferred Question stays a Ticket waiting on its person,
-  // but leaves the immediate queue until its time and is listed separately with when it returns.
-  const person: ReturnType<typeof ticketRow>[] = [], personDeferred: (ReturnType<typeof ticketRow> & { until: string })[] = []
-  for (const ticket of open.filter(item => ticketStage(item).stage === 'person')) {
-    const until = deferredUntil(store, ticket, nowMs)
-    if (until) personDeferred.push({ ...ticketRow(view, ticket), until })
-    else person.push(ticketRow(view, ticket))
-  }
-  const working = open.filter(ticket => !ticket.paused && ticketStage(ticket).stage === 'working')
-  const waiting = open.filter(ticket => ticket.paused || ticketStage(ticket).stage === 'idle')
-  const delivered = store.tickets.list().filter(ticket => ticket.ended?.by === 'executor'
-    && (ticket.ended.outcome === 'completed' || ticket.ended.outcome === 'merged') && ticket.ended.at >= since).sort(newestFirst)
+  const { desk, open } = deskOf(view, nowMs, since)
   const stats = Object.values(store.read.triggerStats(since))
   const received = stats.reduce((sum, item) => sum + item.received, 0), filtered = stats.reduce((sum, item) => sum + item.filtered, 0)
   const judgement = store.read.flow(since)
@@ -90,13 +119,9 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
     triageMatters: new TriageMatters(store, trigger => sources.imEvidence(trigger)).overview(),
     productionTriage: productionOverview(store, trigger => sources.imEvidence(trigger), {}, trigger => sources.imHeader(trigger)),
     problems,
-    person,
-    ...(personDeferred.length ? { personDeferred } : {}),
-    ...open.length || delivered.length ? { work: {
-      working: working.slice(0, 10).map(ticket => ticketRow(view, ticket)), workingTotal: working.length,
-      waiting: waiting.slice(0, 10).map(ticket => ticketRow(view, ticket)), waitingTotal: waiting.length,
-      delivered: delivered.slice(0, 10).map(ticket => ticketRow(view, ticket)), deliveredTotal: delivered.length,
-    } } : {},
+    person: desk.person,
+    ...(desk.personDeferred ? { personDeferred: desk.personDeferred } : {}),
+    ...(desk.work ? { work: desk.work } : {}),
     executor: { ...load, maxWorkers: settings.executor.maxWorkers, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
     flow: { received, filtered, triggers: received - filtered, judged: judgement.judged, accepted: judgement.accepted,
       evaluating: evaluating.length, dropped: store.read.droppedSince(since) },

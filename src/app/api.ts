@@ -7,7 +7,7 @@ import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
-import type { OverviewView } from './views/overview.ts'
+import type { OverviewView, OwnerDeskView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
@@ -33,6 +33,7 @@ export interface Api {
   'GET production-triage': { query?: { before?: number; limit?: number; unresolved?: boolean }; response: ReturnType<typeof productionOverview> }
   'GET triage-matters': { query?: { before?: number; limit?: number; active?: boolean }; response: ReturnType<TriageMatters['overview']> }
   'GET overview': { response: OverviewView }
+  'GET owner-desk': { response: OwnerDeskView }
   'GET followups': { response: ReturnType<Followups['pending']> }
   'GET followups/automations': { response: Awaited<ReturnType<Followups['automations']>> }
   'POST tickets/:id/followup/migrate': { body: { request_id: string }; response: Awaited<ReturnType<Followups['migrate']>> }
@@ -62,6 +63,7 @@ export interface Api {
   'POST tickets/:id/continue': { body: { instruction: string }; response: { continued: true; ticketId: string; executor: 'dsh' } }
   'POST tickets/:id/stop': { body: { reason?: string }; response: { stopped: true } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
+  'POST main/view': { body: { sessionId: string; viewId: string; active: boolean }; response: { held: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }
   'POST policy-sync/:id': { response: { policy: unknown } }

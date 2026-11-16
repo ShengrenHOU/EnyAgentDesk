@@ -22,6 +22,15 @@ it('refuses management requests before the host has a bound port', () => {
   expect(sameOrigin({ headers: { host: '127.0.0.1:undefined', 'x-orchestrator-request': '1' } }, undefined)).toBe(false)
   expect(sameOrigin({ headers: { host: '127.0.0.1:3086', 'x-orchestrator-request': '1' } }, 3086)).toBe(true)
 })
+it('serves the conversation dock its own bounded projection through the protected carrier', async () => {
+  const host = await startRuntime()
+  try {
+    const response = await host.api('GET', 'owner-desk')
+    expect(response).toMatchObject({ status: 200, body: { person: [] } })
+    expect(response.body).not.toHaveProperty('triageMatters')
+    expect(response.body).not.toHaveProperty('flow')
+  } finally { await host.stop(); vi.restoreAllMocks() }
+})
 it('connects the live Runtime intake service to management discovery', async () => {
   const host = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
   try {

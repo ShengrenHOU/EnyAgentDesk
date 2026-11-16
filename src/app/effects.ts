@@ -9,6 +9,11 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
+  /** Move one idle Main segment, forward its native inbox, and retire old targets durably. */
+  mainRotate: Record<string, never>
+  mainForward: { from: string; message: import('@deepseek-ai/dsh-llm').UserMessage }
+  mainContext: EffectPayloads['mainForward']
+  mainRetire: Record<string, never>
   /** Bounded production IM judgment in its own native session. */
   triageAssessment: { generation: number }
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */

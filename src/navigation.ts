@@ -24,6 +24,7 @@ export async function ensureKnownSession(sessions: Pick<ISessions, 'list' | 'ref
 /** Select `id` in the workspace once the catalog lists it, unless aborted first. */
 export async function openKnownSession(sessions: Pick<ISessions, 'list' | 'refresh'>, id: SessionId, open: (id: SessionId) => void, signal: AbortSignal): Promise<boolean> {
   if (!await ensureKnownSession(sessions, id, signal)) return false
+  if (signal.aborted) return false
   open(id)
   return true
 }

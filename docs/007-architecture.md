@@ -409,6 +409,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
+| `src/app/host-schedule.ts` | Native reminder contract and follow-up projection |
+| `src/app/main-sessions.ts` | MainSessions |
 | `src/app/sessions.ts` | Sessions |
 | `src/app/memory-tools.ts` | Scoped forwarding of installed native memory tools, preserving provider execution and refusing stale bindings |
 | `src/infra/delivery.ts` | `AgentDelivery`: shared DSH transport for Sessions and Source plugins; delivers once per request id, also across a restored Session |
@@ -559,6 +561,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/production-projection.spec.ts` | Complete paginated history, global unresolved counts, ownership and source redaction |
 | `tests/production-pagination-panel.spec.tsx` | Actual older/latest-page UI consumer, refreshing and stale authorization handling |
 | `tests/production-session.spec.ts` | Native owned background assessment lifecycle, batch-bound tools and corrupt-history refusal |
+| `tests/main-session.spec.ts` | Stable logical Main entry and delivery through the persisted current-session pointer |
 | `tests/triage-matters.spec.ts` | Cross-batch continuation, related/split audit, citations, CAS, legacy paging, immutable receipts and revocation |
 | `tests/triage-matters-panel.spec.tsx` | Canonical projection UI, gaps/version uncertainty, full paging and refresh redaction |
 | `tests/production-triage.spec.ts` | Production effects, per-input read/commit CAS, native WeChat adapter, shared admission, revocation, retries/rollback and schema downgrade fencing |
@@ -905,3 +908,18 @@ New automatic accumulation fingerprints use input evidence, policy and prompt id
 ### Background information judgments
 
 Production batches use DSH AgentRegistry owned handles, resumed by their existing effect identity. Each native session has the minimal preset and six batch-bound read/submit tools; inherited tools are masked. Source evidence never grants execution authority. ProductionTriage retains the canonical batch, result and deadline. Restart re-enqueues only current awaiting batches without extending consumed deadlines. Native resume closes interrupted turns; a restored consumed-but-unfinished batch receives one deduplicated continuation in its existing session when no input or work is already pending. Completion and its result relay commit in the same Store transaction, so repeated submission cannot duplicate a handoff. Main receives compact saved-matter references for business association; routine classifications do not wake it. Completed or obsolete handles are released through the native lifecycle; persisted histories remain available. No Ticket, workspace, database or additional scheduler is created for a batch.
+
+
+### Bounded Main segments
+
+The Profile/Superagent remains one logical coordinator. `master-id` selects its current native interactive session. HTTP state, prompt views, resources, relays and follow-ups resolve that same pointer instead of retaining a startup copy. `MainSessions` uses the existing pass and Effects, with no second scheduler or identity database.
+
+After an idle Main reaches 20,000 native records, a `mainRotate` effect takes an input barrier. Native jobs or unsettled reminder migrations defer the handoff. Quiet context notices can move without waking the next Main. Preparation mounts the existing router preset on an owned native root Agent, preserves the current model route, and persists at most 1 MB of visible working-conversation context through the native inbox, letting DSH establish its protected system-message head before consumption. Reasoning and full tool bodies stay in historical source records. The handoff is a producer notice, never a new user instruction or new business mandate; a larger working conversation requires native compaction rather than silent truncation.
+
+The current pointer, active transition and retirement intent commit together after preparation succeeds. Before that commit the old segment remains current. Genuine arrivals at quiescing or retired Main addresses are captured durably, then forwarded with their original native source attribution. Transport deduplication and compact logical forwarding receipts prevent an old-window RPC from executing again after multiple later rotations. Interactive input forwarding remains pending until a durable native user/message record confirms consumption; passive context keeps its non-waking semantics in a separate Effects lane so it cannot block the input that wakes consumption. Consumption in the original source segment also prevents old-window retries from executing again. The handoff snapshot stays in the transition record until that context is durably consumed, and startup restores an interrupted claim. Receipt completion is not completed business work. Current state/decisions/Tickets/Lines and workers keep their original identities and mandates.
+
+Retirement changes only native reminder targets through catalog/edit with revision checks, preserving their IDs, content, timing and active/paused/ended status. It then uses native inactive archival and disposes only handles owned by this lifecycle. Missing reminder management or active old work retains the old routing address and defers retirement; it does not infer absence or cancel reminders. Archived segments remain available through native lineage/navigation and owner-only `conversation/history/<session>` index pages; exact visible user/assistant/tool entries are read by sequence in bounded text pages. Worker scopes cannot read these historical resources.
+
+The native input dock follows a new Main only if the mounted view was current and its native editor is empty/plain with no attachments, active reply editor or turn-tail reply draft/submission. Pending navigation is cancelled when editing resumes. Drafts remain under the native input owner. The dock holds a two-minute transient view lease, renewed every 15 seconds without editor contents; retirement also permits a 30-second startup reconnection window. An open old native view delays archive because DSH clears the selected page on archive. Once the view leaves, the lease is released; stale leases expire. A deliberate historical visit stays historical. No custom message editor or DOM draft copy is introduced.
+
+Schema 15 protects these transition, forwarding and retirement effects from older readers that have no handlers for them. The 14-to-15 migration changes the guard only and preserves prior business records and receipts. Do not lower the schema marker or run a 0.7.2 binary on the new state. Rollback must inspect post-upgrade work and use a matching prior backup; source rollback alone is insufficient.

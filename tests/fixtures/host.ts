@@ -19,10 +19,11 @@ import type { Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 import type { Machine } from '../../src/deployment.ts'
 import { sessionQueryFixture } from './session-query.ts'
-import { SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionLogOffset, SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { HostSchedule, NativeReminder } from '../../src/app/host-schedule.ts'
 
 export const MEMBER = 'ou_alice'
 export const CHAT = 'oc_team'
@@ -175,7 +176,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const controller = {
-    create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
+    create: vi.fn(async ({ sessionId, agentPreset }: { sessionId: string; agentPreset?: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const sessionTools = new Map<string, RegisteredTool>()
@@ -218,7 +219,8 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const session = { id: sessionId, header: { id: sessionId, agentPreset }, seq: 0, deriveMessages: () => [],
+        snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -232,7 +234,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
           ctx.emit('agent/status', { agent, status: 'idle' } as never)
         })
       })
-      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), inject: vi.fn(), session, cancel,
+      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), inject: vi.fn((message: UserMessage) => { inbox.nextStep.push(message) }), session, cancel, model: { current: () => undefined },
         get status() { return status }, set status(next: string) { status = next; if (next === 'idle') for (const wake of idle.splice(0)) wake() },
         // Once its turn ended, as DSH's does.
         whenIdle: () => status === 'idle' ? Promise.resolve() : new Promise<void>(resolve => { idle.push(resolve) }) } as never)
@@ -243,14 +245,21 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     inspect: vi.fn(async (id: string, _signal?: AbortSignal): Promise<SessionInspection> => ({ meta: { id: SessionId(id), version: SESSION_FORMAT_VERSION,
       createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0), events: [] })),
   }
-  const reader = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
-  const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async () => reader) }
+  const persisted = new Map<string, SessionEvent[]>()
+  const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async (id: string) => ({
+    read: async (offset = 0, limit = 512) => ({ events: (persisted.get(id) ?? []).slice(offset, offset + limit) }), [Symbol.asyncDispose]: async () => {},
+  })), stat: vi.fn(async (id: string) => agents.has(id) ? { header: { id } } : undefined) }
   const webServer = { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
   /** Registered workspaces, as DSH's registry lists them; a test attaches a Session by editing `sessionIds`. */
   const workspaces = new Map<string, { id: string; path: string; sessionIds: string[]; detachSession(sessionId: string): Promise<void> }>()
+  const archivedSessionIds: string[] = []
   const workspaceRegistry = {
+    archivedSessionIds,
+    pinSession: vi.fn(async () => {}),
+    unarchiveSession: vi.fn(async (id: string) => { const index = archivedSessionIds.indexOf(id); if (index >= 0) archivedSessionIds.splice(index, 1) }),
+    archiveSession: vi.fn(async (id: string) => { if (!archivedSessionIds.includes(id)) archivedSessionIds.push(id) }),
     create: async (cwd: string) => {
       const existing = [...workspaces.values()].find(workspace => workspace.path === cwd)
       if (existing) return existing
@@ -262,14 +271,21 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     list: () => [...workspaces.values()],
     delete: async (id: string) => { workspaces.delete(id) },
   }
-  const schedules = new Map<string, { id: string; sessionId: string; title: string; prompt: string; scheduledAt: string; status: 'active' | 'inactive' }>()
+  const schedules = new Map<string, NativeReminder>()
   const schedule = {
-    create: vi.fn(async (sessionId: string, request: { title: string; prompt: string; at: string }) => {
+    create: vi.fn(async (request: Parameters<HostSchedule['create']>[0], _actorSessionId?: string) => {
       const id = `schedule-${schedules.size + 1}`
-      schedules.set(id, { id, sessionId, title: request.title, prompt: request.prompt, scheduledAt: request.at, status: 'active' })
-      return { id, sessionId, title: request.title, prompt: request.prompt, scheduledAt: request.at }
+      const task: NativeReminder = { id, target: request.target, title: request.title, prompt: request.prompt, scheduledAt: request.timing.at, status: 'active' }
+      schedules.set(id, task)
+      return task
     }),
-    delete: vi.fn(async ({ id }: { sessionId: string; id: string }) => schedules.delete(id) ? { deleted: true } : { deleted: false, code: 'schedule_not_found' }),
+    edit: vi.fn(async (request: Parameters<HostSchedule['edit']>[0]) => {
+      const task = schedules.get(request.id)
+      if (!task) return { id: request.id, code: 'schedule_not_found' }
+      if (request.action === 'delete') { schedules.delete(request.id); return { id: request.id, deleted: true as const } }
+      if (request.expectedUpdatedAt !== undefined && request.expectedUpdatedAt !== (task.updatedAt ?? null)) return { id: request.id, code: 'schedule_conflict' }
+      const next = { ...task, target: request.patch.target, updatedAt: new Date().toISOString() }; schedules.set(next.id, next); return next
+    }),
     catalog: vi.fn(async () => [...schedules.values()]),
   }
   Object.assign(agents, {
@@ -293,6 +309,12 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     sessionPersistence: persistence, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service, schedule }
   const ctx = new Context()
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'user/message') return
+    const events = persisted.get(session.id) ?? []
+    if (!events.some(item => item.type === 'user/message' && item.data.id === event.data.id)) events.push(event)
+    persisted.set(session.id, events)
+  })
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))

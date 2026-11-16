@@ -52,10 +52,12 @@ it('reports a notice the main Session did not receive three times, until one rea
   const inject = h.agents.get(h.runtime.masterId)!.inject
   for (let count = 0; count < 3; count++) inject.mockImplementationOnce(() => { throw new Error('session busy') })
   await h.runtime.settings.pause(true, 'panel')
+  await h.runtime.sessions.delivery('settings:pause')
   await failThrice()
   expect(h.runtime.health.notice).toMatchObject({ state: 'error', detail: expect.stringContaining('session busy') })
   inject.mockClear()
   await h.runtime.settings.pause(false, 'panel')
+  await h.runtime.sessions.delivery('settings:pause')
   expect(h.runtime.health).toMatchObject({ notice: { state: 'ready' }, runtime: { state: 'ready' } })
   // The waiting pause notice was updated in place by the resume value and injected once.
   expect(inject).toHaveBeenCalledOnce()

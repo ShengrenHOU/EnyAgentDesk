@@ -214,6 +214,10 @@ const overviewView = (): ApiResponse<'GET overview'> => {
     policyVersion: 'abcdef1234567890',
   }
 }
+const deskView = (): ApiResponse<'GET owner-desk'> => {
+  const { person, personDeferred, work } = overviewView()
+  return { person, ...personDeferred ? { personDeferred } : {}, ...work ? { work } : {} }
+}
 export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ id: 'd1', kind: 'accept', outcome: 'accept',
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
@@ -314,6 +318,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST production-triage/:id/retry': { body: true, answer: () => { throw new Refusal(400, { error: 'Production triage is disabled in this fixture' }) } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
+  'GET owner-desk': { answer: deskView },
   'GET triage-matters': { query: ['before', 'limit', 'active'], answer: () => overviewView().triageMatters },
   'GET tickets/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },
   'GET lines/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },
@@ -470,6 +475,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.revisions.pause = (server.revisions.pause ?? 0) + 1
     return { paused: body.paused }
   } },
+  'POST main/view': { body: true, answer: ({ body }) => ({ held: body.active }) },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
     const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined
     if (!['policy', 'eval', 'executor'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')

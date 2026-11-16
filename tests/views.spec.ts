@@ -12,7 +12,7 @@ import { basisFacts, ticketDetail, ticketList } from '../src/app/views/tickets.t
 import { threadDetail, search } from '../src/app/views/threads.ts'
 import { attach, close, detail, open } from '../src/app/lines.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
-import { overview } from '../src/app/views/overview.ts'
+import { overview, ownerDeskView } from '../src/app/views/overview.ts'
 import { markdown, plain } from '../src/app/views/text.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
 import { KV } from '../src/kv.ts'
@@ -67,6 +67,21 @@ const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd'
   origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [] })
 const message = (id: string, actor: { source: string; id: string }, human = true) => ({ id, source: actor.source,
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
+
+it('serves the conversation dock only its bounded projection, with the same tickets the overview shows', () => {
+  const host = views()
+  live('urgent'); live('waiting')
+  store.tickets.save({ ...store.tickets.get('urgent')!, attention: { id: 'q1', question: '用哪个方案？' } })
+  store.tickets.save({ ...store.tickets.get('waiting')!, ended: { at, by: 'executor', outcome: 'completed' } })
+  const desk = ownerDeskView(host)
+  const board = overview(host, {}, 'v', { running: 0, queued: 0 })
+  expect(Object.keys(desk).sort()).toEqual(['person', 'work'])
+  expect(desk).toEqual({ person: board.person, work: board.work })
+  expect(desk.person[0]).toMatchObject({ id: 'urgent', attention: { id: 'q1' } })
+  expect(desk.work?.delivered.map(ticket => ticket.id)).toEqual(['waiting'])
+  // The dock renders no triage matters, source diagnostics, problems or 24-hour flow, so its view builds none of them.
+  expect(JSON.stringify(desk)).not.toMatch(/triageMatters|productionTriage|problems|policyVersion|"flow"/)
+})
 
 it('orders the original work views by priority and deadline and retains deliverables and next follow-up', () => {
   const host = views()

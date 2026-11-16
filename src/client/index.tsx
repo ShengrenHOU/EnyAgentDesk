@@ -35,6 +35,14 @@ const WORKBENCH_ID = 'dsh-personal-workbench' as MainPanelId
 const CONVERSATION_ID = 'dsh-main-conversation' as MainPanelId
 const ENTRY = 'dsh-superagent'
 
+/** Reuse native navigation for the stable entry and automatic segment continuation. */
+async function openNativeSession(ctx: ClientContext, id: string, signal: AbortSignal): Promise<void> {
+  await ctx.uiWorkspace.unarchiveSession(id as SessionId)
+  if (!await openKnownSession(ctx.sessions, id as SessionId, target => { ctx.uiWorkspace.openSession(target) }, signal)) {
+    throw new DOMException('Session navigation was superseded', 'AbortError')
+  }
+}
+
 function EntryIcon({ size, kind, t }: SidebarPanelIconOwnerProps & { kind: 'conversation' | 'workbench'; t: T }) {
   return <><svg data-superagent-entry={kind} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     {kind === 'conversation' ? <path d="M4 4h16v12H9l-5 4V4z" /> : <path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z" />}
@@ -69,9 +77,7 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
     pending.current?.abort()
     const request = new AbortController(); pending.current = request
     try {
-      await ctx.uiWorkspace.unarchiveSession(id as SessionId)
-      const opened = await openKnownSession(ctx.sessions, id as SessionId, target => { ctx.uiWorkspace.openSession(target) }, request.signal)
-      if (!opened) throw new DOMException('Session navigation was superseded', 'AbortError')
+      await openNativeSession(ctx, id, request.signal)
     } catch (error) {
       if (error instanceof SessionNavigationError) throw new Error(t(error.code === 'not-ready' ? 'sessionListNotReady' : 'sessionNotListed'))
       throw error
@@ -105,7 +111,8 @@ export function apply(ctx: ClientContext): void {
       if (!conversation) throw new Error('Conversation is unavailable')
       return conversation.send(text)
     } }),
-  }, (props: { sessionId: string; t: T; send(text: string): Promise<void> }) => <OwnerDesk {...props} openTicket={showTicket} />))
+  }, (props: Parameters<typeof OwnerDesk>[0]) => <OwnerDesk {...props} openTicket={showTicket}
+    openMain={(id, signal) => openNativeSession(ctx, id, signal)} />))
   // DSH owns the Turn and source message; the selected reply only adds a quoted context to the native send.
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail', id: 'superagent-quick-reply', order: 30, locale: NS,

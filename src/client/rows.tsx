@@ -19,7 +19,7 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
   const migrated = automations.data?.items ?? []
   const available = automations.data?.available ?? false
   const count = data && automations.data ? data.length + migrated.length : '…'
-  const automationLabel = (status: 'scheduled' | 'ended' | 'unknown') => t(status === 'scheduled'
+  const automationLabel = (status: 'scheduled' | 'paused' | 'ended' | 'unknown') => status === 'paused' ? t('followupAutomationPaused') : t(status === 'scheduled'
     ? 'followupAutomationScheduled' : status === 'ended' ? 'followupAutomationEnded' : 'followupAutomationUnknown')
   const changed = async () => { await Promise.all([reload(), automations.reload()]) }
   return <section className="dt-followup-agenda">

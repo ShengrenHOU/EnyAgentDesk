@@ -1,21 +1,31 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import { act, useSyncExternalStore } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import { TurnQuickReply } from '../src/client/quick-reply.tsx'
 import { OwnerDesk } from '../src/client/owner-desk.tsx'
+import type { InputState } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { zh } from '../src/client/locales.ts'
 import { translator, click, type, settle } from './fixtures/panel.tsx'
 import { server, ticketSummary, usePanelServer } from './fixtures/panel-server.ts'
 
 let root: Root
-usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = ''; localStorage.clear(); openTicket.mockClear() })
+usePanelServer(() => { act(() => root?.unmount()); document.body.innerHTML = ''; localStorage.clear(); openTicket.mockClear(); openMain.mockClear(); nativeInput = { draft: '', attachmentIds: [], phase: 'plain' } })
 const t = translator(zh)
 const openTicket = vi.fn()
+const openMain = vi.fn(async (_id: string, _signal: AbortSignal) => {})
+let nativeInput: Pick<InputState, 'draft' | 'attachmentIds' | 'phase'> = { draft: '', attachmentIds: [], phase: 'plain' }
+const inputListeners = new Set<() => void>()
+const useNativeInput = <T,>(selector: (input: typeof nativeInput) => T): T => {
+  const input = useSyncExternalStore(listener => { inputListeners.add(listener); return () => { inputListeners.delete(listener) } }, () => nativeInput)
+  return selector(input)
+}
 async function mount(sessionId = 'master') {
   const container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
   const send = vi.fn(async (_text: string) => {})
-  await act(async () => { root.render(<OwnerDesk sessionId={sessionId} t={t} send={send} openTicket={openTicket} />) })
+  await act(async () => { root.render(<OwnerDesk sessionId={sessionId} t={t} send={send} openTicket={openTicket}
+    useInput={useNativeInput} openMain={openMain} />) })
   await settle()
   return send
 }
@@ -24,6 +34,54 @@ async function remount() {
   document.body.innerHTML = ''
   await mount()
 }
+
+async function refreshMain() {
+  Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await settle() })
+}
+
+it('follows a moved Main only when the native draft is empty and the view was current', async () => {
+  await mount()
+  server.masterId = 'orchestrator-next'
+  await refreshMain()
+  await vi.waitFor(() => expect(openMain).toHaveBeenCalledOnce())
+  expect(openMain.mock.calls[0]![0]).toBe('orchestrator-next')
+})
+
+it('keeps the native draft when Main moves and follows after that draft is sent', async () => {
+  nativeInput = { draft: 'Keep this unfinished text', attachmentIds: [], phase: 'plain' }
+  await mount()
+  server.masterId = 'orchestrator-next'; await refreshMain()
+  expect(openMain).not.toHaveBeenCalled()
+  expect(nativeInput.draft).toBe('Keep this unfinished text')
+  await act(async () => { nativeInput = { draft: '', attachmentIds: [], phase: 'plain' }; inputListeners.forEach(listener => listener()) })
+  await vi.waitFor(() => expect(openMain).toHaveBeenCalledOnce())
+})
+
+it('leaves an explicit visit to historical Main in place', async () => {
+  server.masterId = 'orchestrator-current'
+  await mount('orchestrator-previous')
+  expect(openMain).not.toHaveBeenCalled()
+  expect(document.body.textContent).toContain('继续主对话')
+})
+
+it('keeps an inline answer visible and blocks automatic continuation until its draft is cleared', async () => {
+  await mount()
+  await click(document.querySelector<HTMLButtonElement>('.dt-owner-tabs button')!)
+  const editor = () => document.querySelector<HTMLInputElement>(`.dt-owner-task input[aria-label="${zh.quickReplyTicket}"]`)!
+  await type(editor(), 'Keep this answer for its original Question')
+  server.masterId = 'orchestrator-next'; await refreshMain()
+  expect(openMain).not.toHaveBeenCalled()
+  expect(editor().value).toBe('Keep this answer for its original Question')
+  await type(editor(), '')
+  await vi.waitFor(() => expect(openMain).toHaveBeenCalledOnce())
+})
+
+it('loads the dock from its bounded projection instead of the full overview', async () => {
+  await mount()
+  expect(server.requests).toContainEqual({ path: 'owner-desk', method: 'GET' })
+  expect(server.requests.filter(request => request.path === 'overview')).toEqual([])
+})
 
 it('shows global work only on the main conversation and opens no task merely by viewing it', async () => {
   const send = await mount('worker-one')
@@ -380,4 +438,36 @@ it('closes a failed Ticket in the needs-you panel with an optional reason and cl
   expect(server.requests).toContainEqual({ path: 'tickets/failed/stop', method: 'POST', body: { reason: '已过期，不再需要' } })
   expect(document.body.textContent).toContain(zh.closeTicketDone.replace('{title}', '截图工具'))
   expect(document.querySelector('.dt-owner-content')?.textContent ?? '').not.toContain('截图工具')
+})
+
+
+it('aborts automatic continuation when editing resumes while navigation waits', async () => {
+  let release!: () => void
+  openMain.mockImplementationOnce(async (_id, signal) => {
+    await new Promise<void>(resolve => { release = resolve })
+    if (!signal.aborted) throw new Error('Navigation must be cancelled')
+  })
+  await mount()
+  server.masterId = 'orchestrator-next'; await refreshMain()
+  expect(openMain).toHaveBeenCalledOnce()
+  await act(async () => { nativeInput = { draft: 'New text while catalog waits', attachmentIds: [], phase: 'plain' }; inputListeners.forEach(listener => listener()) })
+  expect(openMain.mock.calls[0]![1].aborted).toBe(true)
+  await act(async () => { release() }); await settle()
+  expect(document.querySelector('[role="alert"]')).toBeNull()
+})
+
+it('holds Main navigation while a turn-tail reply is edited or sending', async () => {
+  const sessionId = 'master-turn-guard'; server.masterId = sessionId
+  const container = document.createElement('div'); document.body.append(container); root = createRoot(container)
+  const send = vi.fn(async (_text: string) => {})
+  await act(async () => root.render(<><OwnerDesk sessionId={sessionId} t={t} send={send} openTicket={openTicket}
+    useInput={useNativeInput} openMain={openMain} /><TurnQuickReply sessionId={sessionId} turn={1} seq={22} quote="Pending reply" t={t} send={send} /></>))
+  await settle()
+  const editor = () => document.querySelector<HTMLInputElement>('.dt-turn-reply input')!
+  await type(editor(), 'Keep the reply for this Turn')
+  server.masterId = 'orchestrator-next'; await refreshMain()
+  expect(openMain).not.toHaveBeenCalled()
+  expect(editor().value).toBe('Keep the reply for this Turn')
+  await type(editor(), '')
+  await vi.waitFor(() => expect(openMain).toHaveBeenCalledOnce())
 })

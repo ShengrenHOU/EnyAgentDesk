@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { key, latestReport, liveTicket, runningAssignment, ticketFollowups, waitsForPerson, UserError, type Engine, type Ticket, type TicketFollowup }
   from '../core/index.ts'
-import { family, type Key } from '../kv.ts'
+import { KV, family, type Key } from '../kv.ts'
 import type { Store } from './store.ts'
 
 export const FollowupRequestSchema = z.object({
@@ -63,7 +63,7 @@ export interface AutomationView extends AutomationRef {
   ticketId: string
   ticketTitle: string
   requestId: string
-  status: 'scheduled' | 'ended' | 'unknown'
+  status: 'scheduled' | 'paused' | 'ended' | 'unknown'
 }
 export interface AutomationsView {
   /** Whether this profile can create DSH Schedule tasks; false leaves every pending check on its Ticket. */
@@ -73,7 +73,7 @@ export interface AutomationsView {
 
 /** The DSH Host Schedule operations this plugin uses; the service is optional because a profile may not load it. */
 export interface CatalogTask extends AutomationRef {
-  status: 'active' | 'inactive'
+  status: 'active' | 'paused' | 'inactive'
   /** The stored instruction, which carries the migration marker used to adopt a task after a crash. */
   prompt?: string
 }
@@ -195,12 +195,14 @@ export class Followups {
       this.host.store.delete(migrationIntents(ticketId, requestId))
     }
     if (this.migrationPending(ticketId, requestId)) throw new UserError('automationPending')
-    const intent: MigrationIntent = { ticketId, requestId, sessionId: masterId, title,
+    const currentMain = this.host.masterId!
+    if (this.host.store.get(KV.runtime.mainTransition(currentMain))?.phase === 'quiescing') throw new UserError('automationPending')
+    const intent: MigrationIntent = { ticketId, requestId, sessionId: currentMain, title,
       prompt: automationPrompt(ticket, followup, marker), at: followup.at, marker, createdAt: new Date(this.now()).toISOString() }
     this.host.store.set(migrationIntents(ticketId, requestId), intent)
     let created: AutomationRef
     try {
-      created = await schedule.create(masterId, { title, prompt: intent.prompt, at: followup.at })
+      created = await schedule.create(currentMain, { title, prompt: intent.prompt, at: followup.at })
     } catch (error) {
       // The Host Schedule may have written the task before its response was lost. Keep the intent so a retry or `maintain`
       // adopts it by marker; deleting it here would leave an orphan that no normal cancellation covers.
@@ -442,9 +444,9 @@ export class Followups {
   private automationView(receipt: FollowupReceipt, catalog: Map<string, CatalogTask> | undefined): AutomationView {
     const automation = receipt.automation!
     const current = catalog?.get(automation.id)
-    const status = current ? current.status === 'active' ? 'scheduled' as const : 'ended' as const
+    const status = current ? current.status === 'active' ? 'scheduled' as const : current.status === 'paused' ? 'paused' as const : 'ended' as const
       : catalog ? 'ended' as const : 'unknown' as const
-    return { ...automation, ticketId: receipt.ticketId, ticketTitle: this.host.store.tickets.get(receipt.ticketId)?.title ?? receipt.ticketId,
+    return { ...automation, ...current ? { sessionId: current.sessionId } : {}, ticketId: receipt.ticketId, ticketTitle: this.host.store.tickets.get(receipt.ticketId)?.title ?? receipt.ticketId,
       requestId: receipt.requestId, status, scheduledAt: current?.scheduledAt ?? automation.scheduledAt }
   }
 

@@ -1,11 +1,12 @@
 /** Owner work beside the native conversation, projected from the existing overview. */
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { InputState } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { answerAttention, usePoll, type TicketRow } from './api.ts'
 import { Button, Icon, Tag } from './controls.tsx'
 import { ticketMark } from './marks.ts'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { useStoredFlag } from './prefs.ts'
-import { QuickReply } from './quick-reply.tsx'
+import { QuickReply, useTurnReplyEditing } from './quick-reply.tsx'
 import { ReplyForm } from './reply-form.tsx'
 import { replyDraftKey, useReplyDrafts, type ReplyDraftTarget } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
@@ -14,6 +15,8 @@ import { CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite } from './
 
 interface Props {
   sessionId: string; t: T; send(text: string): Promise<void>; openTicket(id: string): void
+  useInput<T>(selector: (input: Pick<InputState, 'draft' | 'attachmentIds' | 'phase'>) => T): T
+  openMain(id: string, signal: AbortSignal): Promise<void>
 }
 type Group = 'person' | 'deferred' | 'working' | 'waiting' | 'delivered'
 /** A Ticket row in the desk; a deferred Question carries the time it returns to the immediate queue. */
@@ -23,10 +26,10 @@ type DeskItem = TicketRow & { until?: string }
 const draftTargetOf = (ticket: Pick<TicketRow, 'id' | 'attention'>): ReplyDraftTarget =>
   ({ ticketId: ticket.id, attentionId: ticket.attention?.id })
 
-function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
+function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, 't'>) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  const { data, error, reload } = usePoll(() => call('GET owner-desk'), [])
   const [group, setGroup] = useState<Group>()
   const [target, setTarget] = useState<TicketRow>()
   const [instruction, setInstruction] = useState('')
@@ -36,9 +39,55 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const [failure, setFailure] = useState<string>()
   const [receipt, setReceipt] = useState<string>()
   const [preview, setPreview] = useState<{ title: string; url: string }>()
+  const [viewError, setViewError] = useState<string>()
+  const [viewId] = useState(() => crypto.randomUUID())
   // The desk sits above the composer; keeping it collapsed stops a long agenda from covering the conversation.
   const [open, setOpen] = useStoredFlag('dsh-superagent/owner-desk-open', false)
-  if (!state || sessionId !== state.masterId) return null
+  const nativeDraft = useInput(input => !!input.draft.trim() || !!input.attachmentIds.length || input.phase !== 'plain')
+  const navigation = useRef<AbortController>(undefined)
+  const seat = useRef({ sessionId, wasMain: false })
+  if (seat.current.sessionId !== sessionId) seat.current = { sessionId, wasMain: false }
+  if (state?.masterId === sessionId) seat.current.wasMain = true
+  const mainSeat = seat.current.wasMain || sessionId.startsWith('orchestrator-')
+  useEffect(() => {
+    if (!mainSeat) return
+    let active = true
+    const hold = () => { void call('POST main/view', { body: { sessionId, viewId, active: true } }).then(() => {
+      if (active) setViewError(undefined)
+    }, error => { if (active) setViewError(errorText(error)) }) }
+    hold(); const timer = setInterval(hold, 15_000)
+    return () => {
+      active = false; clearInterval(timer)
+      // A disappearing page cannot await cleanup; stale view leases expire.
+      void call('POST main/view', { body: { sessionId, viewId, active: false } }).catch(() => {})
+    }
+  }, [mainSeat, sessionId, viewId, call])
+  const moved = !!state && sessionId !== state.masterId && (seat.current.wasMain || sessionId.startsWith('orchestrator-'))
+  const currentId = state?.masterId, openCurrent = useRef(openMain)
+  openCurrent.current = openMain
+  const continueMain = useCallback(() => {
+    if (!currentId) return
+    navigation.current?.abort()
+    const request = navigation.current = new AbortController()
+    void openCurrent.current(currentId, request.signal).catch(error => {
+      if (!request.signal.aborted) setFailure(errorText(error))
+    })
+  }, [currentId])
+  const hasQuickDraft = Object.values(quick).some(draft => !!draft.text.trim())
+  const editingDesk = busy || !!target || hasQuickDraft
+  const turnDraft = useTurnReplyEditing(sessionId)
+  useEffect(() => () => navigation.current?.abort(), [])
+  useEffect(() => {
+    if (moved && seat.current.wasMain && !nativeDraft && !editingDesk && !turnDraft) continueMain()
+    return () => navigation.current?.abort()
+  }, [moved, continueMain, sessionId, nativeDraft, editingDesk, turnDraft])
+  if (moved && !editingDesk) return <aside className="dt-owner-desk" aria-label={t('mainSegmentMoved')}>
+    <div className="pw-actions" role="status"><span>{t('mainSegmentMoved')}</span>
+      <Button size="sm" disabled={nativeDraft || turnDraft} onClick={continueMain}>{t('mainSegmentContinue')}</Button></div>
+    {failure && <p role="alert" className="dt-error">{failure}</p>}
+    {viewError && <p role="alert" className="dt-error">{viewError}</p>}
+  </aside>
+  if (!state || sessionId !== state.masterId && !moved) return null
   const deferred = data?.personDeferred ?? []
   const groups: Record<Group, { label: string; items: DeskItem[]; total: number }> = {
     person: { label: t('ownerDeskNeedsYou'), items: data?.person ?? [], total: data?.person.length ?? 0 },
@@ -117,6 +166,8 @@ function Desk({ sessionId, send, openTicket }: Omit<Props, 't'>) {
   const replaced = target?.attention && liveTarget?.attention && liveTarget.attention.id !== target.attention.id
     ? liveTarget : undefined
   return <aside className="dt-owner-desk" aria-label={t('ownerDeskTitle')}>
+    {moved && <p role="status" className="dt-hint">{t('mainSegmentMoved')}</p>}
+    {viewError && <p role="alert" className="dt-error">{viewError}</p>}
     <div className="dt-owner-bar">
       <button type="button" className="dt-owner-toggle" aria-expanded={open}
         title={t(open ? 'collapse' : 'ownerDeskShow')} onClick={() => setOpen(!open)}>

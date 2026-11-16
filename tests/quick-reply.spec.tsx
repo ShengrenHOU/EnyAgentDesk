@@ -135,3 +135,20 @@ it('leaves the composer as the only reply in a Session that is not the main one'
   await mount(<TurnQuickReply sessionId="worker-one" turn={1} seq={10} quote="worker" t={t} send={send} />)
   expect(document.querySelector('.dt-quick')).toBeNull()
 })
+
+
+it('keeps the original turn editor accessible after Main changes until the reply settles', async () => {
+  let release!: () => void
+  const send = vi.fn(() => new Promise<void>(resolve => { release = resolve }))
+  await mount(<TurnQuickReply sessionId={master} turn={1} seq={15} quote="Original question" t={t} send={send} />)
+  await type(input()!, 'Keep this original answer')
+  server.masterId = 'orchestrator-next'
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await settle() })
+  expect(input()?.value).toBe('Keep this original answer')
+  await click(sendButton()!)
+  expect(input()?.value).toBe('Keep this original answer')
+  expect(sendButton()?.disabled).toBe(true)
+  await act(async () => { release() }); await settle()
+  expect(input()).toBeNull()
+  expect(send.mock.calls[0]).toBeDefined()
+})
