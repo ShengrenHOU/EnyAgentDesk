@@ -1,3 +1,4 @@
+import { asToolBatch } from './fixtures/tool-batch.ts'
 /** WeChat window reads resolve names exactly, preserve native direction and never join the monitor's ACK protocol. */
 import { createHash } from 'node:crypto'
 import { expect, it, vi } from 'vitest'
@@ -26,7 +27,7 @@ function fixture(handler: (name: string, args: Record<string, unknown>) => unkno
     calls.push({ name, args })
     return { isError: false, value: { structuredContent: handler(name, args), content: [] } }
   })
-  const tools = { schemas: vi.fn(), execute } as unknown as ActivityTools
+  const tools = { schemas: vi.fn(), execute: asToolBatch(execute) } as unknown as ActivityTools
   const kind = createActivityKind({ ownerChatId: 'oc_owner', lark: { expectedUserId: 'ou_owner' },
     wechat: { serverName: 'wechat_readonly' } }, tools)
   const signal = new AbortController().signal

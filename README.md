@@ -77,7 +77,7 @@ python scripts/configure-workbench.py --port 3082 --owner local-owner
 
 ### 手动安装
 
-要求：Node.js 22.19+ 或 24+、pnpm、git 2.32+、Python 3.8+，以及一个配置好模型服务的 DeepSeek Harness。GitHub 来源需要 `gh` 2.48+ 和一个有仓库写权限的 Agent 账号；飞书来源需要 `lark-cli`、一个已发布的飞书应用和 bot-only 配置。
+要求：Node.js >=24.9.0、pnpm、git 2.32+、Python 3.8+，以及一个配置好模型服务的 DeepSeek Harness。GitHub 来源需要 `gh` 2.48+ 和一个有仓库写权限的 Agent 账号；飞书来源需要 `lark-cli`、一个已发布的飞书应用和 bot-only 配置。
 
 ```sh
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk

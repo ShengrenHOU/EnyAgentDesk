@@ -1,3 +1,4 @@
+import { asToolBatch } from './fixtures/tool-batch.ts'
 /** Production pipeline: real durable effects, per-anchor evidence, ownership, and no business effects. */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -352,7 +353,7 @@ it.each(['informational', 'suggested_action'] as const)('real WeChat native adap
     records: [{ account: 'owner', conversation: 'chat', record_id: 'record-a', message_ref: 'wx1.a', timestamp: Date.parse(now) / 1000,
       time: now, text: 'private wx1.a', sender: 'sender', direction: 'incoming', local_type: 1 }],
   } } }))
-  const tools = { execute, schemas: vi.fn() } as unknown as ActivityTools
+  const tools = { execute: asToolBatch(execute), schemas: vi.fn() } as unknown as ActivityTools
   native = () => ({ assertActive() {}, read: (request, cursor, signal) => readWechatImContext(tools, { serverName: 'wechat_readonly' }, request, cursor, signal) })
   add('wx1.a'); const [batch] = start(['wx1.a']); await drain(); consume(batch!); const live = service.read(batch!.id)
   expect(live.contexts['wx1.a']!.anchor).toMatchObject({ status: 'unverified', contentMatch: true })

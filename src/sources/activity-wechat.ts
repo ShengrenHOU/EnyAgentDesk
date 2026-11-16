@@ -67,13 +67,17 @@ async function call<T>(tools: ActivityTools, binding: WechatActivityBinding, too
   active(); signal.throwIfAborted()
   const name = toolName(binding, tool)
   // Execute the named tool directly; projecting every installed schema can fail on an unrelated plugin.
-  const result = await tools.execute({ callId: ToolCallId(`activity-wechat-${randomUUID()}`), name, arguments: args, signal })
+  const callId = ToolCallId(`activity-wechat-${randomUUID()}`)
+  const batch = await tools.execute({ calls: [{ type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) }], signal })
     .catch((error: unknown) => {
       active(); signal.throwIfAborted()
       if (tool === 'wechat_read_window') throw new ImContextReadError(true)
       throw error
     })
   active(); signal.throwIfAborted()
+  const matched = batch.results[0]
+  if (batch.results.length !== 1 || matched?.callId !== callId) throw new Error('WeChat tool result does not match its request')
+  const result = matched.result
   if (result.isError) {
     const message = result.error.message
     if (tool === 'wechat_read_window') throw new ImContextReadError(

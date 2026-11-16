@@ -77,7 +77,7 @@ to hand over first.
 
 ### Manual install
 
-Requirements: Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+, and a configured model provider for DeepSeek Harness. The GitHub source needs `gh` 2.48+ and an agent account with write access. The Feishu source needs `lark-cli`, a published Feishu app and a bot-only configuration. tmux is only needed by the POSIX service script.
+Requirements: Node.js >=24.9.0, pnpm, git 2.32+, Python 3.8+, and a configured model provider for DeepSeek Harness. The GitHub source needs `gh` 2.48+ and an agent account with write access. The Feishu source needs `lark-cli`, a published Feishu app and a bot-only configuration. tmux is only needed by the POSIX service script.
 
 ```sh
 git clone https://github.com/ShengrenHOU/EnyAgentDesk enyagentdesk && cd enyagentdesk

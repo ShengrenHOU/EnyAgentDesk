@@ -8,13 +8,22 @@ import type { ActivityReaderContext, ActivityTools } from '../src/sources/activi
 
 it('calls the selected MCP tool without projecting unrelated plugin schemas', async () => {
   const schemas = vi.fn(() => { throw new Error('Unrelated workbench schema cannot be projected') })
-  const execute = vi.fn(async () => ({ isError: true, error: { message: 'Selected MCP unavailable' } }))
+  const execute = vi.fn(async ({ calls }: { calls: { id: string }[] }) => ({ results: [{ callId: calls[0]!.id,
+    result: { isError: true, error: { message: 'Selected MCP unavailable' } } }], additionalContexts: [], concluded: false }))
   const tools = { schemas, execute } as unknown as ActivityTools
   const ctx = { signal: new AbortController().signal, assertActive: () => {}, consumerId: 'test' } as ActivityReaderContext
   await expect(scanWechatActivity(ctx, tools, { serverName: 'wechat_readonly' },
     { start: '2026-11-01T00:00:00Z', end: '2026-11-02T00:00:00Z' })).rejects.toThrow('Selected MCP unavailable')
-  expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: 'mcp__wechat_readonly__wechat_list_chats' }))
+  expect(execute).toHaveBeenCalledWith(expect.objectContaining({ calls: [expect.objectContaining({ name: 'mcp__wechat_readonly__wechat_list_chats' })] }))
   expect(schemas).not.toHaveBeenCalled()
+})
+
+it('rejects a result from another tool call rather than using it as source evidence', async () => {
+  const tools = { schemas: vi.fn(), execute: vi.fn(async () => ({ results: [{ callId: 'another-call',
+    result: { isError: false, value: {} } }], additionalContexts: [], concluded: false })) } as unknown as ActivityTools
+  const ctx = { signal: new AbortController().signal, assertActive() {}, consumerId: 'test' } as ActivityReaderContext
+  await expect(scanWechatActivity(ctx, tools, { serverName: 'wechat_readonly' },
+    { start: '2026-11-01T00:00:00Z', end: '2026-11-02T00:00:00Z' })).rejects.toThrow('does not match its request')
 })
 
 it.each(['incoming', 'outgoing', 'unknown-native-value', ''])('preserves native direction %j from ingestion to source evidence and legacy context without authority', async direction => {
@@ -23,7 +32,8 @@ it.each(['incoming', 'outgoing', 'unknown-native-value', ''])('preserves native 
     timestamp: Date.parse(range.start) / 1000, time: range.start, text: 'Already handled', sender: null, direction, local_type: 1 }
   const eventId = `wxe_${'a'.repeat(64)}`, fingerprint = 'b'.repeat(64), batchId = 'c'.repeat(32)
   let delivered = false
-  const execute = vi.fn(async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+  const execute = vi.fn(async ({ calls }: { calls: { id: string; name: string; arguments: string }[] }) => {
+    const { id, name, arguments: raw } = calls[0]!, args = JSON.parse(raw) as Record<string, unknown>
     const value = name.endsWith('wechat_list_chats') ? { status: 'ok', account: original.account,
       chats: [{ wxid: original.conversation, display: 'Synthetic chat', lastMessageAt: range.start }],
       count: 1, total: 1, offset: 0, next_offset: null, has_more: false, snapshot_id: 'test-snapshot',
@@ -35,7 +45,8 @@ it.each(['incoming', 'outgoing', 'unknown-native-value', ''])('preserves native 
             start_inclusive: original.timestamp, end_exclusive: original.timestamp + 1,
             records: delivered ? [] : [{ event_id: eventId, fingerprint, original }], count: delivered ? 0 : 1,
             has_more: false, batch_id: delivered ? '' : batchId, delivery_state: delivered ? 'no_changes' : 'pending_ack' }
-    return { isError: false, value: { structuredContent: value, content: [] } }
+    return { results: [{ callId: id, result: { isError: false, value: { structuredContent: value, content: [] } } }],
+      additionalContexts: [], concluded: false }
   })
   const tools = { execute, schemas: vi.fn() } as unknown as ActivityTools
   const state = new Map<string, unknown>()

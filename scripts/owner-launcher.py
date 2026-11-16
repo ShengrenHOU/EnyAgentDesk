@@ -21,6 +21,10 @@ def validate_config(config):
         if not Path(config[key]).is_absolute() or not Path(config[key]).exists():
             raise ValueError('Supply existing absolute runtime and executable paths')
     root = Path(config['runtime']).resolve()
+    if 'dshCli' in config:
+        entry = config['dshCli']
+        if not isinstance(entry, str) or not entry or not Path(entry).is_absolute() or not Path(entry).is_file():
+            raise ValueError('dshCli must be an existing absolute DSH CLI file')
     if 'noProxy' in config and not isinstance(config['noProxy'], str):
         raise ValueError('noProxy must be a proxy bypass string')
     bot_config = config.get('feishuBotConfigDir')
@@ -50,6 +54,10 @@ def validate_config(config):
     if (root / (config['receiptName'] + '.tmp')).resolve().parent != root:
         raise ValueError('The receipt temporary file must stay inside the runtime directory')
     return config
+
+
+def dsh_cli(config):
+    return Path(config.get('dshCli') or Path(config['runtime']) / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js')
 
 
 def ready(result):
@@ -195,7 +203,7 @@ def spawn(config):
         result = None
         with log_path.open('ab') as log:
             offset = log.tell()
-            process = subprocess.Popen([config['node'], str(root / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js'),
+            process = subprocess.Popen([config['node'], str(dsh_cli(config)),
                                         config.get('profile', 'superagent'), '--no-open'], cwd=root, env=env, stdin=subprocess.DEVNULL,
                                        stdout=log, stderr=log, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         locked = False
@@ -295,7 +303,7 @@ while (Get-NetTCPConnection -State Listen -LocalPort $target.port -ErrorAction S
 '''
     shell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
     target = {'port': config['port'], 'pid': receipt['pid'], 'profile': config['profile'], 'node': str(Path(config['node']).resolve()),
-              'entry': str(root / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'marker': str(root / config['stopMarker'])}
+              'entry': str(dsh_cli(config)), 'marker': str(root / config['stopMarker'])}
     try:
         subprocess.run([str(shell), '-NoProfile', '-Command', script], input=json.dumps(target).encode('utf-8'),
                        check=True, capture_output=True, timeout=90,

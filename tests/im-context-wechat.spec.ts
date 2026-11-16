@@ -1,3 +1,4 @@
+import { asToolBatch } from './fixtures/tool-batch.ts'
 import { expect, it, vi } from 'vitest'
 import { readWechatImContext } from '../src/sources/activity-wechat.ts'
 import type { ActivityTools } from '../src/sources/activity-types.ts'
@@ -15,7 +16,7 @@ const signal = () => new AbortController().signal
 it.each([['Connection closed', true], ['permission denied: Connection closed', false], ['Invalid arguments', false]])(
   'classifies native read failure %s without acknowledging evidence', async (message, retryable) => {
     const execute = vi.fn().mockResolvedValue({ isError: true, error: { message } })
-    const tools = { execute } as unknown as ActivityTools
+    const tools = { execute: asToolBatch(execute) } as unknown as ActivityTools
     await expect(readWechatImContext(tools, binding, request, undefined, signal())).rejects.toMatchObject({ retryable })
     expect(execute).toHaveBeenCalledTimes(1)
     expect(execute.mock.calls[0]![0].name).toBe('mcp__wechat_readonly__wechat_read_window')
@@ -35,7 +36,7 @@ function mock(...pages: object[]) {
   const execute = vi.fn()
   for (const item of pages) execute.mockResolvedValueOnce({ isError: false, value: { structuredContent: item, content: [] } })
   const schemas = vi.fn(() => { throw new Error('must not enumerate unrelated tools') })
-  return { execute, schemas, tools: { execute, schemas } as unknown as ActivityTools }
+  return { execute, schemas, tools: { execute: asToolBatch(execute), schemas } as unknown as ActivityTools }
 }
 
 it('reads later replies and outgoing messages in a fixed snapshot without incremental reads or ACKs', async () => {

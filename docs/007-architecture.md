@@ -459,6 +459,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/session-inspection.ts` | One immutable live-preferred Session Query observation, with cancellation and lease disposal, shared by owner discussion and transcript reads |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/version.ts` | The running build's packaged version, the source commit, repository and build time the artifact records, and the comparison with the default-branch commit its Source last saw |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
@@ -487,7 +488,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/calendar.ts` | The `calendar` kind: upcoming-window versions, baseline, scheduling, change and cancellation Triggers |
 | `src/sources/lark-workspace.ts` | The plugin entry for the three read-only workspace Sources, exported as `./lark-workspace-watch` |
 | `src/sources/workbench.ts` | Explicit native discussion delegation, immutable context prefix, per-request task threads and replay checks; Host/UI wiring is tracked in Issue #22 |
-| `src/sources/workbench-session.ts` | Reads bounded original user/assistant evidence through DSH Session Controller, retaining attachment identities and marking truncation; `discussionWindow` gives a Worker a read-only page of the owner's last 24 hours |
+| `src/sources/workbench-session.ts` | Reads bounded original user/assistant evidence through DSH Session Query, retaining attachment identities and marking truncation; `discussionWindow` gives a Worker a read-only page of the owner's last 24 hours |
 | `src/sources/workbench-host.ts` | Optional native workbench plugin; registers owner-authenticated delegation on the DSH Connection carrier |
 | `src/sources/workbench-files.ts` | Task-local file publication and authenticated readback, with real-path containment and content-hash checks |
 | `src/sources/workbench-tools.ts` | Natural-language discussion handoff and linked-task status using original owner message evidence; excludes managed and subagent Sessions |

@@ -85,7 +85,7 @@ class InstallTest(unittest.TestCase):
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 const args = process.argv.slice(2)
-if (args.includes('--version')) { console.log('0.2.1-rc.3'); process.exit(0) }
+if (args.includes('--version')) { console.log('0.2.2-rc.1'); process.exit(0) }
 const home = process.env.DSH_HOME
 if (!home) { console.error('DSH_HOME is missing'); process.exit(1) }
 if (args[0] === 'plugin') { process.exit(0) }

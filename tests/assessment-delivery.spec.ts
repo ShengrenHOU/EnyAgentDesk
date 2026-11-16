@@ -90,6 +90,7 @@ it('filters invalid generated notices at model pre-step while preserving owner a
   const f = fixture(); f.sessions.install(); await expect(f.send()).rejects.toBeInstanceOf(Later)
   const old = f.inbox.nextTurn[0]!, owner = createUserMessage({ content: old.content, source: { kind: 'user' } })
   f.current.mockReturnValue(false)
-  const decision = await agentEvents(f.ctx, f.agent).waterfall('agent/pre-step', { messages: [old, owner], turn: 1, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter' as const, messages: [old, owner] }))
+  const decision = await agentEvents(f.ctx, f.agent).waterfall('agent/pre-step', { messages: [old, owner], turn: 1, step: 1,
+    modelSelection: { provider: 'test', model: 'test' }, signal: new AbortController().signal }, async () => ({ kind: 'enter' as const, messages: [old, owner] }))
   expect(decision).toEqual({ kind: 'enter', messages: [owner] })
 })

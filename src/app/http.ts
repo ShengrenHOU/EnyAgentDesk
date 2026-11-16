@@ -95,7 +95,8 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number | undefined): boolean {
+  if (port === undefined) return false
   const host = req.headers.host
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)

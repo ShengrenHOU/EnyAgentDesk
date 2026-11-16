@@ -5,13 +5,16 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi, type Mock } from 'vitest'
+import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
+import { SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { Setup } from '../src/app/setup.ts'
 import { deferred } from './fixtures/async.ts'
 import { jobRegistry } from './fixtures/host.ts'
+import { sessionQueryFixture } from './fixtures/session-query.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
 import { masterPrompt } from '../src/app/context.ts'
@@ -43,7 +46,7 @@ const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.source
 const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
 let hostContext: Context
 let directory: string
-let controller: { create: ReturnType<typeof vi.fn>; selectModel: ReturnType<typeof vi.fn>; resolveAgent: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn>; inspect: ReturnType<typeof vi.fn> }
+let controller: { create: ReturnType<typeof vi.fn>; selectModel: ReturnType<typeof vi.fn>; resolveAgent: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn>; prompt: ReturnType<typeof vi.fn>; inspect: Mock<(id: string, signal?: AbortSignal) => Promise<SessionInspection>> }
 type RegisteredTool = { name: string; output: { render: (args: unknown, result: unknown) => unknown }; execute: (args: unknown, execution: { signal: AbortSignal }) => Promise<unknown> }
 let tools: Map<string, Map<string, RegisteredTool>>
 type Section = { name: string; text: (context: { signal?: AbortSignal }) => string; interpolate?: boolean }
@@ -218,7 +221,8 @@ beforeEach(async () => {
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(async id => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }), rename: vi.fn(async () => {}),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
-    inspect: vi.fn(async () => ({ events: [] })),
+    inspect: vi.fn(async (id: string): Promise<SessionInspection> => ({ meta: { id: SessionId(id), version: SESSION_FORMAT_VERSION,
+      createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0), events: [] })),
   }
   jobs = jobRegistry()
   const workspaces = new Map<string, FakeWorkspace>()
@@ -234,7 +238,9 @@ beforeEach(async () => {
     list: () => [...workspaces.values()],
     delete: async (id: string) => { workspaces.delete(id) },
   }
-  services = { agents, llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller, sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
+  services = { agents, llm: { resolveCallConfig: vi.fn(async value => value) }, sessionController: controller,
+    sessionQuery: sessionQueryFixture((id, signal) => controller.inspect(id, signal)),
+    sessionPersistence: { flush: vi.fn(async () => {}), open: vi.fn(async () => ({ read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} })) }, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer: { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }, jobs: jobs.service }
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT(), OTHER(), BOT()]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store); store.close()

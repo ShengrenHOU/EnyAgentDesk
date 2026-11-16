@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { registerHttp, sourceHead } from '../src/app/http.ts'
+import { registerHttp, sameOrigin, sourceHead } from '../src/app/http.ts'
 import { attach, close, open } from '../src/app/lines.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
 import { Store } from '../src/app/store.ts'
@@ -18,6 +18,10 @@ import { startRuntime } from './fixtures/host.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
+it('refuses management requests before the host has a bound port', () => {
+  expect(sameOrigin({ headers: { host: '127.0.0.1:undefined', 'x-orchestrator-request': '1' } }, undefined)).toBe(false)
+  expect(sameOrigin({ headers: { host: '127.0.0.1:3086', 'x-orchestrator-request': '1' } }, 3086)).toBe(true)
+})
 it('connects the live Runtime intake service to management discovery', async () => {
   const host = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
   try {

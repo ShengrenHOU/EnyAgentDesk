@@ -4,8 +4,10 @@ from contextlib import closing
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
 import tarfile
@@ -27,6 +29,13 @@ installer = module(Path(__file__).with_name('install-profile-bundle.py'), 'activ
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def data_path(path):
+    value = str(path.resolve())
+    if os.name != 'nt' or value.startswith('\\\\?\\'):
+        return value
+    return '\\\\?\\UNC\\' + value[2:] if value.startswith('\\\\') else '\\\\?\\' + value
 
 
 def write_json(path, value):
@@ -124,15 +133,16 @@ def verify(config, version, commit, wait_seconds):
         time.sleep(2)
 
 
-def activate(config_path, release_dir, pnpm_js, receipt_path, candidate_patch=None, wait_seconds=300, preflight_only=False):
+def activate(config_path, release_dir, pnpm_js, receipt_path, candidate_patch=None, wait_seconds=300, preflight_only=False,
+             candidate_dsh_cli=None):
     config = launcher.validate_config(json.loads(config_path.read_text(encoding='utf-8-sig')))
     if not config.get('stateDir'):
         raise ValueError('Owner-managed activation requires the explicit stateDir')
     with launcher.launch_guard(Path(config['runtime']), 'owner-activation.lock'):
-        return _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only)
+        return _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli)
 
 
-def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only):
+def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli):
     if receipt_path.exists():
         raise ValueError('Use a new private receipt path')
     root = Path(config['runtime'])
@@ -148,6 +158,15 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
     stopped = False
     try:
         target = release_files(release_dir)
+        if candidate_dsh_cli is not None:
+            candidate_dsh_cli = candidate_dsh_cli.resolve()
+            launcher.validate_config({**config, 'dshCli': str(candidate_dsh_cli)})
+            host = json.loads((candidate_dsh_cli.parent.parent / 'package.json').read_text(encoding='utf-8'))
+            if host.get('name') != '@deepseek-ai/dsh' or not isinstance(host.get('version'), str):
+                raise ValueError('The candidate CLI must belong to an installed DSH package')
+            receipt['targetDshVersion'] = host['version']
+            if any(receipt_path.resolve().is_relative_to(directory.resolve()) for directory in [root / config['home'], state_dir]):
+                raise ValueError('Host-upgrade receipts and backups must stay outside the data trees')
         patch_bytes = candidate_patch.read_bytes() if candidate_patch else None
         old_config_bytes = config_path.read_bytes()
         old_patch = (profile / 'cordis.patch.yml').read_bytes()
@@ -192,9 +211,18 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
         with launcher.launch_guard(root):
             receipt['stoppedPid'] = launcher.stop_owned(config)
             stopped = True
+            if candidate_dsh_cli is not None:
+                config['dshCli'] = str(candidate_dsh_cli)
             # Sources may have persisted more records while dispatch was paused; capture the stopped state too.
             before_db = database(db, backup / 'orchestrator.sqlite')
             receipt['beforeTickets'] = len(before_db['tickets'])
+            if candidate_dsh_cli is not None:
+                checkpoint('backup_host_data')
+                shutil.copytree(data_path(root / config['home']), data_path(backup / 'dsh-home'), symlinks=True,
+                                ignore=shutil.ignore_patterns('node_modules', '.plugin-manager'))
+                shutil.copytree(data_path(state_dir), data_path(backup / 'state-data'), symlinks=True,
+                                ignore=shutil.ignore_patterns('work', 'orchestrator.sqlite', 'orchestrator.sqlite-*'))
+                receipt['hostDataBackup'] = str(backup)
             checkpoint('install')
             installer.install(profile, target['archive'], pnpm_js, Path(config['node']), backup / 'install.json')
             helpers = release_dir / 'activation-helpers'
@@ -205,7 +233,7 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
                     raise RuntimeError('Immutable release helper changed')
                 if not dest.exists():
                     dest.write_bytes(data)
-            run([config['node'], helpers / 'check-runtime-peers.mjs', root / 'windows/node_modules/@deepseek-ai/dsh/package.json', profile], operation='peer check')
+            run([config['node'], helpers / 'check-runtime-peers.mjs', launcher.dsh_cli(config).parent.parent / 'package.json', profile], operation='peer check')
             if patch_bytes is not None:
                 staged = profile / 'cordis.patch.yml.activation'
                 staged.write_bytes(patch_bytes)
@@ -282,12 +310,14 @@ if __name__ == '__main__':
     for name in ['config', 'release', 'pnpm-js', 'receipt']:
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--candidate-patch', type=Path)
+    parser.add_argument('--candidate-dsh-cli', type=Path, help='Reviewed side-by-side DSH installation; switched only after the old instance stops')
     parser.add_argument('--wait-seconds', type=int, default=300)
     parser.add_argument('--preflight-only', action='store_true')
     args = parser.parse_args()
     try:
         result = activate(args.config.resolve(), args.release.resolve(), args.pnpm_js.resolve(), args.receipt.resolve(),
-                          args.candidate_patch.resolve() if args.candidate_patch else None, args.wait_seconds, args.preflight_only)
+                          args.candidate_patch.resolve() if args.candidate_patch else None, args.wait_seconds, args.preflight_only,
+                          args.candidate_dsh_cli)
         print(json.dumps({'status': result['status'], 'stage': result['stage'], 'rollback': result['rollback']}))
     except Exception:
         parser.exit(1, 'Activation failed; inspect the private receipt before another attempt.\n')

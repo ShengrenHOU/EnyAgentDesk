@@ -1,6 +1,7 @@
 import importlib.util
 from contextlib import closing
 import json
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -24,15 +25,15 @@ class ActivationTest(unittest.TestCase):
         self.root = Path(temp.name)
         self.profile = self.root / 'home/profiles/test'
         self.profile.mkdir(parents=True)
-        self.state = self.root / 'state'
-        self.state.mkdir()
-        self.db = self.state / 'orchestrator.sqlite'
+        self.state_dir = self.root / 'state'
+        self.state_dir.mkdir()
+        self.db = self.state_dir / 'orchestrator.sqlite'
         with closing(sqlite3.connect(self.db)) as db, db:
             db.executescript("CREATE TABLE kv(key TEXT PRIMARY KEY,value TEXT); INSERT INTO kv VALUES('schema','13'); CREATE TABLE ticket(id TEXT PRIMARY KEY); INSERT INTO ticket VALUES('business-ticket');")
         for name, data in {'package.json': '{"private":true}', 'pnpm-lock.yaml': 'lockfileVersion: 9', 'cordis.patch.yml': '- id: preserved'}.items():
             (self.profile / name).write_text(data, encoding='utf-8')
         self.config = self.root / 'launcher.json'
-        self.config.write_text(json.dumps({'runtime': str(self.root), 'stateDir': str(self.state), 'home': 'home', 'profile': 'test',
+        self.config.write_text(json.dumps({'runtime': str(self.root), 'stateDir': str(self.state_dir), 'home': 'home', 'profile': 'test',
             'port': 3097, 'node': sys.executable, 'python': sys.executable, 'broker': sys.executable}), encoding='utf-8')
         self.original = self.config.read_bytes()
         self.release = self.root / 'release'
@@ -94,6 +95,76 @@ class ActivationTest(unittest.TestCase):
         self.live['paused'] = True
         self.activate()
         self.assertTrue(self.live['paused'])
+
+    def candidate_cli(self):
+        package = self.root / 'host-022/node_modules/@deepseek-ai/dsh'
+        (package / 'lib').mkdir(parents=True)
+        (package / 'lib/bin.js').write_bytes(b'// reviewed CLI fixture')
+        (package / 'package.json').write_text(json.dumps({'name': '@deepseek-ai/dsh', 'version': '0.2.2-rc.1'}))
+        return package / 'lib/bin.js'
+
+    def test_switches_the_host_after_stopping_and_checks_peers_against_the_selected_installation(self):
+        entry = self.candidate_cli()
+        memory = self.state_dir / 'memory'
+        memory.mkdir()
+        (memory / 'MEMORY.md').write_text('Existing experience')
+        modules = self.profile / 'node_modules'
+        modules.mkdir()
+        (modules / 'do-not-copy').write_text('Reinstall from lockfile')
+        stopped = []
+        self.stop.side_effect = lambda config: stopped.append(activation.launcher.dsh_cli(config)) or 123
+        result = self.activate(candidate_dsh_cli=entry)
+        self.assertEqual(stopped[0], self.root / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js')
+        self.assertEqual(json.loads(self.config.read_text())['dshCli'], str(entry.resolve()))
+        self.assertEqual(result['targetDshVersion'], '0.2.2-rc.1')
+        peer = next(call.args[0] for call in self.run.call_args_list if call.kwargs.get('operation') == 'peer check')
+        self.assertEqual(peer[2], (entry.parent.parent / 'package.json').resolve())
+        backup = self.receipt.with_suffix('.backup')
+        self.assertEqual((backup / 'state-data/memory/MEMORY.md').read_text(), 'Existing experience')
+        self.assertFalse((backup / 'dsh-home/profiles/test/node_modules').exists())
+        self.assertTrue((backup / 'dsh-home/profiles/test/package.json').exists())
+
+    def test_rejects_a_recursive_host_backup_before_stopping(self):
+        self.receipt = self.state_dir / 'receipt.json'
+        with self.assertRaisesRegex(ValueError, 'outside the data trees'):
+            self.activate(candidate_dsh_cli=self.candidate_cli())
+        self.stop.assert_not_called()
+
+    def test_host_backup_preserves_long_native_session_paths(self):
+        def cleanup_long_tree():
+            target = self.root.resolve()
+            self.assertEqual(target.parent, Path(tempfile.gettempdir()).resolve())
+            self.assertTrue(target.name.startswith('tmp'))
+            shutil.rmtree(activation.data_path(target))
+        self.addCleanup(cleanup_long_tree)
+        relative = Path('sessions') / ('workspace-' + 'x' * 100) / ('worker-' + 'y' * 32) / 'session.v4.jsonl.zstd'
+        source = Path(activation.data_path(self.root / 'home' / relative))
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b'Original session bytes')
+        self.activate(candidate_dsh_cli=self.candidate_cli())
+        restored = Path(activation.data_path(self.receipt.with_suffix('.backup') / 'dsh-home' / relative))
+        self.assertEqual(restored.read_bytes(), b'Original session bytes')
+
+    def test_host_selection_rolls_back_with_the_original_bundle_without_erasing_new_records(self):
+        entry = self.candidate_cli()
+        def run(command, **kwargs):
+            if kwargs.get('operation') == 'peer check':
+                raise RuntimeError('Candidate peer check failed')
+            if kwargs.get('operation') == 'rollback install':
+                self.live['runtime'] = {'packageVersion': '0.5.38', 'commit': 'b' * 12}
+        self.run.side_effect = run
+        with self.assertRaisesRegex(RuntimeError, 'Candidate peer check'):
+            self.activate(candidate_dsh_cli=entry)
+        self.assertEqual(self.config.read_bytes(), self.original)
+        self.assertEqual(json.loads(self.receipt.read_text())['rollback'], 'restored')
+        with closing(sqlite3.connect(self.db)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM ticket').fetchone()[0], 2)
+
+    def test_invalid_candidate_host_does_not_stop_or_pause_the_existing_instance(self):
+        with self.assertRaises(ValueError):
+            self.activate(candidate_dsh_cli=self.root / 'missing/lib/bin.js')
+        self.stop.assert_not_called()
+        self.pause.assert_not_called()
 
     def test_records_source_backlog_and_provider_failure_without_rolling_back_a_healthy_build(self):
         self.live['health']['worker'] = {'state': 'ready'}

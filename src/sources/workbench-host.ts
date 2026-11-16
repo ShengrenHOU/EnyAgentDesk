@@ -13,9 +13,10 @@ import { KV } from '../kv.ts'
 import { focusRequestKey, readFocus } from './workbench-focus.ts'
 import { deferDecision, forgetDecision, ignoreDecision, readQueue, restoreDecision } from './workbench-queue.ts'
 import { UserError } from '../core/index.ts'
+import { inspectSession } from '../infra/session-inspection.ts'
 
 export const name = 'dsh-superagent-workbench'
-export const inject = ['orchestrator', 'connection', 'sessionController', 'sessionPersistence', 'agents', 'attachments', 'webServer', 'tools']
+export const inject = ['orchestrator', 'connection', 'sessionController', 'sessionPersistence', 'sessionQuery', 'agents', 'attachments', 'webServer', 'tools']
 
 /** Register under DSH's authenticated owner-only API carrier instead of trusting a browser-provided identity. */
 export function apply(ctx: Context): void {
@@ -94,7 +95,7 @@ export function apply(ctx: Context): void {
       if (!source.config<WorkbenchConfig>('workbench')?.ownerId) return Response.json({ error: 'Native workbench is not configured' }, { status: 503 })
       try {
         const sessionId = z.string().min(1).max(200).parse(new URL(request.url).searchParams.get('sessionId'))
-        const inspection = await ctx.sessionController.inspect(sessionId as SessionId, request.signal)
+        const inspection = await inspectSession(ctx.sessionQuery, sessionId, request.signal)
         const throughSeq = inspection.events.at(-1)?.seq
         const context = throughSeq === undefined ? undefined : discussionContext(inspection, sessionId, throughSeq, ctx.attachments)
         return Response.json({ sessionId, throughSeq: throughSeq ?? null, messageCount: context?.messages.length ?? 0,
@@ -171,7 +172,7 @@ export function apply(ctx: Context): void {
         const parsed: unknown = JSON.parse(body)
         const update = action === 'update' ? WorkbenchUpdateSchema.parse(parsed) : undefined
         const input = update ?? WorkbenchRequestSchema.parse(parsed)
-        const context = await readDiscussion(ctx.sessionController, input.sessionId, input.throughSeq, request.signal, ctx.attachments)
+        const context = await readDiscussion(ctx.sessionQuery, input.sessionId, input.throughSeq, request.signal, ctx.attachments)
         if (update?.attentionId) return Response.json(source.tickets.answerAttention(update.ticketId, update.attentionId, update.instruction),
           { headers: { 'cache-control': 'no-store' } })
         const receipt = update

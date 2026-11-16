@@ -18,6 +18,9 @@ import { credentialHelper, workerGitConfig } from '../../src/infra/environment.t
 import type { Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
 import type { Machine } from '../../src/deployment.ts'
+import { sessionQueryFixture } from './session-query.ts'
+import { SessionId, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 
 export const MEMBER = 'ou_alice'
 export const CHAT = 'oc_team'
@@ -234,7 +237,8 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(resolveDefault), rename: vi.fn(async () => {}),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
-    inspect: vi.fn(async () => ({ events: [] })),
+    inspect: vi.fn(async (id: string, _signal?: AbortSignal): Promise<SessionInspection> => ({ meta: { id: SessionId(id), version: SESSION_FORMAT_VERSION,
+      createdAt: 0, isSeeded: false }, inheritedEventCount: SessionLogOffset(0), events: [] })),
   }
   const reader = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
   const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async () => reader) }
@@ -266,6 +270,7 @@ export async function startRuntime(seed?: (store: Store) => void, machine: Parti
     catalog: vi.fn(async () => [...schedules.values()]),
   }
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
+    sessionQuery: sessionQueryFixture((id, signal) => controller.inspect(id, signal)),
     sessionPersistence: persistence, workspaceRegistry, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service, schedule }
   const ctx = new Context()

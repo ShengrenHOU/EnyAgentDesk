@@ -215,6 +215,21 @@ class OwnerLauncherTest(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'native-lab-launcher.json').read_text()), {'pid': 789, 'profile': 'native-lab'})
         self.assertFalse((self.root / 'windows-launcher.json').exists())
 
+    def test_selected_host_path_controls_the_spawned_cli_and_rejects_relative_paths(self):
+        entry = self.root / 'installation/lib/bin.js'
+        entry.parent.mkdir(parents=True)
+        entry.write_bytes(b'// reviewed CLI fixture')
+        config = launcher.validate_config(self.platform_config(dshCli=str(entry)))
+        process = MagicMock(pid=790)
+        process.poll.return_value = None
+        with patch.dict(launcher.os.environ, {'DEEPSEEK_API_KEY': 'synthetic-test-key'}), \
+                patch.object(launcher.subprocess, 'Popen', return_value=process) as start, \
+                patch.object(launcher, 'state', return_value=self.ready):
+            launcher.spawn(config)
+        self.assertEqual(start.call_args.args[0][1], str(entry))
+        with self.assertRaises(ValueError):
+            launcher.validate_config(self.platform_config(dshCli='relative/bin.js'))
+
     def test_personal_only_profile_is_ready_without_feishu_and_empty_repository_is_owned(self):
         personal = {'setup': {'accounts': {'repository': ''}, 'problem': None, 'feishuProblem': None},
                     'health': {'runtime': {'state': 'ready'}}, 'load': {'running': 0}}

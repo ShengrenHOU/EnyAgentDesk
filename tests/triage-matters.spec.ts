@@ -1,3 +1,4 @@
+import { asToolBatch } from './fixtures/tool-batch.ts'
 /** Production pipeline: real durable effects, per-anchor evidence, ownership, and no business effects. */
 import { createHash } from 'node:crypto'
 import { TriageMatters } from '../src/app/triage-matters.ts'
@@ -280,7 +281,7 @@ it.each(['continue', 'related'] as const)('real WeChat native adapter → collec
     records: ['wx1.a', 'wx1.b'].map(id => ({ account: 'owner', conversation: 'chat', record_id: `record-${id}`, message_ref: id, timestamp: Date.parse(now) / 1000,
       time: now, text: `private ${id}`, sender: 'sender', direction: 'incoming', local_type: 1 })),
   } } }))
-  const tools = { execute, schemas: vi.fn() } as unknown as ActivityTools
+  const tools = { execute: asToolBatch(execute), schemas: vi.fn() } as unknown as ActivityTools
   native = () => ({ assertActive() {}, read: (request, cursor, signal) => readWechatImContext(tools, { serverName: 'wechat_readonly' }, request, cursor, signal) })
   const a = await next('wx1.a'); const first = commit(a), b = await next('wx1.b'); prior(b.batch, first)
   expect(b.batch.contexts['wx1.b']!.anchor).toMatchObject({ status: 'unverified', contentMatch: true })

@@ -1,9 +1,10 @@
-/** Capture an immutable discussion prefix through the installed DSH Session Controller. */
-import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+/** Capture an immutable discussion prefix through the installed DSH Session Query. */
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { WorkbenchContextSchema, type WorkbenchContext } from './workbench.ts'
+import { inspectSession } from '../infra/session-inspection.ts'
 
 /** How far back the owner-conversation resource reads, and how many of its messages one page holds. */
 export const CONVERSATION_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -79,9 +80,9 @@ export function discussionContext(inspection: SessionInspection, sessionId: stri
 }
 
 /** Read persisted or attached discussion history without starting another Agent or copying browser-provided history. */
-export async function readDiscussion(controller: Pick<Context['sessionController'], 'inspect'>, sessionId: string,
+export async function readDiscussion(query: Pick<SessionQueryEngine, 'observeSession'>, sessionId: string,
   throughSeq: number, signal?: AbortSignal, attachments?: AttachmentReads): Promise<WorkbenchContext> {
-  return discussionContext(await controller.inspect(sessionId as SessionId, signal), sessionId, throughSeq, attachments)
+  return discussionContext(await inspectSession(query, sessionId, signal), sessionId, throughSeq, attachments)
 }
 
 /** A bounded page of the owner's live main discussion, newest first, from the last 24 hours. */

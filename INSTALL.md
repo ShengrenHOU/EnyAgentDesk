@@ -8,7 +8,7 @@ EnyAgentDesk installs one private DeepSeek Harness profile. That profile serves 
 
 These need the person's hands. Never ask for a secret in the chat.
 
-1. **DeepSeek Harness and a model key.** Install DSH within the `engines.dsh` range of `package.json`, for example `npm install -g @deepseek-ai/dsh@0.2.1-rc.3`. Export a model key in the shell that starts the profile:
+1. **DeepSeek Harness and a model key.** Use Node.js 24.9+ and install DSH within the `engines.dsh` range of `package.json`, for example `npm install -g @deepseek-ai/dsh@0.2.2-rc.1`. Export a model key in the shell that starts the profile:
 
    ```sh
    export DEEPSEEK_API_KEY=...

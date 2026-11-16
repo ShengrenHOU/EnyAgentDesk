@@ -1,6 +1,7 @@
 /** Host intake uses the native authenticated carrier and persisted Session evidence. */
 import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { SessionId, SessionSeq, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -21,7 +22,8 @@ let answer: ConnectionFetchRoute
 let queue: ConnectionFetchRoute
 let queueAction: ConnectionFetchRoute
 let artifact: ConnectionFetchRoute
-let inspect = vi.fn<Context['sessionController']['inspect']>()
+type Inspect = (id: SessionId, signal?: AbortSignal) => Promise<SessionInspection>
+let inspect = vi.fn<Inspect>()
 let discussionTool: ToolDefinition
 it('registers a plain JSON schema without Zod method metadata', () => {
   const visit = (value: unknown): void => {
@@ -37,7 +39,7 @@ beforeEach(async () => {
   await h.controller.create({ sessionId: 'discussion' })
   Object.assign(h.ctx.webServer, { protocol: 'http:' })
   h.ctx.reflect.provide('tools', { register: (tool: ToolDefinition) => { discussionTool = tool; return () => {} } })
-  inspect = vi.fn<Context['sessionController']['inspect']>()
+  inspect = vi.fn<Inspect>()
   Object.assign(h.controller, { inspect })
   h.ctx.reflect.provide('connection', { fetch: { register: (value: ConnectionFetchRoute) => {
     if (value.path.endsWith('/artifact')) artifact = value

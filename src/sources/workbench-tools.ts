@@ -5,6 +5,7 @@ import { KV } from '../kv.ts'
 import { FocusSchema, focusContext, publishFocus } from './workbench-focus.ts'
 import { key } from '../core/index.ts'
 import { discussionContext } from './workbench-session.ts'
+import { inspectSession } from '../infra/session-inspection.ts'
 import { delegateDiscussion, delegateDiscussionTasks, DelegatedTasksSchema, discussionTasks, updateDiscussionTask, workbenchKind, type WorkbenchConfig } from './workbench.ts'
 
 const Request = z.object({ action: z.enum(['delegate', 'update', 'answer', 'status', 'focus', 'focus_context']), focus: FocusSchema.optional(), thread_key: z.string().min(1).optional(),
@@ -33,7 +34,7 @@ export function registerWorkbenchTool(ctx: Context): () => void {
         if (!request.focus) throw new Error('A focus summary is required')
         return publishFocus(source, request.focus, new Date().toISOString())
       }
-      const inspection = await ctx.sessionController.inspect(sessionId, execution.signal)
+      const inspection = await inspectSession(ctx.sessionQuery, sessionId, execution.signal)
       const lastUser = inspection.events.findLast(event => event.type === 'user/message' && event.data.source.kind === 'user')
       if (!lastUser || lastUser.type !== 'user/message') throw new Error('No original owner message is available')
       const snapshot = discussionContext(inspection, sessionId, lastUser.seq, ctx.attachments)

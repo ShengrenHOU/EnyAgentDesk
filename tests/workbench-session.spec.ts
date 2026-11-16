@@ -3,6 +3,8 @@ import { createUserMessage, createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionSeq, SessionLogOffset, SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
+import { inspectSession } from '../src/infra/session-inspection.ts'
 import { expect, it, vi } from 'vitest'
 import { discussionContext, discussionWindow, readDiscussion } from '../src/sources/workbench-session.ts'
 
@@ -65,11 +67,28 @@ it('keeps the newest bounded evidence and marks omitted older discussion as part
   expect(context.messages.at(-1)?.seq).toBe(500)
 })
 
-it('uses the public inspect API without creating or resuming another Session', async () => {
-  const inspect = vi.fn(async () => inspection([user(0, 'Request')]))
+it('reads through the live-preferred query API and releases its observation lease', async () => {
+  const record = inspection([user(0, 'Request')])
+  const dispose = vi.fn()
+  const observation: SessionObservation = { source: 'live', header: record.meta, events: record.events,
+    inheritedEventCount: record.inheritedEventCount, cursor: SessionSeq(0),
+    retain: () => observation, [Symbol.dispose]: dispose }
+  const observeSession = vi.fn(async () => observation)
   const signal = new AbortController().signal
-  expect(await readDiscussion({ inspect }, 'discussion', 0, signal)).toMatchObject({ sessionId: 'discussion', throughSeq: 0 })
-  expect(inspect).toHaveBeenCalledWith('discussion', signal)
+  expect(await readDiscussion({ observeSession }, 'discussion', 0, signal)).toMatchObject({ sessionId: 'discussion', throughSeq: 0 })
+  expect(observeSession).toHaveBeenCalledWith('discussion', { signal, projectionMode: 'none' })
+  expect(dispose).toHaveBeenCalledOnce()
+})
+
+it('releases the observation when materializing its log fails and preserves cancellation', async () => {
+  const record = inspection([user(0, 'Request')]), dispose = vi.fn()
+  const observation: SessionObservation = { source: 'prepared', header: record.meta,
+    get events(): readonly SessionEvent[] { throw new Error('Log read failed') }, inheritedEventCount: record.inheritedEventCount,
+    cursor: SessionSeq(0), retain: () => observation, [Symbol.dispose]: dispose }
+  await expect(inspectSession({ observeSession: async () => observation }, 'discussion')).rejects.toThrow('Log read failed')
+  expect(dispose).toHaveBeenCalledOnce()
+  const reason = new DOMException('Canceled', 'AbortError')
+  await expect(inspectSession({ observeSession: async () => { throw reason } }, 'discussion')).rejects.toBe(reason)
 })
 
 const NOW = Date.parse('2026-11-09T10:00:00.000Z')

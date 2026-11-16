@@ -9,6 +9,7 @@ import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { WORKBENCH, workbenchKind, type WorkbenchConfig } from '../sources/workbench.ts'
 import { discussionWindow } from '../sources/workbench-session.ts'
+import { inspectSession } from '../infra/session-inspection.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, reportHistory, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -136,7 +137,7 @@ async function transcript(host: ResourceHost, ticketId: string) {
   if (executor === 'codex' || executor !== 'dsh' && host.store.get(KV.codex.binding(ticketId))) {
     throw new Error(`Codex transcript browsing is not supported here. Read ticket/${ticketId}/result or ticket/${ticketId}/assignments for the persisted work reports.`)
   }
-  return (await host.context.sessionController.inspect(workerSessionId(ticketId) as SessionId)).events
+  return (await inspectSession(host.context.sessionQuery, workerSessionId(ticketId))).events
 }
 
 const ROUTES: readonly Route[] = [
@@ -163,7 +164,7 @@ const ROUTES: readonly Route[] = [
       throw new Error('Reading the owner conversation requires the enabled native workbench Source with a configured owner')
     }
     if (!host.masterId) throw new Error('The owner conversation is unavailable before the Main Session starts')
-    const inspection = await host.context.sessionController.inspect(host.masterId as SessionId, signal)
+    const inspection = await inspectSession(host.context.sessionQuery, host.masterId, signal)
     const window = discussionWindow(inspection, host.masterId, { offset, ...limit ? { limit } : {},
       attachments: host.context.get('attachments') })
     const references = new Set(window.messages.flatMap(message => message.references))
