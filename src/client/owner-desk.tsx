@@ -29,7 +29,6 @@ const draftTargetOf = (ticket: Pick<TicketRow, 'id' | 'attention'>): ReplyDraftT
 function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, 't'>) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET owner-desk'), [])
   const [group, setGroup] = useState<Group>()
   const [target, setTarget] = useState<TicketRow>()
   const [instruction, setInstruction] = useState('')
@@ -49,6 +48,8 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
   if (seat.current.sessionId !== sessionId) seat.current = { sessionId, wasMain: false }
   if (state?.masterId === sessionId) seat.current.wasMain = true
   const mainSeat = seat.current.wasMain || sessionId.startsWith('orchestrator-')
+  const ownsDesk = !!state && (sessionId === state.masterId || mainSeat)
+  const { data, error, reload } = usePoll(() => ownsDesk ? call('GET owner-desk') : Promise.resolve(undefined), [ownsDesk])
   useEffect(() => {
     if (!mainSeat) return
     let active = true
@@ -250,6 +251,8 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
 }
 
 export function OwnerDesk(props: Props) {
+  // A Ticket worker never owns the global desk or its subscriptions.
+  if (props.sessionId.startsWith('worker-')) return null
   return <PanelProvider t={props.t} openSession={async () => {}} navigate={route => {
     if (route.page === 'execution' && route.id) props.openTicket(route.id)
   }} back={() => {}} backLabel={props.t('ownerDeskTitle')}>

@@ -108,9 +108,14 @@ function TurnReply({ sessionId, target, send }: { sessionId: string; target: Rep
 }
 
 /** Historical Turns expose only a button; only the active editor mounts a polling panel. */
-export function TurnQuickReply({ sessionId, turn, seq, quote, t, send }: {
+type TurnReplyProps = {
   sessionId: string; turn: number; seq: number; quote: string; t: T; send(text: string): Promise<void>
-}) {
+}
+export function TurnQuickReply(props: TurnReplyProps) {
+  if (props.sessionId.startsWith('worker-')) return null
+  return <MainTurnReply {...props} />
+}
+function MainTurnReply({ sessionId, turn, seq, quote, t, send }: TurnReplyProps) {
   const target = { turn, seq, quote }
   const current = useSyncExternalStore(watchTurns, () => (selectedTurn.get(sessionId) ?? newestTurn.get(sessionId))?.seq === seq, none)
   const main = useSyncExternalStore(watchTurns, () => mainSessionId === sessionId, none)

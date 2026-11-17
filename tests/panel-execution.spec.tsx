@@ -3,6 +3,7 @@
 import { act } from 'react'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
+import { VIEW_CHANGE } from '../src/client/view-events.ts'
 import { usePanel, mount, remount, all, find, tab, click, type, text, field, at, settle } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
@@ -34,6 +35,19 @@ it('puts the pending decision above setup and history on the Ticket page', async
   expect(attention.querySelector('textarea')).toBeTruthy()
   expect(document.querySelector('.dt-status-line')!.compareDocumentPosition(attention) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   expect(attention.compareDocumentPosition(find(zh.taskManagement)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+it('keeps one Source evidence disclosure when the Ticket page data refreshes', async () => {
+  at({ page: 'execution', id: 't1' }); await mount()
+  const disclosures = () => all('details').filter(details => details.querySelector('summary')?.textContent === '来源信息')
+  expect(disclosures()).toHaveLength(1)
+  // A refresh changes the Ticket payload, so the page re-renders; the disclosure must not be mounted again beside the old one.
+  for (let index = 0; index < 2; index++) {
+    server.ticketDetails.t1 = { ...server.ticketDetails.t1!, updatedAt: new Date(Date.now() + index * 1000).toISOString() }
+    await act(async () => { document.dispatchEvent(new Event(VIEW_CHANGE)) })
+    await settle()
+    expect(disclosures()).toHaveLength(1)
+  }
 })
 
 it('shows the saved full report for completed and ready Codex Tickets without a DSH Session link', async () => {

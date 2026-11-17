@@ -340,7 +340,7 @@ export function TicketPage({ id }: { id: string }) {
       {data.codexThreadId && <code title="Codex thread">Codex: {data.codexThreadId}</code>}
     </PageHead>
     {error && <LoadState error={error} loading={false} />}
-    <WorkEvidence key={id} t={t} load={before => call('GET tickets/:id/evidence', { id, query: { before } })} />
+    <WorkEvidence key={`${id}:evidence`} t={t} load={before => call('GET tickets/:id/evidence', { id, query: { before } })} />
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
       {data.executor && <LabelValue label={t('term.executor')} value={t(`executorKind.${data.executor}`)} />}
@@ -415,7 +415,7 @@ export function TicketPage({ id }: { id: string }) {
         {data.codexThreadId && <Hint>{t('codexReportHistoryHint')}</Hint>}
       </Details>
     </div>}
-    <TicketManagement key={data.id} ticket={data} reload={reload} ended={!!data.ended} />
+    <TicketManagement key={`${data.id}:management`} ticket={data} reload={reload} ended={!!data.ended} />
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
       <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.3 — 2026-11-17
+
+- Keep Ticket Worker history independent of Main-only work and turn-reply subscriptions. Other conversations read global work only after confirming a Main seat.
+- Reuse triage-handoff status until ownership data changes, rather than rescanning the ledger for every status/health view. Transaction-local and read-only reads stay fresh; rollback cannot cache uncommitted counts.
+- Keep one source-evidence disclosure when a Ticket detail refreshes by using distinct React keys for evidence and management sections.
+
+Upgrade note: no schema, source-scope, executor, memory-path or permission change from 0.9.2. Existing handoff counts and native history are retained.
+
 ## 0.9.2 — 2026-11-17
 
 - Show `autoSummaryEligible` in native memory_stats text, so the model sees the same eligibility value as the structured result.

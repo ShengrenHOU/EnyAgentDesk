@@ -245,6 +245,12 @@ Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestra
 
 `assessmentOutcome` converts the model's answer for `Engine.decide`. Evals checks inferred acceptance against the current Policy again.
 
+### Current status and conversation boundaries
+
+The Store reuses its derived triage-handoff status until an intake-group, production-batch or disposition ownership record changes. Relevant writes invalidate it before view publication. Transaction-local reads and read-only Store instances compute fresh status; rolled-back values never become the shared summary. The persisted records remain authoritative, and ordinary Source checkpoints do not cause a historical-ledger scan.
+
+Ticket Worker conversations render native history and composition without mounting the Main-only work dock or turn-reply data subscriptions. Other conversations wait for a confirmed Main seat before reading global work. Main segment continuation, decisions and draft ownership keep their existing identities.
+
 ### Read-only IM identity and window gateway
 
 `src/sources/im-identity.ts` fixes the identity rules shared by collection and reading. A conversation has one object identity from its provider and native conversation ID; a native message has one message identity independent of later edits; a message version has one dedup key. The reader account belongs to the observation, not to the object: the same Feishu message seen through the bot channel and the user-identity collector keeps one object/message/version identity while each observation retains its own account, Source configuration and Trigger. `activityTrigger` records these keys in `meta.im` without changing the existing Trigger ID or admission. `src/app/im-evidence-revisions.ts` retains its original provider/account/conversation watermark formula as observation provenance, so persisted revisions keep their meaning.

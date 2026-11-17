@@ -6,6 +6,25 @@ import type { Dropped, Receipt, TimelinePlace } from './store.ts'
 export function storeReads(db: DatabaseSync) {
   const values = <T>(sql: string, ...parameters: SQLInputValue[]): T[] => db.prepare(sql).all(...parameters).map(row => JSON.parse(String(row.value)) as T)
   return {
+  /** Indexed ownership count and bounded owner references; no source content is exposed. */
+  triageHandoffStatus: () => {
+    const held = Number(db.prepare('SELECT COUNT(*) AS n FROM disposition WHERE held IS NOT NULL').get()!.n)
+    const owners = db.prepare('SELECT DISTINCT held AS owner FROM disposition WHERE held IS NOT NULL ORDER BY held LIMIT 20')
+      .all().map(row => String(row.owner))
+    const blockedIntake = Number(db.prepare(`SELECT COUNT(*) AS n FROM disposition d
+      JOIN kv accumulation ON accumulation.key = 'automatic-triage-group:' || d.held
+      WHERE d.held IS NOT NULL AND accumulation.value ->> '$.state' = 'blocked'`).get()!.n)
+    const blockedProduction = Number(db.prepare(`SELECT COUNT(*) AS n FROM kv production
+      JOIN json_each(production.value, '$.inputs') input
+      JOIN disposition d ON d.id = input.value ->> '$.triggerId'
+      WHERE production.production_state = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
+        AND production.value ->> '$.id' = d.value ->> '$.triage.batchId'
+        AND production.value ->> '$.owner' = d.value ->> '$.triage.owner'
+        AND production.value ->> '$.ownerGeneration' = d.value ->> '$.triage.generation'`).get()!.n)
+    const blocked = blockedIntake + blockedProduction
+    return { held, blocked, owners, contextComplete: false as const,
+      state: blocked ? 'blocked' as const : held ? 'held_awaiting_judgment' as const : 'empty' as const }
+  },
   unavailableSince: (since: string): Decision[] => values<Decision>('SELECT value FROM decision INDEXED BY decision_unavailable_at WHERE unavailable_at >= ? ORDER BY rowid DESC LIMIT 200', since),
   latestDecision: (thread: string): Decision | undefined => values<Decision>('SELECT value FROM decision WHERE thread = ? ORDER BY rowid DESC LIMIT 1', thread)[0],
   /** Newest first by arrival (`rowid`) order rather than trigger timestamp. */

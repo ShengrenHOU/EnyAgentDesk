@@ -58,13 +58,16 @@ export { SCHEMA_VERSION }
  */
 export class Store implements Repositories {
   readonly db: DatabaseSync
+  private readonly readOnly: boolean
+  private handoffSnapshot?: ReturnType<Store['read']['triageHandoffStatus']>
   /**
    * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
    * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION`, or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(readonly path: string, private readonly report: (error: unknown) => void = () => {}, private readonly invalidateViews: () => void = () => {}, options: { readOnly?: boolean } = {}) {
-    if (options.readOnly) {
+    this.readOnly = options.readOnly === true
+    if (this.readOnly) {
       this.db = new DatabaseSync(path, { readOnly: true })
       this.read = storeReads(this.db)
       return
@@ -188,10 +191,19 @@ export class Store implements Repositories {
   /** Writes a typed KV record under `name`. */
   set<V>(name: Key<V>, value: V): void {
     this.db.prepare('INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value))
+    this.invalidateHandoff(name)
     this.afterCommit(this.invalidateViews)
   }
   /** Deletes the KV record at `name`. */
-  delete(name: string): void { if (this.db.prepare('DELETE FROM kv WHERE key=?').run(name).changes) this.afterCommit(this.invalidateViews) }
+  delete(name: string): void {
+    if (this.db.prepare('DELETE FROM kv WHERE key=?').run(name).changes) {
+      this.invalidateHandoff(name); this.afterCommit(this.invalidateViews)
+    }
+  }
+  /** Unrelated Source checkpoints must not make status readers rescan the handoff ledger. */
+  private invalidateHandoff(name: string): void {
+    if (name.startsWith('automatic-triage-group:') || name.startsWith('triage-production:')) this.handoffSnapshot = undefined
+  }
   /** Returns all KV keys belonging to `family` or starting with `prefix`. */
   keys<V>(family: Family<V, never>): Key<V>[]
   keys(prefix: string): string[]
@@ -226,7 +238,11 @@ export class Store implements Repositories {
       this.indexThreads(trigger)
     }),
     disposition: (id: string): TriggerDisposition | undefined => { const row = this.db.prepare('SELECT value FROM disposition WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TriggerDisposition : undefined },
-    saveDisposition: (id: string, value: TriggerDisposition): void => { this.db.prepare('INSERT INTO disposition VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value)) },
+    saveDisposition: (id: string, value: TriggerDisposition): void => {
+      const before = this.db.prepare("SELECT value -> '$.triage' AS triage FROM disposition WHERE id=?").get(id)?.triage ?? undefined
+      this.db.prepare('INSERT INTO disposition VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value))
+      if (before !== JSON.stringify(value.triage)) this.handoffSnapshot = undefined
+    },
   }
   readonly threads = {
     get: (keyValue: string): Thread | undefined => { const row = this.db.prepare('SELECT value FROM thread WHERE key=?').get(keyValue); return row ? JSON.parse(String(row.value)) as Thread : undefined },
@@ -279,24 +295,11 @@ export class Store implements Repositories {
     save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
   }
-  /** Indexed ownership count and bounded owner references; no source content is exposed. */
+  /** One derived status per relevant write; no view request rescans unchanged handoff records. */
   triageHandoffStatus() {
-    const held = Number(this.db.prepare('SELECT COUNT(*) AS n FROM disposition WHERE held IS NOT NULL').get()!.n)
-    const owners = this.db.prepare('SELECT DISTINCT held AS owner FROM disposition WHERE held IS NOT NULL ORDER BY held LIMIT 20')
-      .all().map(row => String(row.owner))
-    const blockedIntake = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM disposition d
-      JOIN kv accumulation ON accumulation.key = 'automatic-triage-group:' || d.held
-      WHERE d.held IS NOT NULL AND accumulation.value ->> '$.state' = 'blocked'`).get()!.n)
-    const blockedProduction = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM kv production
-      JOIN json_each(production.value, '$.inputs') input
-      JOIN disposition d ON d.id = input.value ->> '$.triggerId'
-      WHERE production.production_state = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
-        AND production.value ->> '$.id' = d.value ->> '$.triage.batchId'
-        AND production.value ->> '$.owner' = d.value ->> '$.triage.owner'
-        AND production.value ->> '$.ownerGeneration' = d.value ->> '$.triage.generation'`).get()!.n)
-    const blocked = blockedIntake + blockedProduction
-    return { held, blocked, owners, contextComplete: false as const,
-      state: blocked ? 'blocked' as const : held ? 'held_awaiting_judgment' as const : 'empty' as const }
+    const status = this.depth || this.readOnly ? this.read.triageHandoffStatus()
+      : this.handoffSnapshot ??= this.read.triageHandoffStatus()
+    return { ...status, owners: [...status.owners] }
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>

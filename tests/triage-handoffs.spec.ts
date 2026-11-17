@@ -220,3 +220,50 @@ it('core rejects malformed owner/generation/membership and wrong primary thread 
   expect(() => engine.releaseFromTriage(receipt.inputs, receipt.owner, NaN)).toThrow('Invalid')
   expect(store.triageHandoffStatus().held).toBe(1)
 })
+
+it('reuses the current handoff projection until ownership data changes', () => {
+  add('a'); adopt()
+  const query = vi.spyOn(store.read, 'triageHandoffStatus')
+  expect(store.triageHandoffStatus()).toMatchObject({ held: 1, blocked: 0 })
+  for (let i = 0; i < 5; i++) expect(store.triageHandoffStatus().held).toBe(1)
+  expect(query).toHaveBeenCalledTimes(1)
+  store.set('github-unrelated-checkpoint', { at: now })
+  store.triggers.saveDisposition('plain', { at: now, fanout: [] })
+  const disposition = store.triggers.disposition('a')!
+  store.triggers.saveDisposition('a', { ...disposition, acked: ['unrelated-receipt'] })
+  const mutable = store.triageHandoffStatus(); mutable.owners.push('not-an-owner')
+  expect(store.triageHandoffStatus().owners).toEqual(['test-owner'])
+  expect(query).toHaveBeenCalledTimes(1)
+  store.set('automatic-triage-group:test-owner', { state: 'blocked' })
+  expect(store.triageHandoffStatus().blocked).toBe(1)
+  expect(query).toHaveBeenCalledTimes(2)
+  store.delete('automatic-triage-group:test-owner')
+  expect(store.triageHandoffStatus().blocked).toBe(0)
+  expect(query).toHaveBeenCalledTimes(3)
+  service.release('test-owner', 1)
+  expect(store.triageHandoffStatus()).toMatchObject({ held: 0, blocked: 0 })
+})
+
+it('reads transaction-local ownership without caching a rolled-back handoff state', () => {
+  add('a'); const receipt = adopt()
+  expect(store.triageHandoffStatus().held).toBe(1)
+  expect(() => store.atomic(() => {
+    service.release(receipt.owner, receipt.generation)
+    expect(store.triageHandoffStatus().held).toBe(0)
+    throw new Error('rollback this release')
+  })).toThrow('rollback this release')
+  expect(store.triageHandoffStatus().held).toBe(1)
+  service.release(receipt.owner, receipt.generation)
+  expect(store.triageHandoffStatus().held).toBe(0)
+})
+
+it('keeps a read-only Store fresh when the owning writer changes handoff data', () => {
+  const reader = new Store(store.path, () => {}, () => {}, { readOnly: true })
+  try {
+    expect(reader.triageHandoffStatus().held).toBe(0)
+    add('a'); const receipt = adopt()
+    expect(reader.triageHandoffStatus().held).toBe(1)
+    service.release(receipt.owner, receipt.generation)
+    expect(reader.triageHandoffStatus().held).toBe(0)
+  } finally { reader.close() }
+})

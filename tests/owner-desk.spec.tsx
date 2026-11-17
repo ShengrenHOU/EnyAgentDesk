@@ -471,3 +471,19 @@ it('holds Main navigation while a turn-tail reply is edited or sending', async (
   await type(editor(), '')
   await vi.waitFor(() => expect(openMain).toHaveBeenCalledOnce())
 })
+
+it('opens a Worker conversation without mounting global desk or reply subscriptions', async () => {
+  await mount('worker-one')
+  expect(server.requests).toEqual([])
+  await act(async () => { root.render(<TurnQuickReply sessionId="worker-one" turn={0} seq={1} quote="Worker report" t={t} send={vi.fn()} />) })
+  await settle()
+  expect(server.requests).toEqual([])
+  expect(document.querySelector('.dt-owner-desk')).toBeNull()
+  expect(document.querySelector('.dt-turn-reply')).toBeNull()
+})
+
+it('reads global desk work only for a confirmed Main seat', async () => {
+  await mount('ordinary-discussion')
+  expect(server.requests.some(request => request.path === 'state')).toBe(true)
+  expect(server.requests.some(request => request.path === 'owner-desk')).toBe(false)
+})
