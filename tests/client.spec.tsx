@@ -30,6 +30,7 @@ function fixture(listed: string[], phase: 'pending' | 'ready' = 'ready') {
   const dictionaries: Record<string, unknown> = {}
   const ctx = {
     on: vi.fn(() => () => {}),
+    remote: { $on: vi.fn((_event: string, _listener: unknown) => () => {}) },
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
     effect: (effect: () => unknown) => { const cleanup = effect(); if (typeof cleanup === 'function') effects.push(() => cleanup()) },
@@ -40,6 +41,7 @@ function fixture(listed: string[], phase: 'pending' | 'ready' = 'ready') {
     get: () => undefined,
   }
   apply(ctx as never)
+  expect(ctx.remote.$on.mock.calls.map(call => call[0])).toEqual(['api-session/added', 'api-session/removed'])
   const entry = (name: string) => entries.find(item => item.options.name === name)!
   return { ctx, entries, dictionaries, publishCatalog: (next: typeof phase, ids: string[]) => { phase = next; listed = ids; catalogListeners.forEach(listener => listener()) }, main: entry('main'), nav: entries.find(item => item.options.name === 'sidebar.panellist' && item.options.id === 'dsh-personal-workbench')! }
 }

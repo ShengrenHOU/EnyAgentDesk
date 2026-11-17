@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4 — 2026-11-17
+
+- Reconcile an opened native Session when an Agent availability or removal notification disagrees with its running state, so completed work does not retain a live elapsed-time indicator.
+- Use the existing native catalog refresh only on a contradiction. Normal notifications and unopened Sessions add no request; native history, reconnect and in-flight ordering keep their existing owners.
+
+Upgrade note: no schema, source-scope, executor, dependency, memory-path or permission change from 0.9.3. Refresh an existing browser tab once to load the new client.
+
 ## 0.9.3 — 2026-11-17
 
 - Keep Ticket Worker history independent of Main-only work and turn-reply subscriptions. Other conversations read global work only after confirming a Main seat.

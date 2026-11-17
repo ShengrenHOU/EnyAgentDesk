@@ -473,6 +473,7 @@ Ticket execution cwd; memory scopes continue to use native cwd/project identity.
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/view-events.ts` | Owner-only invalidation stream on DSH Connection Fetch, bounded by consumer backpressure and cancelled with its request or Runtime |
 | `src/client/view-events.ts` | One browser EventSource subscription, request invalidation on change and reconnect, and plugin-owned cleanup |
+| `src/client/session-status.ts` | Event-triggered native catalog reconciliation when an opened Session disagrees with an Agent availability summary; no history polling or separate execution state |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/lines.ts` | Work lines: the `line:<id>` KV records, `search`, `summary`, `detail`, atomic membership correction (`reassign`) and the open, attach, continue-evidence, close and reopen rules; it grants no authority and routes nothing |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -624,6 +625,7 @@ Ticket execution cwd; memory scopes continue to use native cwd/project identity.
 | `tests/workbench-host.spec.ts` | Native carrier registration, persisted history delegation into a real ticket, caller-field rejection and unavailable-source failures |
 | `tests/workbench-client.spec.tsx` | Discussion action, no implicit submission, uncertain-submit replay and navigation to linked work |
 | `tests/owner-desk.spec.tsx` | Owner desk rendering of the existing overview rows, and the one-line answer that leaves the full editor closed |
+| `tests/session-status.spec.ts` | Installed native Session state under idle/running summaries, release, reconnect and an in-flight catalog race |
 | `tests/quick-reply.spec.tsx` | Main quote reply selection, stable editor/focus across new Turns, per-message drafts, failed sends and in-flight submission; no reply outside Main |
 | `tests/personal-workbench.spec.tsx` | The decision queue's advice and one-click outcomes, folded corrections, silence when empty, the running work and reference sections, and the line list with its recorded judgement |
 | `tests/lines.spec.ts` | Work-line grouping and search evidence, one line per Ticket, closure only after every stage ended, explicit reopen, the derived line view, and open Tickets on no line |

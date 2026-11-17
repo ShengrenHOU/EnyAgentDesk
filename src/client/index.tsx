@@ -12,6 +12,7 @@ import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PluginConfigViewProps } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/remote-events'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
 import { App } from './app.tsx'
@@ -28,6 +29,7 @@ import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Button } from './controls.tsx'
 import { LoadState } from './widgets.tsx'
 import { startViewEvents } from './view-events.ts'
+import { reconcileSessionStatus } from './session-status.ts'
 
 type ClientContext = Context & { sessions: ISessions }
 const NS = 'dshSuperagent'
@@ -102,10 +104,15 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
     home={<DailyHome t={t} send={send} openSession={openSession} />} />
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace', 'layout']
+export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace', 'layout', 'remote']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => startViewEvents(ctx))
+  const reconcile = (id: SessionId, running: boolean) => {
+    void reconcileSessionStatus(ctx.sessions, id, running).catch(error => ctx.logger.warn('Native Session status refresh failed: %s', error))
+  }
+  ctx.remote.$on('api-session/added', summary => reconcile(summary.sessionId, summary.running))
+  ctx.remote.$on('api-session/removed', id => reconcile(id, false))
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   const showTicket = (id: string) => {
