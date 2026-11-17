@@ -15,5 +15,8 @@ export function followupTools(followups: Followups, ticketId?: string): Tool[] {
       } }),
   ]
   return [tool({ name: 'orchestrator_ticket_followup', description: 'Schedule an independent authorized check of an existing ticket. Read its pending followups first, avoid duplicates and preserve the original owner, scope and conversation.',
-    schema: FollowupRequestSchema.extend({ ticket_id: z.string().min(1) }), execute: async ({ ticket_id, ...request }) => followups.schedule(ticket_id, request) })]
+    schema: FollowupRequestSchema.extend({ ticket_id: z.string().min(1) }), execute: async ({ ticket_id, ...request }) => followups.schedule(ticket_id, request) }),
+    tool({ name: 'orchestrator_followup_fire', description: 'Receive a native Schedule reminder for a retained ticket check. Validates its time, current Ticket state and existing mandate, and resumes the same worker at most once. Read the returned refusal reason before deciding what follows.',
+      schema: z.object({ ticket_id: z.string().min(1), request_id: z.string().min(1).max(200) }).strict(),
+      execute: async args => followups.fireNative(args.ticket_id, args.request_id) })]
 }

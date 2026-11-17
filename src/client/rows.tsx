@@ -16,7 +16,9 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
   // A long agenda is quiet by default and remembers whether the owner opened it.
   const [open, setOpen] = useStoredFlag('dsh-superagent/followup-agenda-open', false)
   const [notice, setNotice] = useState('')
-  const migrated = automations.data?.items ?? []
+  const native = automations.data?.items ?? []
+  const automationOf = (item: { ticketId: string; id: string }) => native.find(task => task.ticketId === item.ticketId && task.requestId === item.id)
+  const migrated = native.filter(task => !data?.some(item => item.ticketId === task.ticketId && item.id === task.requestId))
   const available = automations.data?.available ?? false
   const count = data && automations.data ? data.length + migrated.length : '…'
   const automationLabel = (status: 'scheduled' | 'paused' | 'ended' | 'unknown') => status === 'paused' ? t('followupAutomationPaused') : t(status === 'scheduled'
@@ -33,7 +35,8 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
     {open && (data && automations.data ? count ? <ul className="dt-list">
       {data.map(item => <li key={`${item.ticketId}:${item.id}`}>
         <div className="dt-owner-task-head"><button className="dt-open" type="button" onClick={() => openTicket(item.ticketId)}>{item.title}</button>
-          <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag></div>
+          <Tag tone={item.due || item.blocked ? 'warning' : 'quiet'}>{t(item.due ? 'followupDue' : 'followupScheduled')}</Tag>
+          {automationOf(item) && <Tag tone="info">{automationLabel(automationOf(item)!.status)}</Tag>}</div>
         <p><time dateTime={item.at}>{fullTime(item.at, t('lang'))}</time> · {item.reason}</p>
         {item.last && <p className="dt-hint">{t('followupLastResult')}{item.last.summary} · <time dateTime={item.last.at}>{fullTime(item.last.at, t('lang'))}</time></p>}
         {item.blocked && <p className="dt-error">{t(`followupBlock.${item.blocked}`)}</p>}
@@ -43,7 +46,7 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
               at: fullTime(item.at, t('lang')), reason: item.reason })} onConfirm={async () => {
               await call('DELETE tickets/:id/followup', { id: item.ticketId, query: { request_id: item.id } }); await changed()
             }} />
-          {available && !item.due && <ConfirmButton variant="outline" icon="refresh" label={t('followupMigrate')}
+          {available && !item.due && !automationOf(item) && <ConfirmButton variant="outline" icon="refresh" label={t('followupMigrate')}
             title={t('followupMigrateTitle')} message={t('followupMigrateConfirm', { title: item.title,
               at: fullTime(item.at, t('lang')) })} onConfirm={async () => {
               await call('POST tickets/:id/followup/migrate', { id: item.ticketId, body: { request_id: item.id } })

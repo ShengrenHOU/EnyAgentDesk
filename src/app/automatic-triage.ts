@@ -9,6 +9,7 @@ import type { Store } from './store.ts'
 import type { TriageHandoffs } from './triage-handoffs.ts'
 import type { ProductionTriage } from './production-triage.ts'
 import { imScope, observeImEvidence } from './im-evidence-revisions.ts'
+import type { Effects } from './effects.ts'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export const AutomaticRecoverySchema = z.object({ owners: z.array(z.object({ owner: z.string().min(1), generation: z.number().int().positive() }).strict()).min(1).max(20), action: z.enum(['retry','release']) }).strict()
 type Lane = 'live' | 'historical'
@@ -24,6 +25,7 @@ const groups = family<Group>('automatic-triage-group:')
 const claimed = family<string>('automatic-triage-claimed:')
 const served = family<number>('automatic-triage-served:')
 interface Host {
+  effects?: Pick<Effects, 'handle' | 'enqueue' | 'enqueueAt' | 'cancel'>
   store: Store; engine: Engine; handoffs: TriageHandoffs; production: ProductionTriage
   evidence(trigger: Trigger): (ImEvidence & { configuration: string }) | undefined
   enabled(): boolean; historical(): boolean; paused(): boolean; policy(): string; prompt(): string; now?(): string
@@ -33,13 +35,41 @@ const PAGE = 32, MAX_INPUTS = 8, MAX_CHARS = 32_000, DEBOUNCE = 2000, MAX_WAIT =
 export class AutomaticTriage {
   constructor(private readonly host: Host) {
     if (!host.engine.usesRepositories(host.store)) throw new Error('Automatic triage requires one Store')
+    host.effects?.handle('automaticRecovery', async () => {
+      this.migrate()
+      const scan = host.store.get(scanKey)
+      if (scan && scan.cursor < Math.max(scan.highwater, scan.nextHighwater ?? 0)) host.effects!.enqueue('automaticRecovery', 'history', {})
+    }, { limit: () => host.enabled() && host.historical() && !host.paused() ? 1 : 0 })
+    host.effects?.handle('automaticDispatch', async () => { this.dispatch(); this.requestDispatch() },
+      { limit: () => host.enabled() && !host.paused() ? 1 : 0 })
     // Capture a fixed epoch boundary before new source input; an unfinished epoch never moves on restart.
     if (host.enabled()) host.store.atomic(() => {
       const previous = host.store.get(scanKey), highwater = Number(host.store.db.prepare('SELECT COALESCE(MAX(rowid),0) AS n FROM trigger').get()!.n)
+      if (previous?.nextSweep) { delete previous.nextSweep; host.store.set(scanKey, previous) }
       if (!previous) host.store.set(scanKey, { highwater, cursor: 0, scanned: 0, captured: 0, skipped: {} })
       else if (previous.cursor >= previous.highwater && highwater > previous.highwater) host.store.set(scanKey, { highwater, cursor: previous.highwater, scanned: 0, captured: 0, skipped: {} })
       else if (highwater > previous.highwater) host.store.set(scanKey, { ...previous, nextHighwater: Math.max(previous.nextHighwater ?? 0, highwater) })
     })
+  }
+  /** Startup and configuration recovery restore only the fixed unfinished epoch and current windows. */
+  resume(): void {
+    const scan = this.host.store.get(scanKey)
+    if (scan && scan.cursor < Math.max(scan.highwater, scan.nextHighwater ?? 0)) this.host.effects?.enqueue('automaticRecovery', 'history', {})
+    this.requestDispatch()
+  }
+  requestDispatch(): void {
+    const effects = this.host.effects
+    if (!effects) return
+    if (!this.host.enabled() || this.host.store.db.prepare("SELECT 1 FROM kv WHERE production_state = 'queued' LIMIT 1").get()) {
+      effects.cancel('automaticDispatch', 'groups'); return
+    }
+    const active = this.host.store.db.prepare("SELECT value FROM kv WHERE accumulation_state IN ('open', 'sealed')").all()
+    const deadlines = active.map(row => {
+      const group = JSON.parse(String(row.value)) as Group
+      return group.state === 'sealed' ? Date.parse(this.now()) : Math.min(Date.parse(group.lastAt) + DEBOUNCE, Date.parse(group.firstAt) + MAX_WAIT)
+    })
+    if (deadlines.length) effects.enqueueAt('automaticDispatch', 'groups', {}, Math.min(...deadlines))
+    else effects.cancel('automaticDispatch', 'groups')
   }
   private now() { return this.host.now?.() ?? new Date().toISOString() }
   private snapshot(ids: string[], settings?: Settings) {
@@ -74,7 +104,7 @@ export class AutomaticTriage {
     if (!this.host.enabled() || !this.host.historical() || this.host.store.get(claimed(trigger.id))) return false
     const scan = this.host.store.get(scanKey)
     const row = this.host.store.db.prepare('SELECT rowid FROM trigger WHERE id=?').get(trigger.id)
-    return !!scan && !!row && Number(row.rowid) <= Math.max(scan.highwater, scan.nextHighwater ?? 0) && this.host.handoffs.preview([trigger.id]).entries[0]?.eligible === true
+    return !!scan && !!row && Number(row.rowid) > scan.cursor && Number(row.rowid) <= Math.max(scan.highwater, scan.nextHighwater ?? 0) && this.host.handoffs.preview([trigger.id]).entries[0]?.eligible === true
   }
   private capture(id: string, lane: Lane) {
     const { store, handoffs } = this.host
@@ -83,7 +113,7 @@ export class AutomaticTriage {
     if (!preview.entries[0]?.eligible) return preview.entries[0]?.reason ?? 'missing'
     const trigger = store.triggers.get(id)!, evidence = this.host.evidence(trigger)!
     const scope = imScope(evidence), source = hash([evidence.provider, evidence.account]), now = this.now()
-    const row = store.db.prepare("SELECT value FROM kv WHERE key LIKE 'automatic-triage-group:%' AND value ->> '$.scope' = ? AND value ->> '$.lane' = ? AND value ->> '$.state' = 'open' ORDER BY rowid LIMIT 1").get(scope, lane)
+    const row = store.db.prepare("SELECT value FROM kv WHERE accumulation_state = 'open' AND value ->> '$.scope' = ? AND value ->> '$.lane' = ? ORDER BY rowid LIMIT 1").get(scope, lane)
     let group = row ? JSON.parse(String(row.value)) as Group : undefined
     if (group && (!this.matchesSnapshot(group) || handoffs.read(group.owner).state !== 'held')) {
       group.state = handoffs.read(group.owner).state === 'released' ? 'released' : 'blocked'; group.problem = 'Source, settings, policy, prompt or ownership changed; explicit recovery required'
@@ -106,6 +136,7 @@ export class AutomaticTriage {
     if (group.ids.length >= MAX_INPUTS || group.chars >= MAX_CHARS) group.state = 'sealed'
     store.set(claimed(id), group.owner)
     store.set(groups(group.owner), group); observeImEvidence(store, evidence)
+    store.afterCommit(() => this.requestDispatch())
     return 'captured'
   }
   /** One bounded local page, no native/network/model reads and no whole-backlog transaction. */
@@ -119,12 +150,7 @@ export class AutomaticTriage {
         scan.highwater = scan.nextHighwater!; delete scan.nextHighwater; delete scan.completedAt; delete scan.nextSweep
         scan.scanned = 0; scan.captured = 0; scan.skipped = {}
       }
-      if (scan.cursor >= scan.highwater) {
-        if (!scan.completedAt) { scan.completedAt = now; scan.nextSweep = new Date(Date.parse(now) + 60_000).toISOString(); store.set(scanKey, scan); return }
-        if (scan.nextSweep && scan.nextSweep > now) return
-        scan.highwater = Number(store.db.prepare('SELECT COALESCE(MAX(rowid),0) AS n FROM trigger').get()!.n)
-        scan.cursor = 0; scan.scanned = 0; scan.captured = 0; scan.skipped = {}; delete scan.completedAt
-      }
+      if (scan.cursor >= scan.highwater) return
       const rows = store.db.prepare('SELECT rowid,id FROM trigger WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?').all(scan.cursor, scan.highwater, PAGE)
       const deadline = performance.now() + 25
       let processed = 0
@@ -135,7 +161,7 @@ export class AutomaticTriage {
         scan.cursor = Number(row.rowid); scan.scanned++
         if (outcome === 'captured') scan.captured++; else scan.skipped[outcome] = (scan.skipped[outcome] ?? 0) + 1
       }
-      if ((rows.length < PAGE && processed === rows.length) || scan.cursor >= scan.highwater) { scan.cursor = scan.highwater; scan.completedAt = now; scan.nextSweep = new Date(Date.parse(now) + 60_000).toISOString() }
+      if ((rows.length < PAGE && processed === rows.length) || scan.cursor >= scan.highwater) { scan.cursor = scan.highwater; scan.completedAt = now; delete scan.nextSweep }
       store.set(scanKey, scan)
     })
   }
@@ -143,15 +169,19 @@ export class AutomaticTriage {
   maintain() {
     if (!this.host.enabled() || this.host.paused()) return
     this.migrate()
+    this.dispatch()
+  }
+  private dispatch() {
+    if (!this.host.enabled() || this.host.paused()) return
     this.host.store.atomic(() => {
       const { store, handoffs, production } = this.host
-      if (store.db.prepare("SELECT 1 FROM kv WHERE key LIKE 'triage-production:%' AND value ->> '$.state' = 'queued' LIMIT 1").get()) return
+      if (store.db.prepare("SELECT 1 FROM kv WHERE production_state = 'queued' LIMIT 1").get()) return
       const turn = store.get(turnKey) ?? { lane: 'historical' as Lane, sequence: 0 }, now = this.now()
       const debounce = new Date(Date.parse(now) - DEBOUNCE).toISOString(), maxWait = new Date(Date.parse(now) - MAX_WAIT).toISOString()
       const row = store.db.prepare(`SELECT g.value FROM kv g
         LEFT JOIN kv source ON source.key = 'automatic-triage-served:source:' || (g.value ->> '$.source')
         LEFT JOIN kv conversation ON conversation.key = 'automatic-triage-served:conversation:' || (g.value ->> '$.scope')
-        WHERE g.key LIKE 'automatic-triage-group:%' AND (g.value ->> '$.state' = 'sealed' OR
+        WHERE g.accumulation_state IN ('open', 'sealed') AND (g.value ->> '$.state' = 'sealed' OR
           (g.value ->> '$.state' = 'open' AND (g.value ->> '$.lastAt' <= ? OR g.value ->> '$.firstAt' <= ?)))
         ORDER BY (g.value ->> '$.lane' = ?) ASC, COALESCE(CAST(source.value AS INTEGER),0),
           COALESCE(CAST(conversation.value AS INTEGER),0), g.value ->> '$.oldestAt', g.key LIMIT 1`).get(debounce, maxWait, turn.lane)
@@ -180,7 +210,7 @@ export class AutomaticTriage {
   /** Explicit bounded operator recovery, never an automatic reclassification or source acknowledgment. */
   recover(owners: { owner: string; generation: number }[], action: 'retry' | 'release') {
     if (!owners.length || owners.length > 20 || new Set(owners.map(item => item.owner)).size !== owners.length) throw new Error('Choose 1..20 distinct owners')
-    return this.host.store.atomic(() => owners.map(({ owner, generation }) => {
+    return this.host.store.atomic(() => { this.host.store.afterCommit(() => this.requestDispatch()); return owners.map(({ owner, generation }) => {
       const { store, handoffs } = this.host, group = store.get(groups(owner)), manifest = handoffs.read(owner)
       if (!group || manifest.generation !== generation || manifest.state !== 'held' || !['open', 'sealed', 'blocked'].includes(group.state)) throw new Error('Owner is not an unfinished accumulation; use production recovery if transferred')
       if (action === 'release') { handoffs.release(owner, generation); group.state = 'released' }
@@ -190,7 +220,7 @@ export class AutomaticTriage {
       }
       store.set(groups(owner), group)
       return { owner, generation, state: group.state, messages: group.ids.length }
-    }))
+    }) })
   }
   status(after = 0) {
     if (!Number.isSafeInteger(after) || after < 0) throw new Error('Invalid intake cursor')

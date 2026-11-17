@@ -1,5 +1,6 @@
 /** Application composition root and lifecycle manager for dsh-superagent. */
 import { Service, type Context } from '@deepseek-ai/cordis'
+import { ViewEvents, registerViewEvents } from './view-events.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -94,7 +95,7 @@ export class Runtime extends Service implements SourceHost {
   readonly followups: Followups
   readonly passes: Passes
   readonly ready: Promise<void>
-  private readonly board = new HealthBoard()
+  private readonly board = new HealthBoard(() => this.viewEvents.publish())
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
   get masterId(): string {
     const id = this.store.get(KV.runtime.masterId)
@@ -103,6 +104,7 @@ export class Runtime extends Service implements SourceHost {
   }
   /** When this instance started, reported as the running artifact's activation time. */
   readonly startedAt = new Date().toISOString()
+  readonly viewEvents = new ViewEvents()
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
@@ -128,7 +130,8 @@ export class Runtime extends Service implements SourceHost {
     let opened: Store | undefined
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
-      const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report, () => this.viewEvents.publish())
+      this.disposers.push(registerViewEvents(ctx, this.viewEvents))
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -168,7 +171,7 @@ export class Runtime extends Service implements SourceHost {
         tools: (agent, ticket) => ticket ? [...executorTools(this.toolHost, ticket), ...followupTools(this.followups, ticket.id), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request(), ticket.id)] : [...mainTools(this.toolHost, agent), ...(machine.triageHandoff ? automaticTriageTools(this.automaticTriage) : []), ...(machine.triageProduction ? productionTriageTools(this.productionTriage) : []), ...(machine.triageShadow ? triageTools(this.triage) : []), ...(machine.triageHandoff ? triageHandoffTools(this.triageHandoffs) : []), ...followupTools(this.followups), ...managementTools((id, patch) => runtime.engine.updateTicketManagement(id, patch), () => this.passes.request()), ...machine.codex ? routingTools((id, request) => this.transferExecutor(id, request)) : []] })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
+        sourceHost: this, setup, requestPass: () => { this.followups?.resume(); this.automaticTriage?.resume(); this.productionTriage?.maintain(); this.mainSessions?.maintain(); this.passes.request() } })
       const executorHost = { context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         guardExecution: async (ticket: Ticket) => { await sources.guardExecution(store.triggers.get(ticket.origin.triggerId), commands, ticket) },
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), launchReady: (id: string) => effects.launchReady(id), ticketPaused: (id: string) => !!store.tickets.get(id)?.paused, environment, sourceLink: link,
@@ -191,6 +194,18 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, externalAssessments: () => this.productionTriage?.activeCount() ?? 0, deferEvaluation: trigger => this.automaticTriage?.defer(trigger) ?? false, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          store.afterCommit(() => this.viewEvents.publish())
+          store.afterCommit(() => effects.kick())
+          if (event.type === 'eval.updated') store.afterCommit(() => this.scheduleEvaluation(event.data.threadKey, event.data.evalId))
+          if (['trigger.received', 'trigger.requeued', 'trigger.followup', 'decision.recorded', 'decision.updated', 'ticket.ended', 'policy.changed'].includes(event.type)) {
+            store.afterCommit(() => this.passes?.request())
+          }
+          if (event.type === 'decision.recorded') store.afterCommit(() => sessions.pruneAssessments())
+          if (event.type === 'policy.changed') store.afterCommit(() => this.followups?.resume())
+          if ('ticketId' in event.data) {
+            const ticketId = event.data.ticketId
+            store.afterCommit(() => this.followups?.changed(ticketId))
+          }
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -212,7 +227,7 @@ export class Runtime extends Service implements SourceHost {
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
           }
         } })
-      const followups = this.followups = new Followups({ store, engine, paused: () => this.paused(),
+      const followups = this.followups = new Followups({ store, engine, effects, paused: () => this.paused(),
         get masterId() { return runtime.masterId }, schedule: () => followupSchedule(ctx.get('schedule') as HostSchedule | undefined),
         authorized: ticket => policy().revalidate(ticket.mandate) })
       this.mainSessions = new MainSessions({ context: ctx, store, effects, sessions, cwd: machine.stateDir, lifetime: this.lifetime,
@@ -220,6 +235,7 @@ export class Runtime extends Service implements SourceHost {
       this.triageHandoffs = new TriageHandoffs({ store, engine, evidence: trigger => sources.imEvidence(trigger),
         policyVersion: () => policy().version, enabled: () => !!machine.triageHandoff })
       this.productionTriage = new ProductionTriage({ store, engine, handoffs: this.triageHandoffs, effects,
+        capacityChanged: () => { this.automaticTriage?.requestDispatch(); this.passes?.request() },
         header: trigger => sources.imHeader(trigger),
         evidence: trigger => sources.imEvidence(trigger), context: trigger => sources.imContext(trigger, commands),
         enabled: () => !!machine.triageProduction, automaticEnabled: () => !!machine.triageAutomatic, paused: () => this.paused(), policy: () => policy().version,
@@ -232,17 +248,30 @@ export class Runtime extends Service implements SourceHost {
             batchId: batch.id, generation: batch.generation, read: `triage/receipt/${batch.id}/${batch.generation}`,
             instruction: 'Information judgment saved, not business completion or new authority. Read the canonical receipt and triage/matters. Associate meaningful updates with existing authorized work using its evidence/revision; admit new work only under policy. Resolve relevant identity gaps through existing Skills when needed. Ignore routine evidence silently; interrupt the owner only for important results or necessary decisions.' }))
         } })
-      this.automaticTriage = new AutomaticTriage({ store, engine, handoffs: this.triageHandoffs, production: this.productionTriage,
+      this.automaticTriage = new AutomaticTriage({ store, engine, effects, handoffs: this.triageHandoffs, production: this.productionTriage,
         evidence: trigger => sources.imEvidence(trigger), enabled: () => !!machine.triageAutomatic,
         historical: () => !!machine.triageHistorical, paused: () => this.paused(), policy: () => policy().version, prompt: () => String(prompts.current().revision) })
       // Bind tickets created by an earlier version to the executor that owned them before any work is dispatched.
       if (this.executor instanceof ExecutorRouter) this.executor.migrateLegacyBindings()
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
+      const updateEvalsHealth = () => {
+        const time = Date.now()
+        const current = evalsHealth(store, time)
+        evals.set(current)
+        if (current.state !== 'error') { effects.cancel('evalHealth', 'expiry'); return }
+        const dates = store.read.unavailableSince(new Date(time - 3_600_000).toISOString()).map(item => Date.parse(item.at) + 3_600_001).filter(at => at > time)
+        if (dates.length) effects.enqueueAt('evalHealth', 'expiry', {}, Math.min(...dates))
+        else effects.cancel('evalHealth', 'expiry')
+      }
+      effects.handle('evalHealth', async () => { updateEvalsHealth() })
+      effects.handle('evalDeadline', async ({ threadKey, evalId }) => {
+        engine.evaluationDue(threadKey, evalId)
+        this.scheduleEvaluation(threadKey, evalId)
+        this.passes.request()
+      }, { limit: () => this.paused() ? 0 : 1 })
       const evaluateDue = () => {
-        this.productionTriage.maintain(); this.automaticTriage.maintain(); sessions.pruneAssessments(); engine.evaluateDue(); followups.runDue(); evals.set(evalsHealth(store))
-        this.mainSessions.maintain()
-        void followups.maintain().catch(error => ctx.logger.warn('dsh-superagent could not reconcile automations: %s', String(error)))
+        engine.evaluateDue(); updateEvalsHealth()
       }
       const passes = this.passes = new Passes({ engine: { receive: trigger => this.automaticTriage.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
@@ -266,6 +295,13 @@ export class Runtime extends Service implements SourceHost {
     const { held, blocked, owners } = this.store.triageHandoffStatus()
     return { ...this.board.all, ...(held || blocked ? { triageHandoff: { state: blocked || held && !this.machine.triageHandoff ? 'error' as const : 'ready' as const,
       detail: `${held} IM evidence held awaiting context and production judgment (not processed); ${blocked} blocked. Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
+  }
+  private scheduleEvaluation(threadKey: string, evalId: string): void {
+    const evaluation = this.store.threads.get(threadKey)?.evaluating
+    if (evaluation?.id !== evalId || !evaluation.delivered || evaluation.pausedAt || this.paused()) {
+      this.effects.cancel('evalDeadline', evalId); return
+    }
+    this.effects.enqueueAt('evalDeadline', evalId, { threadKey, evalId }, Date.parse(evaluation.deadline))
   }
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
@@ -363,7 +399,11 @@ export class Runtime extends Service implements SourceHost {
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     this.productionTriage.resume()
+    this.automaticTriage.resume()
+    this.followups.resume()
     this.executor.resume()
+    for (const thread of this.store.threads.active()) if (thread.evaluating) this.scheduleEvaluation(thread.key, thread.evaluating.id)
+    this.mainSessions.maintain()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
@@ -403,7 +443,7 @@ export class Runtime extends Service implements SourceHost {
       this.executor.dispose()
       await this.mainSessions.dispose()
       await this.sessions.dispose()
-      for (const dispose of this.disposers.reverse()) dispose()
+      for (const dispose of this.disposers.reverse()) await dispose()
       await this.ctx.sessionPersistence.flush()
     } finally {
       // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.

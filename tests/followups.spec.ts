@@ -320,7 +320,7 @@ it('moves a Ticket check to the host automation through the management API and l
   const migrated = await h.api('POST', `tickets/${ticket.id}/followup/migrate`, { request_id: 'mechanical' })
   expect(migrated.status).toBe(200)
   expect(migrated.body).toMatchObject({ status: 'migrated', automation: { sessionId: h.runtime.masterId, scheduledAt: at } })
-  expect(ticketFollowups(h.runtime.store.tickets.get(ticket.id)!)).toEqual([])
+  expect(ticketFollowups(h.runtime.store.tickets.get(ticket.id)!)).toEqual([expect.objectContaining({ id: 'mechanical', at })])
   const list = await h.api('GET', 'followups/automations')
   expect(list.body).toMatchObject({ available: true,
     items: [expect.objectContaining({ ticketId: ticket.id, requestId: 'mechanical', ticketTitle: ticket.title, status: 'scheduled' })] })

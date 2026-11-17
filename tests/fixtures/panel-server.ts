@@ -319,6 +319,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET owner-desk': { answer: deskView },
+  'GET workbench': { answer: overviewView },
+  'GET source-health': { answer: sourceStatuses },
   'GET triage-matters': { query: ['before', 'limit', 'active'], answer: () => overviewView().triageMatters },
   'GET tickets/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },
   'GET lines/:id/evidence': { query: ['before'], answer: () => ({ items: [], next_offset: null }) },

@@ -1,5 +1,6 @@
 /** Durable one-time follow-ups that return delegated work to its existing ticket and executor, and their one-way move to a DSH automation task. */
 import { z } from 'zod'
+import { Later, type Effects } from './effects.ts'
 import { key, latestReport, liveTicket, runningAssignment, ticketFollowups, waitsForPerson, UserError, type Engine, type Ticket, type TicketFollowup }
   from '../core/index.ts'
 import { KV, family, type Key } from '../kv.ts'
@@ -21,6 +22,7 @@ export interface AutomationRef {
 }
 /** A retained request receipt makes retries after firing, cancellation, replacement or migration idempotent. */
 export interface FollowupReceipt {
+  wakeRequested?: true
   requestId: string
   ticketId: string
   at: string
@@ -84,6 +86,7 @@ export interface SchedulePort {
 }
 
 export interface FollowupsHost {
+  readonly effects?: Pick<Effects, 'enqueue' | 'handle'>
   readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys'> & { tickets: Pick<Store['tickets'], 'get' | 'open'> }
   readonly engine: Pick<Engine, 'note' | 'scheduleFollowup' | 'finishFollowup'>
   /** The main Session a migrated mechanical check reports to. */
@@ -94,16 +97,109 @@ export interface FollowupsHost {
   authorized(ticket: Ticket): boolean
 }
 
-/** Uses the existing orchestration pass and transactional input delivery, with no separate timer process. */
+/** Keeps business waits on Tickets while native Schedule and durable Effects own delivery and recovery. */
 export class Followups {
   /** The reconciliation `maintain` started, kept so concurrent callers join it and a stopping Runtime can wait for it. */
   private maintaining?: Promise<void>
   private readonly reconciling = new Set<string>()
   /** In-flight migrations by marker: concurrent callers join the same Host Schedule write instead of creating a second task. */
   private readonly migrations = new Map<string, Promise<FollowupReceipt>>()
-  constructor(private readonly host: FollowupsHost, private readonly now = () => Date.now()) {}
+  constructor(private readonly host: FollowupsHost, private readonly now = () => Date.now()) {
+    const effects = host.effects
+    if (!effects) return
+    effects.handle('followupSchedule', async ({ ticketId, requestId }) => {
+      const receipt = host.store.get(followupReceipts(ticketId, requestId))
+      if (receipt?.status !== 'scheduled') return
+      const ticket = this.require(ticketId)
+      if (!liveTicket(ticket)) return
+      if (host.store.get(migrationIntents(ticketId, requestId))) {
+        await this.reconcileMigrations()
+        if (host.store.get(migrationIntents(ticketId, requestId))) throw new Later('Native reminder outcome is being reconciled')
+      }
+      if (Date.parse(receipt.at) <= this.now()) {
+        if (!this.fireDue(ticketId, requestId)) throw new Later('Original follow-up is waiting for its condition')
+        return
+      }
+      if (!host.schedule?.()) throw new Later('Native Schedule is unavailable')
+      await this.migrate(ticketId, requestId)
+    }, { limit: () => host.paused() ? 0 : 1 })
+    effects.handle('followupFire', async ({ ticketId, requestId }) => { this.fireNative(ticketId, requestId) },
+      { limit: () => host.paused() ? 0 : 1 })
+    effects.handle('followupCleanup', async ({ automationId }) => {
+      const cleanup = host.store.get(automationCleanups(automationId))
+      if (!cleanup) return
+      const schedule = host.schedule?.()
+      if (!schedule) throw new Later('Native Schedule is unavailable')
+      await this.deleteTask(schedule, cleanup.sessionId, automationId)
+      if (cleanup.cancelReceipt) host.store.atomic(() => {
+        const receipt = host.store.get(followupReceipts(cleanup.ticketId, cleanup.requestId))
+        if (receipt?.status === 'migrated') {
+          host.engine.finishFollowup(cleanup.ticketId, cleanup.requestId, new Date(this.now()).toISOString())
+          host.store.set(followupReceipts(cleanup.ticketId, cleanup.requestId), { ...receipt, status: 'cancelled', finishedAt: new Date(this.now()).toISOString() })
+        }
+      })
+      host.store.delete(automationCleanups(automationId))
+    })
+    effects.handle('followupRestore', async () => {
+      await this.maintain()
+      if (host.store.keys(migrationIntents.prefix).length || host.store.keys(automationCleanups.prefix).length) throw new Later('Native reminder recovery is pending')
+    })
+  }
+
+  /** Startup restores only pending work; Ticket lifecycle events reactivate held native deliveries. */
+  resume(): void {
+    if (!this.host.effects) return
+    this.host.effects.enqueue('followupRestore', 'native-reminders', {})
+    for (const ticket of this.host.store.tickets.open()) {
+      for (const item of ticketFollowups(ticket)) {
+        const receipt = this.host.store.get(followupReceipts(ticket.id, item.id))
+        if (!receipt) this.host.store.set(followupReceipts(ticket.id, item.id), { ticketId: ticket.id, requestId: item.id, at: item.at,
+          reason: item.reason, createdAt: item.createdAt, status: 'scheduled' })
+        if (!receipt || receipt.status === 'scheduled') this.host.effects.enqueue('followupSchedule', key(ticket.id, item.id), { ticketId: ticket.id, requestId: item.id })
+      }
+      this.changed(ticket.id)
+    }
+    for (const name of this.host.store.keys(automationCleanups.prefix)) {
+      const cleanup = this.host.store.get(name as Key<AutomationCleanup>)
+      if (cleanup) this.host.effects.enqueue('followupCleanup', cleanup.automationId, { automationId: cleanup.automationId })
+    }
+  }
+  changed(ticketId: string): void {
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket) || this.blocker(ticket)) return
+    for (const item of ticketFollowups(ticket)) {
+      const receipt = this.host.store.get(followupReceipts(ticketId, item.id))
+      if (receipt?.wakeRequested && receipt.status === 'migrated') this.host.effects?.enqueue('followupFire', key(ticketId, item.id), { ticketId, requestId: item.id })
+    }
+  }
+  private persistCleanup(cleanup: AutomationCleanup): void {
+    this.host.store.set(automationCleanups(cleanup.automationId), cleanup)
+    this.host.effects?.enqueue('followupCleanup', cleanup.automationId, { automationId: cleanup.automationId })
+  }
 
   list(ticketId: string): TicketFollowup[] { return ticketFollowups(this.require(ticketId)) }
+
+  /** A native reminder resumes its exact retained check after current state and mandate validation. */
+  fireNative(ticketId: string, requestId: string): { accepted: boolean; reused?: true; reason?: string } {
+    return this.host.store.atomic(() => {
+      const receipt = this.host.store.get(followupReceipts(ticketId, requestId))
+      if (receipt?.status === 'fired') return { accepted: true, reused: true }
+      if (receipt?.status !== 'migrated' || !receipt.automation) return { accepted: false, reason: 'inactive' }
+      if (Date.parse(receipt.at) > this.now()) return { accepted: false, reason: 'not_due' }
+      const ticket = this.require(ticketId)
+      if (!liveTicket(ticket)) return { accepted: false, reason: 'ended' }
+      const blocked = this.blocker(ticket)
+      if (blocked) {
+        this.host.store.set(followupReceipts(ticketId, requestId), { ...receipt, wakeRequested: true })
+        return { accepted: false, reason: blocked }
+      }
+      this.host.engine.finishFollowup(ticketId, requestId, new Date(this.now()).toISOString())
+      this.host.engine.note(ticketId, `Scheduled follow-up ${requestId} is due (${receipt.at}). ${receipt.reason}\n`
+        + 'Continue this ticket within its existing mandate. Check current evidence and prior outcomes before taking the next action.')
+      this.host.store.set(followupReceipts(ticketId, requestId), { ...receipt, status: 'fired', finishedAt: new Date(this.now()).toISOString() })
+      return { accepted: true }
+    })
+  }
 
   /** All pending checks are a projection of open Tickets, including those held by the same rules as runDue. */
   pending() {
@@ -133,6 +229,7 @@ export class Followups {
       this.host.engine.scheduleFollowup(ticketId, { id: request.request_id, at, reason: request.reason, createdAt })
       const receipt: FollowupReceipt = { requestId: request.request_id, ticketId, at, reason: request.reason, createdAt, status: 'scheduled' }
       this.host.store.set(followupReceipts(ticketId, request.request_id), receipt)
+      this.host.effects?.enqueue('followupSchedule', key(ticketId, request.request_id), { ticketId, requestId: request.request_id })
       return receipt
     })
   }
@@ -143,7 +240,15 @@ export class Followups {
       const ticket = this.require(ticketId)
       const pending = ticketFollowups(ticket).filter(item => !requestId || item.id === requestId)
       if (!pending.length) return { cancelled: false }
-      const receipts = pending.map(item => this.finish(ticket, item, 'cancelled', new Date(this.now()).toISOString()))
+      const receipts = pending.map(item => {
+        const old = this.host.store.get(followupReceipts(ticketId, item.id))
+        const receipt = this.finish(ticket, item, 'cancelled', new Date(this.now()).toISOString())
+        if (old?.automation) {
+          this.persistCleanup({ ticketId, requestId: item.id,
+            sessionId: old.automation.sessionId, automationId: old.automation.id, cancelReceipt: true })
+        }
+        return receipt
+      })
       return { cancelled: true, receipt: receipts[0], ...(receipts.length > 1 ? { receipts } : {}) }
     })
   }
@@ -219,7 +324,7 @@ export class Followups {
 
   /**
    * Retry what a crash or an unavailable Schedule left behind: an uncommitted migration intent, and a task deletion that
-   * failed when its Ticket ended. The orchestration pass calls this; it never creates a second task for one intent.
+   * failed when its Ticket ended. The recovery effect calls this and reuses the original intent identity.
    */
   maintain(): Promise<void> {
     return this.maintaining ??= this.reconcile().finally(() => { this.maintaining = undefined })
@@ -248,7 +353,7 @@ export class Followups {
       const receipt: FollowupReceipt = { requestId: followup.id, ticketId: ticket.id, at: followup.at, reason: followup.reason,
         createdAt: followup.createdAt, status: 'migrated', finishedAt,
         automation: { id: automationId, sessionId: intent.sessionId, title: intent.title, scheduledAt } }
-      this.host.engine.finishFollowup(ticket.id, intent.requestId, finishedAt)
+      if (!this.host.effects) this.host.engine.finishFollowup(ticket.id, intent.requestId, finishedAt)
       this.host.store.set(followupReceipts(ticket.id, intent.requestId), receipt)
       this.host.store.delete(migrationIntents(intent.ticketId, intent.requestId))
       return receipt
@@ -298,7 +403,7 @@ export class Followups {
     try { await this.deleteTask(schedule, item.sessionId, item.id) }
     catch (error) {
       void error
-      this.host.store.set(automationCleanups(item.id), { ticketId: intent.ticketId, requestId: intent.requestId,
+      this.persistCleanup({ ticketId: intent.ticketId, requestId: intent.requestId,
         sessionId: item.sessionId, automationId: item.id })
     }
   }
@@ -310,7 +415,7 @@ export class Followups {
     try { await this.deleteTask(schedule, intent.sessionId, automationId) }
     catch (error) {
       void error
-      this.host.store.set(automationCleanups(automationId), { ticketId: intent.ticketId, requestId: intent.requestId,
+      this.persistCleanup({ ticketId: intent.ticketId, requestId: intent.requestId,
         sessionId: intent.sessionId, automationId })
     }
     const current = this.host.store.get(migrationIntents(intent.ticketId, intent.requestId))
@@ -357,14 +462,21 @@ export class Followups {
   async cancelAutomation(ticketId: string, requestId: string): Promise<{ cancelled: boolean; receipt?: FollowupReceipt }> {
     const receipt = this.host.store.get(followupReceipts(ticketId, requestId))
     if (!receipt?.automation) throw new UserError('unknownFollowup')
+    const automation = receipt.automation
     if (receipt.status === 'cancelled') return { cancelled: true, receipt }
     if (receipt.status !== 'migrated') throw new UserError('followupFinished')
     const schedule = this.host.schedule?.()
     if (!schedule) throw new UserError('automationUnavailable')
+    // Invalidate the business wait before a remote delete can race a late reminder.
+    this.host.store.atomic(() => {
+      this.host.engine.finishFollowup(ticketId, requestId, new Date(this.now()).toISOString())
+      this.host.store.set(followupReceipts(ticketId, requestId), { ...receipt, status: 'cancelled', finishedAt: new Date(this.now()).toISOString() })
+      this.persistCleanup({ ticketId, requestId, sessionId: automation.sessionId, automationId: automation.id, cancelReceipt: true })
+    })
     try {
       await this.deleteTask(schedule, receipt.automation.sessionId, receipt.automation.id)
     } catch (error) {
-      this.host.store.set(automationCleanups(receipt.automation.id), { ticketId, requestId,
+      this.persistCleanup({ ticketId, requestId,
         sessionId: receipt.automation.sessionId, automationId: receipt.automation.id, cancelReceipt: true })
       throw error
     }
@@ -372,6 +484,7 @@ export class Followups {
     return this.host.store.atomic(() => {
       const cancelled: FollowupReceipt = { ...receipt, status: 'cancelled', finishedAt: new Date(this.now()).toISOString() }
       this.host.store.set(followupReceipts(ticketId, requestId), cancelled)
+      this.host.engine.finishFollowup(ticketId, requestId, new Date(this.now()).toISOString())
       return { cancelled: true, receipt: cancelled }
     })
   }
@@ -385,7 +498,7 @@ export class Followups {
       catch {
         failed++
         const automation = receipt.automation!
-        this.host.store.set(automationCleanups(automation.id), { ticketId, requestId: receipt.requestId,
+        this.persistCleanup({ ticketId, requestId: receipt.requestId,
           sessionId: automation.sessionId, automationId: automation.id, cancelReceipt: true })
       }
     }
@@ -394,6 +507,17 @@ export class Followups {
   }
 
   /** An overdue human wait remains due until its existing attention or blocked state is resolved. */
+  private fireDue(ticketId: string, requestId: string): boolean {
+    return this.host.store.atomic(() => {
+      const ticket = this.require(ticketId), item = ticketFollowups(ticket).find(item => item.id === requestId)
+      if (!item || !liveTicket(ticket)) return true
+      if (Date.parse(item.at) > this.now() || this.blocker(ticket) || this.migrationPending(ticketId, requestId)) return false
+      this.finish(ticket, item, 'fired', new Date(this.now()).toISOString())
+      this.host.engine.note(ticketId, `Scheduled follow-up ${item.id} is due (${item.at}). ${item.reason}\n`
+        + 'Continue this ticket within its existing mandate. Check current evidence and prior outcomes before taking the next action.')
+      return true
+    })
+  }
   runDue(): number {
     if (this.host.paused()) return 0
     const now = this.now()
@@ -484,6 +608,6 @@ export class Followups {
 /** The stock instruction a migrated check receives; the marker lets a restart find a task whose local commit was lost. */
 function automationPrompt(ticket: Ticket, followup: TicketFollowup, marker: string): string {
   return `自动化检查（从工单 ${ticket.id} 迁移）\n事项：${ticket.title}\n原定时间：${followup.at}\n检查口径：${followup.reason}\n\n`
-    + `到点后按上述口径只读执行。有实质变化时向本人报告；需要继续原工单时用 orchestrator_ticket_note 告知工单 ${ticket.id} 的 worker。`
-    + `没有变化则静默。不要新建事项，不要直接修改业务数据。\n\nInternal migration id: ${marker}`
+    + `到点后调用 orchestrator_followup_fire，ticket_id=${ticket.id}，request_id=${followup.id}。程序会核对当前事项、约定时间和授权，并把检查交回原 worker。`
+    + `若返回 accepted=false，按 reason 保留等待或结束本次提醒。沿原事项处理后续进展。\n\nInternal migration id: ${marker}`
 }

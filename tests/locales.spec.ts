@@ -28,7 +28,9 @@ it('names every health entry of dsh-superagent itself, which the overview shows 
   // Each entry by its writer: dsh-superagent, the model budget retries, every kind of the effect queue, Channel messages, the
   // Executor and the unavailable Evals of the last hour.
   const entries = { runtime: 0, models: 0, reply: 0, worker: 0, assessment: 0, triageAssessment: 0, launch: 0, delivery: 0, dshLaunch: 0, dshDelivery: 0, codexStage: 0, relay: 0,
-    notice: 0, evals: 0, mainRotate: 0, mainForward: 0, mainContext: 0, mainRetire: 0 } satisfies Record<EffectKind | 'runtime' | 'models' | 'reply' | 'worker' | 'evals', 0>
+    notice: 0, evals: 0, mainRotate: 0, mainForward: 0, mainContext: 0, mainRetire: 0,
+    followupSchedule: 0, followupFire: 0, followupCleanup: 0, followupRestore: 0,
+    automaticRecovery: 0, automaticDispatch: 0, evalDeadline: 0, evalHealth: 0, triageDeadline: 0 } satisfies Record<EffectKind | 'runtime' | 'models' | 'reply' | 'worker' | 'evals', 0>
   expect(Object.keys(entries).filter(name => !(`health.${name}` in zh))).toEqual([])
 })
 

@@ -1,6 +1,4 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
-import { TriageMatters } from './triage-matters.ts'
-import { productionOverview } from './production-triage.ts'
 import type { ProductionTriage } from './production-triage.ts'
 import type { AutomaticTriage } from './automatic-triage.ts'
 import { AutomaticRecoverySchema } from './automatic-triage.ts'
@@ -32,13 +30,14 @@ import type { TextCache } from './cache.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
 import { policyHistory } from './settings-history.ts'
-import { overview, ownerDeskView } from './views/overview.ts'
+import { overview, ownerDeskView, workbenchView } from './views/overview.ts'
 import { settingsView } from './views/settings.ts'
-import { sourcesStatus, type SetupState } from './views/sources.ts'
+import { sourcesStatus, sourcesHealth, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 import { ManagementPatchSchema, updateTicketManagement } from './management.ts'
-import { detail as lineDetail, linesView, MembershipConflict, reassign } from './lines.ts'
+import { readLine, linesView, MembershipConflict, reassign } from './lines.ts'
+import { ReadJobs } from './read-jobs.ts'
 
 export interface HttpHost {
   readonly automaticTriage: Pick<AutomaticTriage, 'status' | 'recover'>
@@ -189,9 +188,8 @@ const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
-function routes(runtime: HttpHost): Routes {
+function routes(runtime: HttpHost, read: ReadJobs['run']): Routes {
   const { store } = runtime
-  const matterViews = new TriageMatters(store, trigger => runtime.sources.imEvidence(trigger), trigger => runtime.sources.imHeader(trigger))
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
@@ -216,16 +214,21 @@ function routes(runtime: HttpHost): Routes {
     },
     'GET followups': () => runtime.followups.pending(),
     'GET followups/automations': () => runtime.followups.automations(),
-    'GET production-triage': ({ query }) => productionOverview(store, trigger => runtime.sources.imEvidence(trigger),
+    'GET production-triage': ({ query }) => read('production',
       z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(50, 100),
-        unresolved: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query),
-      trigger => runtime.sources.imHeader(trigger)),
-    'GET triage-matters': ({ query }) => matterViews.overview(
+        unresolved: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
+    'GET triage-matters': ({ query }) => read('matters',
       z.object({ before: z.coerce.number().int().positive().optional(), limit: limit(25, 100),
         active: z.enum(['true', 'false']).transform(value => value === 'true').optional() }).parse(query)),
-    'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
-      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+    'GET overview': async () => {
+      const history = await read('history')
+      return overview(views(runtime), runtime.health, policyVersion(store.settings()),
+        executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem, history)
+    },
     'GET owner-desk': () => ownerDeskView(views(runtime)),
+    'GET workbench': () => workbenchView(views(runtime), runtime.health, policyVersion(store.settings()),
+      executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
+    'GET source-health': () => sourcesHealth(views(runtime), runtime.health, setupState(runtime)),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
@@ -263,16 +266,16 @@ function routes(runtime: HttpHost): Routes {
     'GET tickets/:id/evidence': ({ params, query }) => {
       if (!store.tickets.get(params.id)) throw new RouteError(404, 'Ticket not found')
       const { before } = z.object({ before: z.coerce.number().int().positive().optional() }).parse(query)
-      return matterViews.workEvidence({ kind: 'ticket', id: params.id }, before)
+      return read('evidence', { target: { kind: 'ticket', id: params.id }, before })
     },
-    'GET lines': () => linesView(store),
+    'GET lines': () => read('lines'),
     'GET lines/:id/evidence': ({ params, query }) => {
-      if (!lineDetail(store, params.id)) throw new RouteError(404, 'Line not found')
+      if (!readLine(store, params.id)) throw new RouteError(404, 'Line not found')
       const { before } = z.object({ before: z.coerce.number().int().positive().optional() }).parse(query)
-      return matterViews.workEvidence({ kind: 'line', id: params.id }, before)
+      return read('evidence', { target: { kind: 'line', id: params.id }, before })
     },
-    'GET lines/:id': ({ params }) => {
-      const line = lineDetail(store, params.id)
+    'GET lines/:id': async ({ params }) => {
+      const line = await read('line', { id: params.id })
       if (!line) throw new RouteError(404, 'Line not found')
       return line
     },
@@ -362,21 +365,23 @@ function match(table: Routes, method: string, segments: string[]) {
   }
   return undefined
 }
-export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
+export function registerHttp(ctx: Context, runtime: HttpHost): () => Promise<void> {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
-  const table = routes(runtime)
+  let reads: ReadJobs | undefined
+  const table = routes(runtime, (kind, page) => (reads ??= new ReadJobs(ctx, runtime.store, runtime.sources)).run(kind, page))
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
-        await runtime.ready
+        // Current views remain readable while startup restores Sessions and source bindings.
+        if (req.method !== 'GET') await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
     } })]
-  return () => { for (const dispose of disposers) dispose() }
+  return async () => { for (const dispose of disposers) dispose(); await reads?.close() }
 }

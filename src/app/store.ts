@@ -28,9 +28,16 @@ export interface SettingsVersion {
  * Older databases missing a column get it added on open and populated by SQLite from stored JSON rows.
  */
 const SETS: Record<string, Record<string, string>> = {
+  decision: { unavailable_at: "TEXT AS (CASE WHEN value ->> '$.kind' = 'unavailable' THEN value ->> '$.at' END)" },
+  kv: {
+    production_state: "TEXT AS (CASE WHEN key >= 'triage-production:' AND key < 'triage-production;' THEN value ->> '$.state' END)",
+    production_owner: "TEXT AS (CASE WHEN key >= 'triage-production:' AND key < 'triage-production;' THEN value ->> '$.owner' END)",
+    accumulation_state: "TEXT AS (CASE WHEN key >= 'automatic-triage-group:' AND key < 'automatic-triage-group;' THEN value ->> '$.state' END)",
+  },
   disposition: { held: "TEXT AS (CASE WHEN value ->> '$.triage.phase' IS NULL THEN value ->> '$.triage.owner' END)" },
   ticket: {
     open: "INTEGER AS (CASE WHEN value -> '$.ended' IS NULL THEN 1 END)",
+    delivered: "TEXT AS (CASE WHEN value ->> '$.ended.by' = 'executor' AND value ->> '$.ended.outcome' IN ('completed', 'merged') THEN value ->> '$.ended.at' END)",
     // Only the latest assignment can be pending or running because the Engine closes one before adding the next.
     active: `INTEGER AS (CASE WHEN json_array_length(value, '$.undelivered') > 0
       OR value ->> '$.assignments[#-1].state' IN ('pending', 'running') THEN 1 END)`,
@@ -56,7 +63,12 @@ export class Store implements Repositories {
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
    * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION`, or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
-  constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
+  constructor(readonly path: string, private readonly report: (error: unknown) => void = () => {}, private readonly invalidateViews: () => void = () => {}, options: { readOnly?: boolean } = {}) {
+    if (options.readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true })
+      this.read = storeReads(this.db)
+      return
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(path)
     this.read = storeReads(this.db)
@@ -120,7 +132,14 @@ export class Store implements Repositories {
     if (!columns('effect').has('generation')) this.db.exec('ALTER TABLE effect ADD COLUMN generation INTEGER NOT NULL DEFAULT 0')
   }
   /** Closes the underlying SQLite database connection. */
-  close(): void { this.db.close() }
+  private readonly closing = new Set<() => void>()
+  /** Register synchronous resource shutdown before the connection closes. */
+  onClose(stop: () => void): void { this.closing.add(stop) }
+  close(): void {
+    for (const stop of this.closing) stop()
+    this.closing.clear()
+    this.db.close()
+  }
   /** Parses JSON `value` columns returned by `sql`. */
   private values<T>(sql: string, ...parameters: SQLInputValue[]): T[] {
     return this.db.prepare(sql).all(...parameters).map(row => JSON.parse(String(row.value)) as T)
@@ -169,16 +188,17 @@ export class Store implements Repositories {
   /** Writes a typed KV record under `name`. */
   set<V>(name: Key<V>, value: V): void {
     this.db.prepare('INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value))
+    this.afterCommit(this.invalidateViews)
   }
   /** Deletes the KV record at `name`. */
-  delete(name: string): void { this.db.prepare('DELETE FROM kv WHERE key=?').run(name) }
+  delete(name: string): void { if (this.db.prepare('DELETE FROM kv WHERE key=?').run(name).changes) this.afterCommit(this.invalidateViews) }
   /** Returns all KV keys belonging to `family` or starting with `prefix`. */
   keys<V>(family: Family<V, never>): Key<V>[]
   keys(prefix: string): string[]
   keys(family: string | { prefix: string }): string[] {
     const prefix = typeof family === 'string' ? family : family.prefix
-    const pattern = `${prefix.replace(/[\\%_]/g, match => `\\${match}`)}%`
-    return this.db.prepare("SELECT key FROM kv WHERE key LIKE ? ESCAPE '\\'").all(pattern).map(row => String(row.key))
+    const pattern = `${prefix.replace(/[[*?]/g, match => `[${match}]`)}*`
+    return this.db.prepare('SELECT key FROM kv WHERE key GLOB ?').all(pattern).map(row => String(row.key))
   }
 
   /** Versioned settings snapshots; the current settings are the snapshot of the latest revision. */
@@ -210,9 +230,9 @@ export class Store implements Repositories {
   }
   readonly threads = {
     get: (keyValue: string): Thread | undefined => { const row = this.db.prepare('SELECT value FROM thread WHERE key=?').get(keyValue); return row ? JSON.parse(String(row.value)) as Thread : undefined },
-    save: (thread: Thread): void => { this.db.prepare('INSERT INTO thread VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(thread.key, JSON.stringify(thread)) },
+    save: (thread: Thread): void => { this.db.prepare('INSERT INTO thread VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(thread.key, JSON.stringify(thread)); this.afterCommit(this.invalidateViews) },
     list: (): Thread[] => this.db.prepare('SELECT value FROM thread ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as Thread),
-    active: (): Thread[] => this.values('SELECT value FROM thread WHERE active = 1 ORDER BY rowid'),
+    active: (): Thread[] => this.values('SELECT value FROM thread INDEXED BY thread_active WHERE active = 1 ORDER BY rowid'),
     /** Updates human-facing thread metadata (`label`, `url`, and `facts`, where `null` removes a fact by ID); no-op if the thread does not exist. */
     describe: (keyValue: string, patch: { label?: string; url?: string; facts?: Record<string, ThreadFact | null> }): void => {
       const thread = this.threads.get(keyValue)
@@ -246,13 +266,13 @@ export class Store implements Repositories {
       .all(JSON.stringify(ids)).map(row => String(row.id))
     },
     get: (id: string): Ticket | undefined => { const row = this.db.prepare('SELECT value FROM ticket WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Ticket : undefined },
-    save: (ticket: Ticket): void => { this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)) },
+    save: (ticket: Ticket): void => { this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)); this.afterCommit(this.invalidateViews) },
     /** Newest first. */
     list: (): Ticket[] => this.values('SELECT value FROM ticket ORDER BY rowid DESC'),
     /** Newest first. */
     open: (): Ticket[] => this.values('SELECT value FROM ticket WHERE open = 1 ORDER BY rowid DESC'),
     /** Newest first. */
-    active: (): Ticket[] => this.values('SELECT value FROM ticket WHERE active = 1 ORDER BY rowid DESC'),
+    active: (): Ticket[] => this.values('SELECT value FROM ticket INDEXED BY ticket_active WHERE active = 1 ORDER BY rowid DESC'),
   }
   readonly decisions = {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
@@ -270,8 +290,7 @@ export class Store implements Repositories {
     const blockedProduction = Number(this.db.prepare(`SELECT COUNT(*) AS n FROM kv production
       JOIN json_each(production.value, '$.inputs') input
       JOIN disposition d ON d.id = input.value ->> '$.triggerId'
-      WHERE production.key >= 'triage-production:' AND production.key < 'triage-production;'
-        AND production.value ->> '$.state' = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
+      WHERE production.production_state = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
         AND production.value ->> '$.id' = d.value ->> '$.triage.batchId'
         AND production.value ->> '$.owner' = d.value ->> '$.triage.owner'
         AND production.value ->> '$.ownerGeneration' = d.value ->> '$.triage.generation'`).get()!.n)

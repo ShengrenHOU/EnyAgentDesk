@@ -44,6 +44,7 @@ export class Evals extends EnginePart {
     } else if (evaluation.delivered && evaluation.deadline <= now) { this.expire(thread); return }
     else return
     this.repo.threads.save(thread)
+    this.emit('eval.updated', { evalId: evaluation.id, threadKey: thread.key, change: policy.paused ? 'paused' : 'resumed' })
   }
   /** An Eval's candidate reached the assessor's Session: its deadline counts from now. */
   delivered(evalId: string, policy: Policy): void {
@@ -53,7 +54,9 @@ export class Evals extends EnginePart {
     const now = this.now()
     thread.evaluating.delivered = now
     thread.evaluating.deadline = new Date(Date.parse(now) + policy.evalTimeoutMs).toISOString()
+    if (policy.paused) thread.evaluating.pausedAt = now
     this.repo.threads.save(thread)
+    this.emit('eval.updated', { evalId, threadKey: thread.key, change: 'delivered' })
   }
   /**
    * An Eval past its deadline queues its Triggers again for a fresh Eval, up to `REQUEUES` times in a row, so a busy
@@ -217,6 +220,7 @@ export class Evals extends EnginePart {
     if (decision?.kind !== 'unavailable') throw new UserError('unknownProblem')
     decision.dismissed = true
     this.repo.decisions.save(decision)
+    this.emit('decision.updated', { decisionId, threadKey: decision.threadKey })
     return decision
   }
   /** Take a Trigger out of its Thread's queue because it was routed by hand. */

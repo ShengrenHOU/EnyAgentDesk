@@ -24,13 +24,13 @@ function setup() {
   engine = new Engine({ repo: store, policy, now: () => now, externalAssessments: () => production?.activeCount() ?? 0, deferEvaluation: trigger => automatic?.defer(trigger) ?? false,
     scope: { scope: () => ({ listened: true as const, observed: true }) }, assessor: { request, release: vi.fn() },
     executor: { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() }, outbox: { send: vi.fn(), status: () => undefined, withdraw: vi.fn() } })
-  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never)
+  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never, () => Date.parse(now))
   handoffs = new TriageHandoffs({ store, engine, evidence, enabled: () => true, policyVersion: () => policyVersion, now: () => now })
-  production = new ProductionTriage({ store, engine, effects, handoffs, evidence, enabled: () => true, automaticEnabled: () => enabled, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now, deliver,
+  production = new ProductionTriage({ store, engine, effects, handoffs, evidence, capacityChanged: () => automatic?.requestDispatch(), enabled: () => true, automaticEnabled: () => enabled, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now, deliver,
     context: trigger => ({ assertActive() { if (!source) throw new Error('Source revoked') }, async read(input) { const anchor = { id: input.anchor.message, version: input.anchor.version, text: trigger.text, createdAt: trigger.at }; return { start: input.start, end: input.end, provider: input.anchor.provider, account: input.anchor.account, conversation: input.anchor.conversation, consistency: 'live_paginated' as const, gaps: ['account_visible_only'], anchor, messages: [anchor] } } }) })
   restartAutomatic()
 }
-function restartAutomatic(resolveEvidence = evidence) { automatic = new AutomaticTriage({ store, engine, handoffs, production, evidence: resolveEvidence, enabled: () => enabled, historical: () => historical, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now }) }
+function restartAutomatic(resolveEvidence = evidence, owned = false) { automatic = new AutomaticTriage({ store, engine, effects: owned ? effects : undefined, handoffs, production, evidence: resolveEvidence, enabled: () => enabled, historical: () => historical, paused: () => paused, policy: () => policyVersion, prompt: () => 'prompt', now: () => now }) }
 const rows = () => store.db.prepare("SELECT value FROM kv WHERE key LIKE 'triage-production:%' ORDER BY rowid").all().map(row => JSON.parse(String(row.value)) as ProductionBatch)
 const advance = (ms = 3000) => { now = new Date(Date.parse(now) + ms).toISOString() }
 async function drain() { effects.start(); await effects.idle('triageAssessment') }
@@ -45,6 +45,40 @@ beforeEach(() => {
   enabled = true; historical = true; paused = false; source = true; configuration = 'config'; policyVersion = 'policy'; now = '2026-11-10T12:00:00.000Z'; request.mockClear(); deliver.mockClear(); setup()
 })
 afterEach(async () => { await effects.drain(); store.close(); rmSync(directory, { recursive: true, force: true }) })
+
+it('finishes fixed recovery through owned effects and keeps new live intake working without rescans', async () => {
+  engine.receive(make('historical-owned', 'old-chat'))
+  restartAutomatic(evidence, true)
+  automatic.resume(); effects.start(); await effects.idle()
+  const completed = automatic.status().scan!
+  expect(completed.cursor).toBe(completed.highwater)
+  expect(effects.pending('automaticRecovery')).toBe(false)
+  advance(3_600_000); await effects.idle()
+  expect(automatic.status().scan).toEqual(completed)
+  automatic.receive(make('live-owned', 'new-chat'))
+  expect(effects.pending('automaticDispatch')).toBe(true)
+  advance(); await effects.idle()
+  expect(rows().flatMap(batch => batch.inputs.map(input => input.triggerId))).toContain('live-owned')
+  expect(automatic.status().scan).toEqual(completed)
+})
+
+it('keeps owned accumulation paused and dispatches it on explicit resume', async () => {
+  restartAutomatic(evidence, true)
+  paused = true; automatic.receive(make('paused-owned')); effects.start(); await effects.idle()
+  expect(rows()).toHaveLength(0)
+  advance(); paused = false; automatic.resume(); await effects.idle()
+  expect(rows()).toHaveLength(1)
+  expect(rows()[0]!.inputs[0]!.triggerId).toBe('paused-owned')
+})
+
+it('does not defer already scanned evidence forever when its source becomes readable', () => {
+  source = false
+  const trigger = make('source-recovered')
+  engine.receive(trigger); restartAutomatic(); automatic.maintain()
+  expect(automatic.status().scan!.cursor).toBe(automatic.status().scan!.highwater)
+  source = true
+  expect(automatic.defer(trigger)).toBe(false)
+})
 
 it('captures 500 fragments once, consumes 63 bounded judgments, and reserves explicit intake', async () => {
   // Same receive/maintain/evaluate sequence and assertions; one outer transaction avoids 500 synchronous commits on the slower runner.

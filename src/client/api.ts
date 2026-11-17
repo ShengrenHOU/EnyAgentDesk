@@ -5,6 +5,7 @@ import { USER_ERRORS, type UserErrorCode } from '../core/errors.ts'
 import type { TicketStage } from '../core/stage.ts'
 import type { SetupProblem } from '../setup.ts'
 import type { T } from './text.ts'
+import { VIEW_CHANGE, viewEventsEnabled } from './view-events.ts'
 
 /** Uses DSH's authenticated owner carrier; question identity makes an uncertain retry idempotent. */
 export async function answerAttention(t: T, ticketId: string, attentionId: string, instruction: string): Promise<void> {
@@ -101,15 +102,26 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
         if (active) setState(previous => ({ ...previous, error: failure instanceof Error ? failure : new Error(String(failure)),
           updatedAt: lastOk.current }))
       } finally {
-        if (active) timer = setTimeout(run, document.hidden ? intervalMs * HIDDEN_FACTOR : intervalMs)
+        if (active && (!viewEventsEnabled() || intervalMs === 1000)) timer = setTimeout(run, document.hidden ? intervalMs * HIDDEN_FACTOR : intervalMs)
       }
     }
-    const run = () => (queue = queue.then(once))
+    let pending = false, dirty = false
+    const run = () => {
+      dirty = true
+      if (pending) return queue
+      pending = true
+      queue = (async () => {
+        try { do { dirty = false; await once() } while (active && dirty) }
+        finally { pending = false }
+      })()
+      return queue
+    }
     const shown = () => { if (!document.hidden) void run() }
     refresh.current = run
     void run()
     document.addEventListener('visibilitychange', shown)
-    return () => { active = false; clearTimeout(timer); document.removeEventListener('visibilitychange', shown) }
+    document.addEventListener(VIEW_CHANGE, run)
+    return () => { active = false; clearTimeout(timer); document.removeEventListener('visibilitychange', shown); document.removeEventListener(VIEW_CHANGE, run) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, intervalMs])
   const reload = useCallback(() => refresh.current(), [])

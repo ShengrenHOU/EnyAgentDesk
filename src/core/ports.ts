@@ -86,10 +86,12 @@ export interface Outbox {
 export interface DomainEvents {
   'trigger.received': { triggerId: string; threads: string[] }
   'eval.started': { evalId: string; threadKey: string; triggerIds: string[]; strength: Strength }
+  'eval.updated': { evalId: string; threadKey: string; change: 'delivered' | 'paused' | 'resumed' }
   'decision.recorded': { decisionId: string; kind: DecisionKind; threadKey: string }
+  'decision.updated': { decisionId: string; threadKey: string }
   'ticket.created': { ticketId: string; decisionId: string; strength: Strength }
   /** Its management fields, follow-ups, or Executor ownership changed without changing its lifecycle. */
-  'ticket.updated': { ticketId: string; change: 'management' | 'followup' | 'executor' | 'answer' }
+  'ticket.updated': { ticketId: string; change: 'management' | 'followup' | 'executor' | 'answer' | 'report' }
   'ticket.resumed': { ticketId: string; triggerId: string }
   'ticket.ended': { ticketId: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   'assignment.started': { ticketId: string; assignmentId: string }

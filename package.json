@@ -5,7 +5,7 @@
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
   "license": "Apache-2.0",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
   "repository": {
@@ -80,11 +80,11 @@
     "manifestVersion": 1
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/check-read-worker.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test && pnpm build",
-    "check:native": "tsc --noEmit && vitest run tests/codex-rpc.spec.ts tests/codex-executor.spec.ts tests/windows-environment.spec.ts tests/core-engine.spec.ts tests/policy.spec.ts tests/docs.spec.ts tests/class-docs.spec.ts tests/lark-workspace.spec.ts tests/lark-event-bridge.spec.ts tests/feishu-read.spec.ts tests/activity-lark.spec.ts tests/activity-wechat.spec.ts tests/activity.spec.ts tests/memory-tools.spec.ts && tsdown",
+    "check:native": "tsc --noEmit && vitest run tests/codex-rpc.spec.ts tests/codex-executor.spec.ts tests/windows-environment.spec.ts tests/core-engine.spec.ts tests/policy.spec.ts tests/docs.spec.ts tests/class-docs.spec.ts tests/lark-workspace.spec.ts tests/lark-event-bridge.spec.ts tests/feishu-read.spec.ts tests/activity-lark.spec.ts tests/activity-wechat.spec.ts tests/activity.spec.ts tests/memory-tools.spec.ts tests/read-jobs.spec.ts && pnpm build",
     "check:codex-live": "vitest run tests/codex-live.spec.ts",
     "check:owner-launcher": "python tests/test_owner_launcher.py"
   },
@@ -126,7 +126,8 @@
     "@deepseek-ai/dsh-tools": "^0.2.2-rc.1",
     "@deepseek-ai/dsh-workspace": "^0.2.2-rc.1",
     "@deepseek-ai/schemastery": "3.19.0",
-    "@deepseek-ai/dsh-session-query": "^0.2.2-rc.1"
+    "@deepseek-ai/dsh-session-query": "^0.2.2-rc.1",
+    "@deepseek-ai/dsh-jobs": "^0.2.2-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
@@ -169,6 +170,7 @@
     "tsdown": "0.22.14",
     "typescript": "6.0.3",
     "vitest": "4.1.8",
-    "@deepseek-ai/dsh-session-query": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-session-query": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-jobs": "0.2.2-rc.1"
   }
 }

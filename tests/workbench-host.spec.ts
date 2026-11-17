@@ -53,6 +53,7 @@ beforeEach(async () => {
   inspect = vi.fn<Inspect>()
   Object.assign(h.controller, { inspect })
   h.ctx.reflect.provide('connection', { fetch: { register: (value: ConnectionFetchRoute) => {
+    if (value.path === '/api/superagent/changes') return async () => {}
     if (value.path.endsWith('/artifact')) artifact = value
     else if (value.path.endsWith('/discussion')) discussion = value
     else if (value.path.endsWith('/summary')) summary = value

@@ -12,6 +12,8 @@ export const SOURCE = 'task'
 export interface TaskState {
   baselineAt?: string
   updated?: Record<string, string>
+  /** When each known task was last listed or read; older states omit it and start their window on the next round. */
+  seenAt?: Record<string, string>
   lastSuccess?: string
   reconciledAt?: string
   eventsAt?: Record<string, string>
@@ -47,12 +49,15 @@ export function taskTime(value: string | null | undefined): string | undefined {
   const time = /^\d+$/.test(value) ? Number(value) : Date.parse(value)
   return Number.isFinite(time) ? new Date(time).toISOString() : undefined
 }
-/** A task's changed fields are its version: the API's `updated_at` when present, otherwise a digest of what it exposes. */
+const assignees = (item: TaskItem): string[] => item.members.filter(member => member.role === 'assignee' || !member.role).map(member => member.id)
+/** A task's changed fields are its version: the API's `updated_at` when present, otherwise a digest of what it exposes, including the normalized assignees. */
 export function taskVersion(item: TaskItem): string {
   const due = item.due?.timestamp ?? ''
-  return item.updated_at ?? key(item.summary, item.status ?? String(item.completed ?? false), due, item.completed_at ?? '', item.description ?? '')
+  return item.updated_at ?? key(item.summary, item.status ?? String(item.completed ?? false), due, item.completed_at ?? '',
+    item.description ?? '', [...new Set(assignees(item))].sort().join(','))
 }
-const assignees = (item: TaskItem): string[] => item.members.filter(member => member.role === 'assignee' || !member.role).map(member => member.id)
+/** How long a known task that left the owner's list keeps its version, so a delayed change or deletion notification is still judged against a known task. */
+const GONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 /** The task creator is the closest thing to a sender; the Source never marks a task as addressed to the agent. */
 export function taskTrigger(item: TaskItem, at: string): Trigger {
   const version = taskVersion(item)
@@ -178,7 +183,22 @@ export async function scanTaskRound(ctx: SourceContext, binding: LarkUserBinding
     emitted += 1
   }
   assertActive()
-  ctx.state.set(KV.workspace.task, { ...state, baselineAt: state.baselineAt ?? now.toISOString(), updated,
+  // A complete list that no longer contains a known task may mean it was reassigned, deleted or only temporarily
+  // unreadable. Keep its last version for a bounded window so a delayed change or deletion notification is still
+  // judged against a known task; absence from the list alone never emits a Trigger or a deletion.
+  const pending = new Set(pendingLarkEvents(ctx, binding.expectedUserId, SOURCE)
+    .flatMap(event => typeof event.payload.task_guid === 'string' ? [event.payload.task_guid] : []))
+  const seenAt: Record<string, string> = {}
+  for (const guid of Object.keys(updated)) seenAt[guid] = now.toISOString()
+  for (const [guid, version] of Object.entries(state.updated ?? {})) {
+    if (updated[guid] !== undefined) continue
+    const lastSeen = state.seenAt?.[guid]
+    const age = lastSeen ? now.getTime() - Date.parse(lastSeen) : Number.NaN
+    if (!pending.has(guid) && Number.isFinite(age) && age >= GONE_RETENTION_MS) continue
+    updated[guid] = version
+    seenAt[guid] = Number.isFinite(age) && lastSeen ? lastSeen : now.toISOString()
+  }
+  ctx.state.set(KV.workspace.task, { ...state, baselineAt: state.baselineAt ?? now.toISOString(), updated, seenAt,
     lastSuccess: now.toISOString(), reconciledAt: now.toISOString() })
   finishLarkReconcile(ctx, binding.expectedUserId, SOURCE, reconnect)
   if (eventFailures.length) throw eventFailure()

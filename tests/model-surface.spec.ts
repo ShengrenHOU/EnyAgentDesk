@@ -41,7 +41,8 @@ interface Skill { name: string; description: string; content: string }
  * Raised for the shared read-only IM window tool that both roles use; its text is kept terse and the raise is only its surface.
  * The worker budget is measured on the actual surface (30,887 prompt + 12,901 tools), not the earlier estimate.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 67_000, worker: 44_500 }
+// The native Schedule continuation tool adds 561 measured characters; allow 800 for its validated schema and purpose.
+const BUDGET: Record<Role, number> = { orchestrator: 67_800, worker: 44_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'

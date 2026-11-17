@@ -62,6 +62,17 @@ it('keeps the Lines section when the optional queue endpoint fails', async () =>
   expect(document.body.textContent).toContain('Native workbench is disabled')
 })
 
+it('opens current work without historical diagnostics and reads audit only on expansion', async () => {
+  await mount()
+  const paths = () => vi.mocked(globalThis.fetch).mock.calls.map(([path]) => new URL(String(path), 'http://localhost').pathname)
+  expect(paths().some(path => path.endsWith('/workbench'))).toBe(true)
+  expect(paths().some(path => /\/(overview|sources|triage-matters|production-triage)$/.test(path))).toBe(false)
+  await act(async () => { [...document.querySelectorAll('summary')].find(item => item.textContent?.includes(zh.homeInformationAudit))!.click() })
+  await settle()
+  expect(paths().some(path => path.endsWith('/triage-matters'))).toBe(true)
+  expect(paths().some(path => path.endsWith('/production-triage'))).toBe(true)
+})
+
 it('offers intake recovery only when the runtime advertises that capability', async () => {
   let enabled = false
   const original = globalThis.fetch
@@ -72,6 +83,8 @@ it('offers intake recovery only when the runtime advertises that capability', as
     return response
   }))
   await mount()
+  await act(async () => { [...document.querySelectorAll('summary')].find(item => item.textContent?.includes(zh.homeInformationAudit))!.click() })
+  await settle()
   expect(document.body.textContent).not.toContain('恢复一批分诊积压')
   enabled = true
   await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
@@ -399,6 +412,18 @@ it('moves a mechanical check to the automation list and deletes it there', async
   expect(server.requests).toContainEqual(expect.objectContaining({ method: 'DELETE', path: 'tickets/t1/followup/automation?request_id=mech' }))
   expect(document.body.textContent).toContain(zh.followupAutomationCancelled)
   expect(server.automations.items).toHaveLength(0)
+})
+
+it('shows one business wait when the same native reminder is also listed', async () => {
+  const check = { id: 'linked', at: '2099-01-01T00:00:00.000Z', reason: 'Check a delivery', createdAt: '2026-11-08T00:00:00Z' }
+  server.ticketDetails.t1!.followups = [check]
+  server.automations = { available: true, items: [{ id: 'native-linked', sessionId: 'master', title: 'Delivery reminder', scheduledAt: check.at,
+    ticketId: 't1', ticketTitle: 'Delivery', requestId: 'linked', status: 'scheduled' }] }
+  await mount()
+  await click(document.querySelector<HTMLButtonElement>('.dt-followup-toggle')!)
+  expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(1)
+  expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain(zh.followupAutomationScheduled)
+  expect([...document.querySelectorAll('.dt-followup-agenda button')].some(button => button.textContent === zh.followupMigrate)).toBe(false)
 })
 
 it('keeps unavailable-evaluation recovery reachable from the daily problem details', async () => {

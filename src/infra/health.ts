@@ -13,6 +13,7 @@ export interface HealthEntry {
  * Claimed by Runtime, Effects, Sessions, DshExecutor, Settings, and SourceRegistry, and read by management HTTP routes.
  */
 export class HealthBoard {
+  constructor(private readonly changed: () => void = () => {}) {}
   private readonly entries: Record<string, Health> = {}
   private readonly claimed = new Set<string>()
   claim(name: string, initial?: Health): HealthEntry {
@@ -22,12 +23,16 @@ export class HealthBoard {
     let held = true
     return {
       get: () => this.entries[name],
-      set: health => { if (held) this.entries[name] = health },
+      set: health => {
+        if (!held || JSON.stringify(this.entries[name]) === JSON.stringify(health)) return
+        this.entries[name] = health; this.changed()
+      },
       release: () => {
         if (!held) return
         held = false
         this.claimed.delete(name)
         delete this.entries[name]
+        this.changed()
       },
     }
   }

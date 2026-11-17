@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { Store } from '../src/app/store.ts'
+import { Store, SCHEMA_VERSION } from '../src/app/store.ts'
 import { Effects } from '../src/app/effects.ts'
 import { TriageHandoffs } from '../src/app/triage-handoffs.ts'
 import { readWechatImContext } from '../src/sources/activity-wechat.ts'
@@ -31,7 +31,7 @@ const options = () => ({ repo: store, policy, now: () => now, externalAssessment
   executor: { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() }, outbox: { send: vi.fn(), status: () => undefined, withdraw: vi.fn() } })
 function setup() {
   engine = new Engine(options())
-  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never)
+  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never, () => Date.parse(now))
   handoffs = new TriageHandoffs({ store, engine, enabled: () => true, evidence, policyVersion: () => version, now: () => now })
   service = new ProductionTriage({ store, engine, handoffs, effects, evidence, context: trigger => native(trigger.id),
     enabled: () => enabled, paused: () => paused, policy: () => version, prompt: () => prompt, now: () => now, deliver })
@@ -298,9 +298,9 @@ it.each(['continue', 'related'] as const)('real WeChat native adapter → collec
 it('upgrades schema13 without rewriting receipts and fences pre-provenance schema13 readers', async () => {
   const a = await next('a'); const first = commit(a), receipt = JSON.stringify(store.get(`triage-production:${first.id}`))
   await effects.drain(); store.set(KV.store.schema, 13); store.close(); store = new Store(join(directory, 'state.sqlite')); setup()
-  expect(store.get(KV.store.schema)).toBe(15); expect(JSON.stringify(store.get(`triage-production:${first.id}`))).toBe(receipt)
+  expect(store.get(KV.store.schema)).toBe(SCHEMA_VERSION); expect(JSON.stringify(store.get(`triage-production:${first.id}`))).toBe(receipt)
   const oldSchema13Guard = () => { const version = store.get(KV.store.schema)!; if (version > 13) throw new Error(`Unsupported orchestrator database version ${version}`) }
-  expect(oldSchema13Guard).toThrow('version 15')
+  expect(oldSchema13Guard).toThrow(`version ${SCHEMA_VERSION}`)
 })
 it('rejects duplicate continue targets clearly before mutating a projection or receipt', async () => {
   const a = await next('a'); const first = commit(a), b = await next('b'); prior(b.batch, first); const proposal = link(b, first)

@@ -6,6 +6,8 @@ import type { Dropped, Receipt, TimelinePlace } from './store.ts'
 export function storeReads(db: DatabaseSync) {
   const values = <T>(sql: string, ...parameters: SQLInputValue[]): T[] => db.prepare(sql).all(...parameters).map(row => JSON.parse(String(row.value)) as T)
   return {
+  unavailableSince: (since: string): Decision[] => values<Decision>('SELECT value FROM decision INDEXED BY decision_unavailable_at WHERE unavailable_at >= ? ORDER BY rowid DESC LIMIT 200', since),
+  latestDecision: (thread: string): Decision | undefined => values<Decision>('SELECT value FROM decision WHERE thread = ? ORDER BY rowid DESC LIMIT 1', thread)[0],
   /** Newest first by arrival (`rowid`) order rather than trigger timestamp. */
   recentTriggers: (offset = 0, limit = 50): Trigger[] => db.prepare('SELECT value FROM trigger ORDER BY rowid DESC LIMIT ? OFFSET ?').all(limit, offset).map(row => JSON.parse(String(row.value)) as Trigger),
   /** Per-source trigger counts since `since`, plus the latest arrival timestamp across all time. */
@@ -73,8 +75,7 @@ export function storeReads(db: DatabaseSync) {
   droppedReplies: (limit = 20): Dropped[] =>
     values('SELECT value FROM outbox WHERE dropped IS NOT NULL ORDER BY dropped DESC LIMIT ?', limit),
   /** Tickets an executor completed or merged at or after `since`; the caller orders the small result for display. */
-  deliveredSince: (since: string): Ticket[] => values(`SELECT value FROM ticket WHERE value ->> '$.ended.by' = 'executor'
-    AND value ->> '$.ended.outcome' IN ('completed', 'merged') AND value ->> '$.ended.at' >= ?`, since),
+  deliveredSince: (since: string): Ticket[] => values('SELECT value FROM ticket WHERE delivered >= ?', since),
   droppedSince: (since: string): number => Number(db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE dropped >= ?').get(since)?.n ?? 0),
   subscribedThreads: (source?: string): Thread[] => source
     ? values('SELECT value FROM thread WHERE subscribed = ? ORDER BY rowid', source)

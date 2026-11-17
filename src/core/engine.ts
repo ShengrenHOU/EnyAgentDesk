@@ -85,6 +85,14 @@ export class Engine {
 
   // The clock
 
+  /** Reconcile only the evaluation that owns this persisted deadline. */
+  evaluationDue(threadKey: string, evalId: string): void {
+    this.repo.atomic(() => {
+      const thread = this.repo.threads.get(threadKey)
+      if (thread?.evaluating?.id === evalId) this.evals.due(thread, this.options.policy())
+    })
+  }
+
   /**
    * Requeues overdue Evals up to `REQUEUES` times before recording `unavailable` (undelivered Evals never expire), starts the
    * Evals of Threads whose queued Triggers wait, within four undecided Evals and three per gate-strength lane, and resumes ended tickets a person's message reached while processing was

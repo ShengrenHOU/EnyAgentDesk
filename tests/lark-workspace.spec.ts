@@ -247,6 +247,90 @@ it('isolates an unreadable pending task so other events and due reconciliation s
   expect(h.received.map(trigger => trigger.meta.guid)).toEqual(['t2', 't1'])
 })
 
+it('finishes a reassignment notification after a partial reconciliation left the task unlisted', async () => {
+  const h = workspace({ task: { enabled: true, config: { ...taskConfig, events: true, reconcileSeconds: 300 } } },
+    { task: { allowed: [{ id: 'ou_creator' }] } })
+  let listed = [taskItem()], unreadable = false
+  const reassigned = taskItem({ updated_at: '1794500000000', members: [{ id: 'ou_other', role: 'assignee', type: 'user' }] })
+  cli(args => {
+    if (args.includes('list')) return taskPage(listed)
+    if (unreadable) throw new Error('Task detail temporarily unavailable')
+    return envelope(reassigned)
+  })
+  const signal = new AbortController().signal
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:00:00Z'))
+  queueTaskEvent(h.ctx.task, binding, { header: { event_id: 'reassign', event_type: 'task.task.update_user_access_v2', create_time: '1794500000000' },
+    event: { task_guid: 't1', event_types: ['task_assignees_update'] } })
+  unreadable = true
+  listed = []
+  await expect(scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:10:00Z'))).rejects.toThrow('retained for retry')
+  expect(store.get(KV.workspace.task)?.updated?.t1).toBe('1794400000000')
+  unreadable = false
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:11:00Z'))
+  expect(h.received).toMatchObject([{ meta: { guid: 't1', assignedToOwner: false, assignees: ['ou_other'] } }])
+  expect(pendingLarkEvents(h.ctx.task, owner, 'task')).toEqual([])
+})
+
+it('treats assignee changes as task versions without updated_at and ignores reordering', async () => {
+  const h = workspace({ task: { enabled: true, config: { ...taskConfig, events: true } } }, { task: { allowed: [{ id: 'ou_creator' }] } })
+  let detail = taskItem({ updated_at: undefined })
+  cli(args => args.includes('list') ? taskPage([taskItem({ updated_at: undefined })]) : envelope(detail))
+  const signal = new AbortController().signal
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:00:00Z'))
+  const change = (id: string, at: string) => ({ header: { event_id: id, event_type: 'task.task.update_user_access_v2', create_time: at },
+    event: { task_guid: 't1', event_types: ['task_assignees_update'] } })
+  const members = (...ids: string[]) => ids.map(id => ({ id, role: 'assignee', type: 'user' }))
+  detail = taskItem({ updated_at: undefined, members: members('ou_other') })
+  queueTaskEvent(h.ctx.task, binding, change('away', '1794500000000'))
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  detail = taskItem({ updated_at: undefined, members: members('ou_other', owner) })
+  queueTaskEvent(h.ctx.task, binding, change('back', '1794500001000'))
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  detail = taskItem({ updated_at: undefined, members: members(owner, 'ou_other') })
+  queueTaskEvent(h.ctx.task, binding, change('reordered', '1794500002000'))
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  detail = taskItem({ updated_at: undefined, members: members('ou_other') })
+  queueTaskEvent(h.ctx.task, binding, change('removed', '1794500003000'))
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  expect(h.received.map(trigger => trigger.meta.assignedToOwner)).toEqual([false, true, false])
+  expect(h.received.map(trigger => trigger.meta.guid)).toEqual(['t1', 't1', 't1'])
+})
+
+it('observes a delayed deletion for a task that already left the list', async () => {
+  const h = workspace({ task: { enabled: true, config: { ...taskConfig, events: true, reconcileSeconds: 300 } } },
+    { task: { allowed: [{ id: 'ou_creator' }] } })
+  let listed = [taskItem()]
+  cli(args => args.includes('list') ? taskPage(listed) : envelope(taskItem()))
+  const signal = new AbortController().signal
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:00:00Z'))
+  listed = []
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:05:00Z'))
+  expect(store.get(KV.workspace.task)?.updated?.t1).toBe('1794400000000')
+  queueTaskEvent(h.ctx.task, binding, { header: { event_id: 'late-delete', event_type: 'task.task.update_user_access_v2', create_time: '1794500000000' },
+    event: { task_guid: 't1', event_types: ['task_deleted'] } })
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  expect(h.received).toMatchObject([{ meta: { guid: 't1', change: 'deleted' } }])
+  expect(store.get(KV.workspace.task)?.updated?.t1).toBeUndefined()
+})
+
+it('forgets a task that left the list after the bounded retention window', async () => {
+  const h = workspace({ task: { enabled: true, config: { ...taskConfig, events: true, reconcileSeconds: 300 } } },
+    { task: { allowed: [{ id: 'ou_creator' }] } })
+  let listed = [taskItem()]
+  cli(args => args.includes('list') ? taskPage(listed) : envelope(taskItem()))
+  const signal = new AbortController().signal
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:00:00Z'))
+  listed = []
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-13T02:05:00Z'))
+  expect(store.get(KV.workspace.task)?.updated?.t1).toBe('1794400000000')
+  await scanTaskRound(h.ctx.task, binding, signal, clockAt('2026-11-21T02:05:00Z'))
+  expect(store.get(KV.workspace.task)?.updated?.t1).toBeUndefined()
+  queueTaskEvent(h.ctx.task, binding, { header: { event_id: 'too-late', event_type: 'task.task.update_user_access_v2', create_time: '1794500000000' },
+    event: { task_guid: 't1', event_types: ['task_deleted'] } })
+  await drainTaskEvents(h.ctx.task, binding, signal)
+  expect(h.received).toEqual([])
+})
+
 const agendaEvent = (overrides: Record<string, unknown> = {}) => ({ event_id: 'e1', summary: 'Technical exchange',
   start_time: { datetime: '2026-11-14T08:00:00+08:00', timezone: 'Asia/Shanghai' },
   end_time: { datetime: '2026-11-14T09:00:00+08:00', timezone: 'Asia/Shanghai' },

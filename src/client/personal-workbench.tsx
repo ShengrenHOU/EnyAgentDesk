@@ -49,11 +49,15 @@ interface ReplyTarget { ticketId: string; title: string; attentionId?: string; q
 export function Workbench(props: Props) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  const { data, error, reload: reloadWorkbench } = usePoll(() => call('GET workbench'), [])
+  const [informationOpen, setInformationOpen] = useState(false)
+  const matters = usePoll(() => informationOpen ? call('GET triage-matters') : Promise.resolve(null), [informationOpen])
+  const judgments = usePoll(() => informationOpen ? call('GET production-triage') : Promise.resolve(null), [informationOpen])
+  const reload = async () => { await Promise.all([reloadWorkbench(), matters.reload(), judgments.reload()]) }
   const queue = usePoll(() => read<QueueView>('queue'), [])
   const ready = !!state?.masterId
   const focus = usePoll(() => read<ReturnType<typeof readFocus>>('focus'), [])
-  const sources = usePoll(() => call('GET sources'), [])
+  const sources = usePoll(() => call('GET source-health'), [])
   const [domainId, setDomainId] = useState('')
   const [chatOpen, setChatOpen] = useState(false)
   const [selected, setSelected] = useState<string>()
@@ -415,9 +419,15 @@ export function Workbench(props: Props) {
         <div className="pw-task-grid">{stalled.map(card)}</div>
       </section>}
       {queue.data && !queue.data.items.length && !stalled.length && <p className="pw-muted">{t('queueSilence')}</p>}
-      {data?.triageMatters && <CanonicalMatters view={data.triageMatters} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
+      <details className="pw-queue-fold" onToggle={event => setInformationOpen(event.currentTarget.open)}>
+        <summary>{t('homeInformationAudit')}{state?.triageHandoff && <> · {t('homeInformationHeld', { count: state.triageHandoff.held, blocked: state.triageHandoff.blocked })}</>}</summary>
+        {informationOpen && <>
+        {matters.error && <LoadState loading={false} error={matters.error} />}
+        {judgments.error && <LoadState loading={false} error={judgments.error} />}
+        {(!matters.data || !judgments.data) && !matters.error && !judgments.error && <LoadState loading />}
+      {matters.data && <CanonicalMatters view={matters.data} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
         openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
-      {data?.productionTriage && <ProductionJudgments view={data.productionTriage} t={t}
+      {judgments.data && <ProductionJudgments view={judgments.data} t={t}
         onRetry={state?.triageRecovery?.production ? async (id, generation) => { await call('POST production-triage/:id/retry', { id, body: { generation } }); await reload() } : undefined}
         onRecoverIntake={state?.triageRecovery?.intake ? async () => {
           const owners: { owner: string; generation: number }[] = []
@@ -440,6 +450,8 @@ export function Workbench(props: Props) {
         loadPage={(before, unresolved) => call('GET production-triage', { query: { before, unresolved } })}
         discussionDisabled={busy || !ready || !!reply && !!instruction.trim()}
         onDiscuss={(id, generation) => void discuss(`请用 orchestrator_read 读取 triage/receipt/${id}/${generation}，只读核对这组信息及原始来源。说明当前判断、未完成原因和已有工作线关联，结合证据建议下一步；已有事项沿原工作线继续讨论。若回执已变更，先读取 triage/receipts 获取当前引用。此请求用于核对与讨论，执行动作沿已有授权。`)} />}
+        </>}
+      </details>
         <PendingFollowups openTicket={setSelected} />
         <div className="pw-section-title"><h2>{t('homeProgress')}</h2><span>{(data?.work?.workingTotal ?? 0) + (data?.work?.waitingTotal ?? 0)}</span>
           <button type="button" className="dt-textlink" onClick={() => props.openWorkList('open')}>{t('homeAllWork')}</button></div>
@@ -480,8 +492,9 @@ export function Workbench(props: Props) {
         {data && data.problems.length > 0 && <details className="pw-runtime-note"><summary>{t('homeRuntimeIssues', { count: data.problems.length })}</summary>
           <ProblemList problems={data.problems} onChanged={reload} /></details>}
       </>}
+      {sources.error && <LoadState loading={false} error={sources.error} />}
       <footer className="pw-sources"><span>{t('homeSourceCaption')}</span>{sources.data?.filter(source => source.enabled).map(source => <span key={source.id}
-        title={source.health.map(item => item.detail).filter(Boolean).join('\n')}><i data-state={source.state} />{localized(t, source.title)}{source.stats.lastAt && <small>{when(source.stats.lastAt, t('lang'))}</small>}</span>)}</footer>
+        title={source.health.map(item => item.detail).filter(Boolean).join('\n')}><i data-state={source.state} />{localized(t, source.title)}</span>)}</footer>
     </main><aside className="pw-collaboration" aria-label={t('homeDiscussion')}><header><div><Icon name="message" size={17} /><strong>{t('homeDiscussion')}</strong></div>
       <Button variant="ghost" size="sm" disabled={!ready} title={ready ? undefined : t('masterNotReady')} onClick={() => { if (state) void props.openSession(state.masterId).catch(error => setFailure(errorText(error))) }}>{t('homeFullConversation')}</Button>
       <Button variant="ghost" size="sm" className="pw-chat-toggle" onClick={() => setChatOpen(false)}>{t('homeBack')}</Button></header>

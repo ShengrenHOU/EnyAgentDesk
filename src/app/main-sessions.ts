@@ -34,6 +34,7 @@ export class MainSessions {
   private readonly views = new Map<string, { sessionId: string; until: number }>()
   private readonly releasedViews = new Set<string>()
   private readonly startedAt = Date.now()
+  private readonly listeners: (() => void)[] = []
   constructor(private readonly host: Host) {
     this.delivery = new AgentDelivery(host.context)
     host.effects.handle('mainRotate', (_payload, from) => this.rotate(from), { limit: () => host.paused() ? 0 : 1 })
@@ -70,6 +71,7 @@ export class MainSessions {
     return { held: input.active }
   }
   private diverted(agent: Agent): boolean {
+    if (this.host.lifetime.aborted) return false
     return agent.id === this.current() ? mainQuiescing(this.host.store, agent.id)
       : agent.session.header.agentPreset === ROUTER_PRESET && agent.session.header.origin !== 'subagent'
         || this.host.store.get(KV.runtime.mainTransition(agent.id))?.phase === 'active'
@@ -89,20 +91,23 @@ export class MainSessions {
   }
   install(): void {
     const { context: ctx } = this.host
-    ctx.on('agent/inbox/inserted', ({ agent, message }) => { if (this.diverted(agent)) this.capture(agent, [message]) })
-    ctx.on('agent/created', ({ agent }) => {
+    this.listeners.push(ctx.on('agent/status', ({ agent, status }) => { if (!this.host.lifetime.aborted && agent.id === this.current() && status === 'idle') this.maintain() }))
+    this.listeners.push(ctx.on('session/event', session => { if (!this.host.lifetime.aborted && session.id === this.current()) this.maintain() }))
+    this.listeners.push(ctx.on('agent/inbox/inserted', ({ agent, message }) => { if (this.diverted(agent)) this.capture(agent, [message]) }))
+    this.listeners.push(ctx.on('agent/created', ({ agent }) => {
       if (this.diverted(agent)) this.capture(agent, [...agent.inbox.nextTurn, ...agent.inbox.nextStep])
-    })
-    ctx.on('agent/pre-step', async (payload, next) => {
+    }))
+    this.listeners.push(ctx.on('agent/pre-step', async (payload, next) => {
       const decision = await next()
       if (!this.diverted(payload.agent)) return decision
       this.capture(payload.agent, payload.messages)
       for (const message of payload.messages) if (this.preparedContext(payload.agent, message)) payload.agent.inject(message)
       return { kind: 'reject' }
-    }, { prepend: true })
+    }, { prepend: true }))
   }
   /** Called by the existing pass; an unconsumed handoff holds the next rotation. */
   maintain(): void {
+    if (this.host.lifetime.aborted) return
     const { context: ctx, effects } = this.host, id = this.current(), agent = ctx.agents.get(id as SessionId)
     if (!agent || agent.status !== 'idle' || !(agent.session.seq >= MAIN_SEGMENT_EVENTS) || this.host.paused()
       || this.awaitingHandoff(agent) || effects.pending('mainRotate') || effects.pending('mainForward')) return
@@ -218,6 +223,7 @@ export class MainSessions {
     this.releasedViews.delete(id)
   }
   async dispose(): Promise<void> {
+    for (const stop of this.listeners.splice(0)) stop()
     await Promise.allSettled([...this.owned.values()].map(handle => this.host.context.agents.withoutInitiator(() => handle.dispose())))
     this.owned.clear()
     this.views.clear(); this.releasedViews.clear()

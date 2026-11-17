@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, useState, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { startViewEvents } from '../src/client/view-events.ts'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
 import { apply } from '../src/client/index.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -13,14 +14,25 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 type Entry = { options: { name: string; id?: string; key?: string; order?: number; locale?: string; label?: () => string }; component: ComponentType<Record<string, unknown>> }
 const t = translator(zh)
+const effects: (() => unknown)[] = []
+class TestEventSource extends EventTarget {
+  static current: TestEventSource
+  static CLOSED = 2
+  readyState = 0
+  closed = false
+  constructor(_url: string) { super(); TestEventSource.current = this }
+  close() { this.closed = true; this.readyState = 2 }
+}
+beforeEach(() => { vi.stubGlobal('EventSource', TestEventSource) })
 function fixture(listed: string[], phase: 'pending' | 'ready' = 'ready') {
   const catalogListeners = new Set<() => void>()
   const entries: Entry[] = []
   const dictionaries: Record<string, unknown> = {}
   const ctx = {
+    on: vi.fn(() => () => {}),
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
-    effect: (effect: () => unknown) => { effect() },
+    effect: (effect: () => unknown) => { const cleanup = effect(); if (typeof cleanup === 'function') effects.push(() => cleanup()) },
     sessions: { list: { getSnapshot: () => ({ phase, byId: Object.fromEntries(listed.map(id => [id, {}])) }), subscribe: (listener: () => void) => { catalogListeners.add(listener); return () => { catalogListeners.delete(listener) } } }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn(), startSession: vi.fn(), unarchiveSession: vi.fn(async () => {}) },
     layout: { selectPanel: vi.fn() },
@@ -45,12 +57,59 @@ const openMaster = async (container: HTMLElement) => {
 }
 const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
-  if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
+  if (path === 'overview' || path === 'workbench') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
   if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
   return Response.json({ error: 'unavailable' }, { status: 503 })
 }))
-afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); window.history.replaceState(null, '', '/') })
+afterEach(() => { for (const cleanup of effects.splice(0).reverse()) cleanup(); vi.unstubAllGlobals(); sessionStorage.clear(); window.history.replaceState(null, '', '/') })
+
+it('refreshes subscribed views on changes and reconnect without periodic reads', async () => {
+  vi.useFakeTimers()
+  const stop = startViewEvents({ on: vi.fn(() => () => {}) } as never), read = vi.fn(async () => 'current')
+  const root = createRoot(document.createElement('div'))
+  function Harness() { usePoll(read, []); return null }
+  try {
+    await act(async () => { root.render(<Harness />) })
+    expect(read).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(read).toHaveBeenCalledTimes(1)
+    await act(async () => { TestEventSource.current.dispatchEvent(new Event('change')) })
+    expect(read).toHaveBeenCalledTimes(2)
+    await act(async () => { TestEventSource.current.dispatchEvent(new Event('open')) })
+    expect(read).toHaveBeenCalledTimes(3)
+  } finally { act(() => root.unmount()); stop(); vi.useRealTimers() }
+  expect(TestEventSource.current.closed).toBe(true)
+})
+
+it('reopens a terminal startup stream and clears a stale view error even when its data is unchanged', async () => {
+  vi.useFakeTimers()
+  let reset!: () => void, failed = false
+  const stop = startViewEvents({ on: (_name: string, listener: () => void) => { reset = listener; return () => {} } } as never)
+  const read = vi.fn(async () => { if (failed) throw new Error('Service restarting'); return 'current' })
+  const container = document.createElement('div'), root = createRoot(container)
+  function Harness() { const { data, error } = usePoll(read, []); return <span>{error?.message ?? data}</span> }
+  try {
+    await act(async () => { root.render(<Harness />) })
+    const old = TestEventSource.current
+    failed = true; old.readyState = TestEventSource.CLOSED
+    await act(async () => { old.dispatchEvent(new Event('error')) })
+    expect(container.textContent).toBe('Service restarting')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    expect(old.closed).toBe(true); expect(TestEventSource.current).not.toBe(old)
+    failed = false
+    await act(async () => { TestEventSource.current.dispatchEvent(new Event('open')) })
+    expect(container.textContent).toBe('current')
+    const connected = TestEventSource.current
+    reset(); expect(connected.closed).toBe(true); expect(TestEventSource.current).not.toBe(connected)
+    const last = TestEventSource.current
+    last.readyState = TestEventSource.CLOSED
+    await act(async () => { last.dispatchEvent(new Event('error')) })
+    stop()
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(TestEventSource.current).toBe(last)
+  } finally { act(() => root.unmount()); stop(); vi.useRealTimers() }
+})
 
 it('opens the registered Superagent panel for its explicit browser entry only', () => {
   expect(fixture([]).ctx.layout.selectPanel).not.toHaveBeenCalled()

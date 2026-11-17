@@ -9,6 +9,15 @@ import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
 
 export interface EffectPayloads {
+  evalDeadline: { threadKey: string; evalId: string }
+  evalHealth: Record<string, never>
+  triageDeadline: { generation: number }
+  automaticRecovery: Record<string, never>
+  automaticDispatch: Record<string, never>
+  followupSchedule: { ticketId: string; requestId: string }
+  followupFire: { ticketId: string; requestId: string }
+  followupCleanup: { automationId: string }
+  followupRestore: Record<string, never>
   /** Move one idle Main segment, forward its native inbox, and retire old targets durably. */
   mainRotate: Record<string, never>
   mainForward: { from: string; message: import('@deepseek-ai/dsh-llm').UserMessage }
@@ -61,18 +70,25 @@ export class Effects {
   private readonly broken = new Set<EffectKind>()
   private seq: number
   private scheduled = false
+  private timer?: ReturnType<typeof setTimeout>
   /** Effects run only between `start` and `drain`; rows queued before `start` wait, such as while setup is incomplete. */
   private started = false
   private stopped = false
   constructor(private readonly store: Store, private readonly board: Pick<HealthBoard, 'claim'>, private readonly now = () => Date.now()) {
     this.seq = Number(store.db.prepare('SELECT IFNULL(MAX(seq), 0) AS seq FROM effect').get()?.seq ?? 0)
+    store.onClose(() => { this.stopped = true; clearTimeout(this.timer) })
   }
   /** Upserts an effect in the caller's transaction, coalescing with any waiting row of the same kind and key while keeping its queue position. */
   enqueue<K extends EffectKind>(kind: K, key: string, payload: EffectPayloads[K]): void {
+    this.enqueueAt(kind, key, payload, this.now())
+  }
+  /** Save one owned operation's next attempt in the existing durable queue. */
+  enqueueAt<K extends EffectKind>(kind: K, key: string, payload: EffectPayloads[K], at: number): void {
+    if (!Number.isSafeInteger(at)) throw new Error('Effect due time must be an integer timestamp')
     this.store.db.prepare(`INSERT INTO effect (kind, key, value, seq, due, since) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(kind, key) DO UPDATE
       SET value = excluded.value, generation = generation + 1, attempts = 0, error = '', due = excluded.due`)
-      .run(kind, key, JSON.stringify(payload), ++this.seq, this.now(), new Date(this.now()).toISOString())
-    this.kick()
+      .run(kind, key, JSON.stringify(payload), ++this.seq, at, new Date(this.now()).toISOString())
+    this.store.afterCommit(() => this.kick())
   }
   handle<K extends EffectKind>(kind: K, run: Handler<K>['run'], options: Options<K> = {}): void {
     if (this.handlers.has(kind)) throw new Error(`The ${kind} effects already have a handler`)
@@ -93,7 +109,7 @@ export class Effects {
   /** Drops a queued row by kind and key; if it is already running, that attempt finishes normally. */
   cancel(kind: EffectKind, key: string): void {
     this.store.db.prepare('DELETE FROM effect WHERE kind = ? AND key = ?').run(kind, key)
-    this.store.afterCommit(() => { this.report(kind) })
+    this.store.afterCommit(() => { this.report(kind); this.kick() })
   }
   start(): void { this.started = true; this.kick() }
   kick(): void {
@@ -113,10 +129,12 @@ export class Effects {
   /** Stops starting new effects and waits for running ones; waiting rows remain in SQLite for the next start. */
   async drain(): Promise<void> {
     this.stopped = true
+    clearTimeout(this.timer)
     await Promise.allSettled([...this.tasks].map(task => task.done))
   }
   private dispatch(): void {
     if (!this.started || this.stopped) return
+    clearTimeout(this.timer)
     for (const [kind, handler] of this.handlers) {
       try {
         const running = new Set([...this.tasks].filter(task => task.kind === kind).map(task => task.key))
@@ -134,6 +152,13 @@ export class Effects {
         if (this.broken.delete(kind)) this.report(kind)
       } catch (error) { this.failed(kind, error) }
     }
+    // Ready work held by capacity or pause is kicked by its owner when that condition changes.
+    // The one timer belongs to this queue and covers only persisted future attempts.
+    const deadlines = [...this.handlers.keys()].flatMap(kind => {
+      const at = this.store.db.prepare('SELECT MIN(due) AS at FROM effect WHERE kind = ? AND due > ?').get(kind, this.now())?.at
+      return typeof at === 'number' ? [at] : []
+    })
+    if (deadlines.length) this.timer = setTimeout(() => this.kick(), Math.min(2_147_483_647, Math.max(0, Math.min(...deadlines) - this.now())))
   }
   private run(kind: EffectKind, handler: Handler<never>, row: Row): void {
     const task: Task = { kind, key: row.key, done: Promise.resolve() }

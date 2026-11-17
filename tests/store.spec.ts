@@ -62,6 +62,20 @@ it('retains the owner answer receipt and pending-processing stage after reopenin
 })
 const ids = (items: { id?: string; key?: string }[]) => items.map(item => item.id ?? item.key).sort()
 
+it('indexes current deliveries and removes them when a Ticket reopens', () => {
+  const store = new Store(join(directory, 'delivered.sqlite'))
+  const done = ticket('done', 'ended', [])
+  done.ended = { at: '2026-11-17T01:00:00.000Z', by: 'executor', reason: 'delivered', outcome: 'completed' }
+  store.tickets.save(done)
+  store.tickets.save(ticket('closed', 'ended', []))
+  expect(ids(store.read.deliveredSince('2026-11-17T00:00:00.000Z'))).toEqual(['done'])
+  const plan = store.db.prepare('EXPLAIN QUERY PLAN SELECT value FROM ticket WHERE delivered >= ?').all('2026-11-17')
+  expect(JSON.stringify(plan)).toContain('ticket_delivered')
+  delete done.ended; store.tickets.save(done)
+  expect(store.read.deliveredSince('2026-11-17T00:00:00.000Z')).toEqual([])
+  store.close()
+})
+
 it('migrates legacy GitHub relationships atomically while preserving work, decisions and delivery identities', () => {
   const store = new Store(join(directory, 'migration.sqlite'))
   const original = issueTrigger({ number: 7, title: 'keep', body: 'literal github:7', user: { login: 'alice' },
@@ -315,11 +329,37 @@ it('creates the state directory for its owner alone, and the database readable b
 
 it('reads `%` and `_` in a key prefix and a search query as written, not as patterns', () => {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
-  for (const name of ['a%b', 'axb', 'a_c', 'abc']) store.set(name, 1)
+  for (const name of ['a%b', 'axb', 'a_c', 'abc', 'a*b', 'a?b', 'a[b']) store.set(name, 1)
   expect([store.keys('a%').sort(), store.keys('a_').sort()]).toEqual([['a%b'], ['a_c']])
+  expect([store.keys('a*'), store.keys('a?'), store.keys('a[')]).toEqual([['a*b'], ['a?b'], ['a[b']])
   const said = (id: string, text: string) => ({ id, source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_1' }], actor: { source: 'feishu', id: 'u' },
     human: true, at: '2026-10-01T00:00:00.000Z', text, meta: {} })
   for (const [id, text] of [['p', 'grew 50% today'], ['q', 'grew 500 today'], ['r', 'see a_b'], ['s', 'see axb']]) store.triggers.save(said(id!, text!))
   expect([store.read.search('50%').map(item => item.id), store.read.search('a_b').map(item => item.id)]).toEqual([['p'], ['r']])
+  store.close()
+})
+it('invalidates views only after committed writes and suppresses rolled-back notifications', () => {
+  const changed = vi.fn(), store = new Store(join(directory, 'view-changes.sqlite'), () => {}, changed)
+  changed.mockClear()
+  store.atomic(() => { store.set('view-test', 1); expect(changed).not.toHaveBeenCalled() })
+  expect(changed).toHaveBeenCalledOnce()
+  changed.mockClear()
+  expect(() => store.atomic(() => { store.set('view-test', 2); throw new Error('rollback') })).toThrow('rollback')
+  expect(changed).not.toHaveBeenCalled()
+  expect(store.get('view-test')).toBe(1)
+  store.close()
+})
+it('upgrades schema15 without changing retained native wait receipts or queued work', () => {
+  const path = join(directory, 'native-wait-upgrade.sqlite')
+  let store = new Store(path)
+  const receipt = { ticketId: 'task', requestId: 'check', status: 'migrated', automation: { id: 'native-id', sessionId: 'main' } }
+  store.set('followup-request:preservation', receipt)
+  store.set('schema', 15)
+  store.db.prepare('INSERT INTO effect(kind,key,value,seq,due,since) VALUES (?,?,?,?,?,?)').run('launch', 'pending-assignment', '{"ticketId":"task","assignmentId":"pending-assignment"}', 1, 0, '2026-11-17T00:00:00Z')
+  store.close()
+  store = new Store(path)
+  expect(store.get('schema')).toBe(16)
+  expect(store.get('followup-request:preservation')).toEqual(receipt)
+  expect(store.db.prepare('SELECT key FROM effect').all()).toEqual([{ key: 'pending-assignment' }])
   store.close()
 })

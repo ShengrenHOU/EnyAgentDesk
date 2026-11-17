@@ -15,6 +15,19 @@ beforeEach(async () => {
 })
 afterEach(async () => { vi.useRealTimers(); await host.stop() })
 
+it('expires a consumed candidate through its owned deadline without a global pump', async () => {
+  host.runtime.receive(feishu('deadline-1', '@bot Inspect a document'))
+  await host.runtime.idle(); await host.consumeMain()
+  const thread = host.runtime.store.threads.active().find(item => item.evaluating)!
+  const first = thread.evaluating!
+  expect(first.delivered).toBeDefined()
+  expect(host.runtime.effects.pending('evalDeadline', first.id)).toBe(true)
+  clock = Date.parse(first.deadline) + 1; vi.setSystemTime(clock)
+  await host.runtime.effects.idle(); await host.runtime.idle()
+  expect(host.runtime.store.threads.get(thread.key)?.evaluating?.id).not.toBe(first.id)
+  expect(host.runtime.effects.pending('evalDeadline', first.id)).toBe(false)
+})
+
 it('agents arrange their own task and the coordinator applies known management changes through the shared operation', async () => {
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot Arrange this project'))
   await host.runTool(sessionId, 'orchestrator_plan', { priority: 'high', dueAt: new Date(clock + 600_000).toISOString() })
@@ -54,6 +67,8 @@ it('a worker schedules its own follow-up, remains open while waiting and continu
   expect(ticketFollowups(before)[0]).toMatchObject({ at: requested.at, reason: requested.reason })
   expect(wakeMessages()).toHaveLength(0)
   clock += 60_000; vi.setSystemTime(clock)
+  expect((await host.schedule.catalog()).some(task => task.prompt.includes('request_id=check-document'))).toBe(true)
+  await host.runTool(host.runtime.masterId, 'orchestrator_followup_fire', { ticket_id: ticket.id, request_id: 'check-document' })
   await host.runtime.pump(); await host.runtime.idle()
   expect(wakeMessages()).toHaveLength(1)
   expect(wakeMessages()[0]![0].sessionId).toBe(sessionId)
@@ -68,8 +83,11 @@ it('a worker schedules its own follow-up, remains open while waiting and continu
 it('holds a due timer for a necessary decision and delivers it after the answer is accepted', async () => {
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot Follow the project'))
   await host.runTool(sessionId, 'orchestrator_followup', followup())
+  await host.runtime.idle()
   await host.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Need project choice', human_action: 'Which project?' })
   clock += 60_000; vi.setSystemTime(clock)
+  expect((await host.schedule.catalog()).some(task => task.prompt.includes('request_id=check-document'))).toBe(true)
+  await host.runTool(host.runtime.masterId, 'orchestrator_followup_fire', { ticket_id: ticket.id, request_id: 'check-document' })
   await host.runtime.pump(); await host.runtime.idle()
   expect(wakeMessages()).toHaveLength(0)
   expect(ticketFollowups(host.runtime.store.tickets.get(ticket.id)!)).toHaveLength(1)
@@ -111,8 +129,11 @@ it('a manual stop clears scheduled work and no due pass resumes the stopped tick
 it('an individually paused ticket retains its overdue follow-up until the panel resumes it', async () => {
   const { ticket, sessionId } = await host.acceptedTicket(feishu('1', '@bot Follow this delivery'))
   await host.runTool(sessionId, 'orchestrator_followup', followup())
+  await host.runtime.idle()
   expect(await host.api('PUT', `tickets/${ticket.id}/management`, { paused: true })).toMatchObject({ status: 200 })
   clock += 60_000; vi.setSystemTime(clock)
+  expect((await host.schedule.catalog()).some(task => task.prompt.includes('request_id=check-document'))).toBe(true)
+  await host.runTool(host.runtime.masterId, 'orchestrator_followup_fire', { ticket_id: ticket.id, request_id: 'check-document' })
   await host.runtime.pump(); await host.runtime.idle()
   expect(wakeMessages()).toHaveLength(0)
   expect(ticketFollowups(host.runtime.store.tickets.get(ticket.id)!)).toHaveLength(1)

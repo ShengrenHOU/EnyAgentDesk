@@ -39,7 +39,7 @@ Source plugins register their background loops through `SourceHost.runSource`. R
 | Part | Module | Does |
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
-| Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
+| Passes | `src/app/passes.ts` | Coalesces committed intake, decision and configuration changes into admission passes. Owned Effects deadlines supply time-driven work. Idle state has no periodic orchestration pass |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
@@ -118,9 +118,9 @@ When a Ticket ends, unread follow-ups return to Eval unless another Ticket still
 
 After a change, the Engine emits an event from `DomainEvents` in `src/core/ports.ts`:
 
-`trigger.received`, `eval.started`, `decision.recorded`, `ticket.created`, `ticket.resumed`, `ticket.ended`, `assignment.started`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
+`trigger.received`, `eval.started`, `eval.updated`, `decision.recorded`, `decision.updated`, `ticket.created`, `ticket.updated`, `ticket.resumed`, `ticket.ended`, `assignment.started`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
 
-Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to Tickets becomes a follow-up relay. `pullEndNotices` sends one chat notice, using a stable id, when a Ticket ends merged or closed. Other events currently have no consumer.
+Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to Tickets becomes a follow-up relay. `pullEndNotices` sends one chat notice, using a stable id, when a Ticket ends merged or closed. Committed events also invalidate subscribed views and notify their owning admission, follow-up and deadline operations. Runtime handles `eval.updated` by reconciling that evaluation's persisted deadline, without a periodic global pass.
 
 ### Model
 
@@ -187,10 +187,21 @@ The module is a plain application service over the Store's KV records and Ticket
 
 Each kind/key pair has one row. Enqueuing the same waiting key replaces its payload and makes it due immediately without changing queue order. `handle(kind, run, options)` registers one handler per kind. It processes due rows oldest first, up to the concurrency limit.
 
+`enqueueAt` retains a future operation in the same queue. One queue-owned timer wakes its nearest future attempt. Capacity changes kick due work. Candidate consumption/resume events register fenced `evalDeadline` operations, and production consumption registers generation-fenced `triageDeadline` operations. Configuration changes reconcile only current evaluations and production waits. No periodic Runtime pass drives their expiry.
+
 Failures retry with exponential backoff. Throwing `Later` defers work without counting a failure, for example when no worker slot is available. `start` begins processing after setup, `drain` stops it during shutdown while preserving pending rows, and `pending`/`idle` expose queue state.
 
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
+| `evalDeadline` | Engine / Runtime | Reconciles the exact consumed Eval identity and admits waiting work after expiry | 1, none while paused | Queue retry |
+| `evalHealth` | Runtime | Expires currently visible unavailable-Eval health | 1 | Queue retry |
+| `triageDeadline` | ProductionTriage | Reconciles one consumed production generation and preserves pause duration | 1, none while paused | Queue retry |
+| `automaticRecovery` | AutomaticTriage | Advances one bounded page of a fixed recovery epoch, then schedules its unfinished remainder | 1, none while disabled or paused | Queue retry |
+| `automaticDispatch` | AutomaticTriage | Dispatches a ready accumulation window fairly and refills after capacity changes | 1, none while disabled or paused | Queue retry |
+| `followupSchedule` | Followups | Installs a native Schedule while retaining its business wait, or recovers an overdue legacy wait | 1, none while paused | Queue retry |
+| `followupFire` | Followups | Resumes a due retained check after current state and authority validation | 1, none while paused | Ticket lifecycle reactivates held waits |
+| `followupCleanup` | Followups | Deletes one cancelled reminder by its retained native identity | 1 | Queue retry |
+| `followupRestore` | Followups | Reconciles pending native create/delete outcomes on startup or configuration recovery | 1 | Queue retry |
 | `assessment` | MasterAssessor | Queues at most one unread candidate notice in the main Session, holding remaining assessments durably outside its inbox; after consumption starts the Eval deadline. Stale candidate notices are pruned without removing owner messages or worker reports | 4, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
@@ -399,6 +410,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
+| `src/app/read-jobs.ts` | DSH Jobs read producers, in-flight query coalescing, cancellation and resource teardown |
+| `src/app/read-models.ts` | Shared historical statistics and Line projections used by isolated reads |
+| `src/app/read-worker.ts` | Credential-free read-only SQLite transaction and worker termination |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
 | `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
 | `src/app/effects.ts` | Effects |
@@ -423,7 +437,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/im-identity.ts` | Canonical IM object/message/version keys shared by collection, evidence watermarks and the read-only window gateway |
 | `src/app/im-read.ts` | The shared read-only IM window: exact name resolution, canonical message identity, gaps and request-bound continuation |
 | `src/app/tools/im.ts` | The `orchestrator_im_read` tool registered for both the Main Session and ticket workers |
-| `src/app/automatic-triage.ts` | Atomic passive intake ownership, bounded durable legacy scanning, debounce and fair production dispatch |
+| `src/app/automatic-triage.ts` | Atomic passive intake ownership, fixed recovery epochs, indexed current accumulations and owned durable dispatch effects |
 | `src/app/im-evidence-revisions.ts` | Native identity/version observation watermarks and conservative newer-known-evidence projection |
 | `src/app/im-conversation-cursors.ts` | Per-conversation triage context coverage, first-sight lookback, incremental windows and forward-only advance |
 | `src/app/tools/automatic-triage.ts` | Main-only paginated intake coverage and explicit bounded owner recovery |
@@ -445,6 +459,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
+| `src/app/view-events.ts` | Owner-only invalidation stream on DSH Connection Fetch, bounded by consumer backpressure and cancelled with its request or Runtime |
+| `src/client/view-events.ts` | One browser EventSource subscription, request invalidation on change and reconnect, and plugin-owned cleanup |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/lines.ts` | Work lines: the `line:<id>` KV records, `search`, `summary`, `detail`, atomic membership correction (`reassign`) and the open, attach, continue-evidence, close and reopen rules; it grants no authority and routes nothing |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -627,12 +643,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/view-events.spec.ts` | Invalidation baseline, slow-reader coalescing, reconnect and stream shutdown |
 | `tests/version.spec.ts` | The packaged version the build records, and when a running build is behind the source its GitHub Source reports |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
+| `tests/read-jobs.spec.ts` | Actual read-worker resources, coalescing, native cancellation and SQLite write protection |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |

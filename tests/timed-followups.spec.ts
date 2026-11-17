@@ -6,6 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Engine, key, ticketFollowups, type Ticket } from '../src/core/index.ts'
 import { Followups, FollowupRequestSchema, automationCleanups, followupReceipts, migrationIntents, type AutomationRef, type SchedulePort } from '../src/app/followups.ts'
 import { Store } from '../src/app/store.ts'
+import { Effects } from '../src/app/effects.ts'
+import { HealthBoard } from '../src/infra/health.ts'
 
 let directory: string
 let store: Store
@@ -24,12 +26,12 @@ const ticket = (id = 'task'): Ticket => ({ id, title: 'Read the project update',
 const request = (request_id = 'check-update', minutes = 1) => ({ request_id,
   at: new Date(clock + minutes * 60_000).toISOString(), reason: 'Check whether the requested document is available' })
 
-function startService(): Followups {
+function startService(effects?: Effects): Followups {
   engine = new Engine({ repo: store, policy: () => ({ version: 'v', paused, gate: () => ({ admissible: false, reason: 'test' }),
     revalidate: () => authorized, admitsInferred: () => false, evalTimeoutMs: 1000 }),
   scope: { scope: () => ({ listened: true, observed: false }) }, assessor: { request: () => {} },
   executor: { start: () => {}, deliver, stop: () => {} }, outbox: { send: () => {}, status: () => undefined, withdraw: () => {} }, now: iso })
-  return new Followups({ store, engine, paused: () => paused, authorized: () => authorized, masterId: 'master',
+  return new Followups({ store, engine, effects, paused: () => paused, authorized: () => authorized, masterId: 'master',
     schedule: () => schedule }, () => clock)
 }
 beforeEach(() => {
@@ -248,6 +250,97 @@ it('moves a mechanical check to the host automation once, binding the main sessi
   expect(deliver).not.toHaveBeenCalled()
 })
 
+it('automatically gives time ownership to native Schedule and cancels the retained business wait', async () => {
+  const create = vi.fn(async (sessionId: string, item: { title: string; at: string }) => ({ id: 'owned-native', sessionId, title: item.title, scheduledAt: item.at }))
+  const remove = vi.fn(async () => ({ deleted: true }))
+  schedule = { create, delete: remove }
+  const effects = new Effects(store, new HealthBoard(), () => clock)
+  followups = startService(effects); effects.start()
+  const saved = followups.schedule('task', request())
+  await effects.idle()
+  expect(create).toHaveBeenCalledOnce()
+  expect(store.get(followupReceipts('task', saved.requestId))?.status).toBe('migrated')
+  expect(ticketFollowups(store.tickets.get('task')!)).toHaveLength(1)
+  followups.cancel('task', saved.requestId); clock += 60_000
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'inactive' })
+  await effects.idle()
+  expect(remove).toHaveBeenCalledOnce()
+  expect(ticketFollowups(store.tickets.get('task')!)).toHaveLength(0)
+  await effects.drain()
+})
+
+it('resumes a held native check on its Ticket condition change once', async () => {
+  schedule = { create: async (sessionId, item) => ({ id: 'owned-held', sessionId, title: item.title, scheduledAt: item.at }), delete: async () => ({ deleted: true }) }
+  const effects = new Effects(store, new HealthBoard(), () => clock)
+  followups = startService(effects); effects.start()
+  const saved = followups.schedule('task', request())
+  await effects.idle(); clock += 60_000
+  const current = store.tickets.get('task')!
+  current.attention = { id: 'owner-question', question: 'Choose a scope' }; store.tickets.save(current)
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'attention' })
+  expect(store.tickets.get('task')!.inputs).toHaveLength(0)
+  delete current.attention; store.tickets.save(current); followups.changed('task')
+  await effects.idle()
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+  expect(ticketFollowups(store.tickets.get('task')!)).toHaveLength(0)
+  followups.changed('task'); await effects.idle()
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+  await effects.drain()
+})
+
+it('recovers an uninstalled overdue business wait once after the queue restarts', async () => {
+  const create = vi.fn(async (sessionId: string, item: { title: string; at: string }) => ({ id: 'unused', sessionId, title: item.title, scheduledAt: item.at }))
+  schedule = { create, delete: async () => ({ deleted: true }) }
+  let effects = new Effects(store, new HealthBoard(), () => clock)
+  followups = startService(effects)
+  followups.schedule('task', request())
+  await effects.drain()
+  clock += 60_000
+  effects = new Effects(store, new HealthBoard(), () => clock)
+  followups = startService(effects); followups.resume(); effects.start()
+  await effects.idle()
+  expect(create).not.toHaveBeenCalled()
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+  expect(ticketFollowups(store.tickets.get('task')!)).toHaveLength(0)
+  followups.resume(); await effects.idle()
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+  await effects.drain()
+})
+
+it('accepts a due native reminder once and rejects early or revoked execution', async () => {
+  schedule = {
+    create: async (sessionId, item) => ({ id: 'native-fire', sessionId, title: item.title, scheduledAt: item.at }),
+    delete: async () => ({ deleted: true }),
+  }
+  followups = startService()
+  const saved = followups.schedule('task', request())
+  await followups.migrate('task', saved.requestId)
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'not_due' })
+  clock += 60_000
+  authorized = false
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'authority' })
+  expect(store.tickets.get('task')!.inputs).toHaveLength(0)
+  authorized = true
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: true })
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: true, reused: true })
+  expect(store.tickets.get('task')!.inputs).toHaveLength(1)
+})
+
+it('refuses a native reminder cancelled after migration', async () => {
+  schedule = {
+    create: async (sessionId, item) => ({ id: 'native-cancel', sessionId, title: item.title, scheduledAt: item.at }),
+    delete: async () => ({ deleted: true }),
+  }
+  followups = startService()
+  const saved = followups.schedule('task', request())
+  await followups.migrate('task', saved.requestId)
+  await followups.cancelAutomation('task', saved.requestId)
+  clock += 60_000
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'inactive' })
+  expect(store.tickets.get('task')!.inputs).toHaveLength(0)
+})
+
 it('deletes a migrated automation without reviving the check', async () => {
   const remove = vi.fn(async () => ({ deleted: true }))
   schedule = { create: async (sessionId, task) => ({ id: 'auto-1', sessionId, title: task.title, scheduledAt: task.at }), delete: remove }
@@ -400,7 +493,9 @@ it('retains a failed automation deletion and retries it on maintain', async () =
   await followups.migrate('task', saved.requestId)
   await expect(followups.cancelAutomations('task')).rejects.toThrow(/cleanup is retained/)
   expect(store.get(automationCleanups('auto-1'))).toBeDefined()
-  expect(store.get(followupReceipts('task', saved.requestId))).toMatchObject({ status: 'migrated' })
+  expect(store.get(followupReceipts('task', saved.requestId))).toMatchObject({ status: 'cancelled' })
+  clock += 60_000
+  expect(followups.fireNative('task', saved.requestId)).toEqual({ accepted: false, reason: 'inactive' })
   failing = false
   await followups.maintain()
   expect(store.get(automationCleanups('auto-1'))).toBeUndefined()

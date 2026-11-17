@@ -12,17 +12,18 @@ import { preview } from './text.ts'
 import { TriageMatters } from '../triage-matters.ts'
 import { productionOverview } from '../production-triage.ts'
 import { compareTickets } from '../management.ts'
+import { historicalStats, type ReadResults } from '../read-models.ts'
 
 /** Threads whose latest decision since `since` is an undismissed `unavailable` eval and that are neither evaluating nor queued. */
 function unjudged(store: Store, since: string): { thread: Thread; decision: Decision }[] {
   const seen = new Set<string>()
   const queue = { store, owners: ownersOf(store) }
-  return store.read.decisionsOfKinds(['unavailable'], 200).filter(decision => decision.at >= since).flatMap(decision => {
+  return store.read.unavailableSince(since).flatMap(decision => {
     if (seen.has(decision.threadKey)) return []
     seen.add(decision.threadKey)
     const thread = store.threads.get(decision.threadKey)
     if (!thread || thread.evaluating || awaitingEval(queue, thread).length || decision.dismissed) return []
-    if (store.decisions.byThread(thread.key).at(-1)?.id !== decision.id) return []
+    if (store.read.latestDecision(thread.key)?.id !== decision.id) return []
     return [{ thread, decision }]
   })
 }
@@ -80,7 +81,7 @@ function deskOf(view: Snapshot, nowMs: number, since: string) {
  * Builds the operator overview: active system problems, tickets awaiting human action, executor load, and 24-hour trigger flow.
  * @param setup - Setup problem to surface first (where setup stopped, or a Source paused by setup).
  */
-export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem) {
+export function workbenchView(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem) {
   const { store, sources } = host
   const view = snapshot(host)
   const settings = store.settings()
@@ -112,20 +113,22 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
       attempts: item.attempts, error: item.error } })),
   ]
   const { desk, open } = deskOf(view, nowMs, since)
-  const stats = Object.values(store.read.triggerStats(since))
-  const received = stats.reduce((sum, item) => sum + item.received, 0), filtered = stats.reduce((sum, item) => sum + item.filtered, 0)
-  const judgement = store.read.flow(since)
   return {
-    triageMatters: new TriageMatters(store, trigger => sources.imEvidence(trigger)).overview(),
-    productionTriage: productionOverview(store, trigger => sources.imEvidence(trigger), {}, trigger => sources.imHeader(trigger)),
     problems,
     person: desk.person,
     ...(desk.personDeferred ? { personDeferred: desk.personDeferred } : {}),
     ...(desk.work ? { work: desk.work } : {}),
     executor: { ...load, maxWorkers: settings.executor.maxWorkers, idle: open.filter(ticket => ticketStage(ticket).stage === 'idle').length },
-    flow: { received, filtered, triggers: received - filtered, judged: judgement.judged, accepted: judgement.accepted,
-      evaluating: evaluating.length, dropped: store.read.droppedSince(since) },
     policyVersion: policyVersionValue,
   }
+}
+/** Historical diagnostics are requested separately from the daily workspace. */
+export function overview(host: ViewHost, health: HealthMap, policyVersionValue: string, load: ExecutorLoad, setup?: SetupProblem, history?: ReadResults['history']) {
+  const { store, sources } = host
+  const flow = history?.stats ?? historicalStats(store)
+  return { ...workbenchView(host, health, policyVersionValue, load, setup),
+    triageMatters: history?.matters ?? new TriageMatters(store, trigger => sources.imEvidence(trigger)).overview(),
+    productionTriage: history?.production ?? productionOverview(store, trigger => sources.imEvidence(trigger), {}, trigger => sources.imHeader(trigger)),
+    flow: { ...flow, evaluating: store.threads.active().filter(thread => thread.evaluating).length } }
 }
 export type OverviewView = ReturnType<typeof overview>

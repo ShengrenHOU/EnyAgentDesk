@@ -54,3 +54,19 @@ it('starts no timer once stopped, as a start-up that ends after a stop asks', as
     expect(h.engine.evaluateDue).not.toHaveBeenCalled()
   } finally { vi.useRealTimers() }
 })
+
+it('runs only committed change requests and stays idle without a periodic timer', async () => {
+  vi.useFakeTimers()
+  try {
+    const h = passes()
+    h.passes.start(); await h.passes.idle()
+    expect(h.engine.evaluateDue).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(3_600_000)
+    expect(h.engine.evaluateDue).toHaveBeenCalledTimes(1)
+    h.passes.request(); h.passes.request(); await h.passes.idle()
+    expect(h.engine.evaluateDue).toHaveBeenCalledTimes(2)
+    await h.passes.stop()
+    h.passes.request(); await h.passes.pump()
+    expect(h.engine.evaluateDue).toHaveBeenCalledTimes(2)
+  } finally { vi.useRealTimers() }
+})

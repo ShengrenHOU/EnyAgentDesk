@@ -50,7 +50,7 @@ it('waits for an aborted source to finish its state writes before closing the da
   expect(closed).toHaveBeenCalledOnce()
 })
 
-it('waits for a pass\'s follow-up reconciliation to finish its Host Schedule read and Store write before closing the database', async () => {
+it('waits for owned follow-up recovery to finish its Host Schedule read and Store write before closing the database', async () => {
   const name = migrationIntents('stale', 'check')
   h.runtime.store.set(name, { ticketId: 'stale', requestId: 'check', sessionId: h.runtime.masterId, title: '自动化检查',
     prompt: 'Automation stale:check', at: new Date(Date.now() + 60_000).toISOString(), marker: key('stale', 'check'),
@@ -59,7 +59,8 @@ it('waits for a pass\'s follow-up reconciliation to finish its Host Schedule rea
   h.schedule.catalog.mockImplementation(async () => { entered.resolve(); await release.promise; return [] })
   const removed = vi.spyOn(h.runtime.store, 'delete')
   const closed = vi.spyOn(h.runtime.store, 'close')
-  const pump = h.runtime.pump()
+  h.runtime.followups.resume()
+  const pump = h.runtime.idle()
   await entered.promise
   const stopping = h.runtime.stop()
   await new Promise(resolve => setTimeout(resolve, 5))

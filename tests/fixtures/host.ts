@@ -53,8 +53,9 @@ type Delivery = { sessionId: string; mode: 'queue' | 'steer'; id: string; text: 
  * @param owner - the agent of a Session, which an end reaches.
  */
 export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined = () => undefined) {
-  type Job = { id: string; owner: string; status: string; label?: string }
+  type Job = { id: string; owner?: string; status: string; label?: string }
   const jobs = new Map<string, Job>()
+  const producers = new Map<string, () => void>()
   const listeners = new Set<{ owner: string; listener: (event: { type: string }) => void }>()
   const waits = new Map<string, ((job: Job) => void)[]>()
   let released = 0
@@ -66,22 +67,42 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
     waits.delete(id); released += waiting.length
     for (const wake of waiting) wake({ ...job })
     emit(job, 'settled')
-    const agent = waiting.length ? undefined : owner(job.owner)
+    const agent = waiting.length || !job.owner ? undefined : owner(job.owner)
     const ended = notice(`notice-${id}`, `Job ${id} ended: ${status}`)
     if (agent?.status === 'idle') agent.followup(ended)
     else agent?.inject(ended)
   }
   const service = {
-    list: vi.fn((caller: string) => [...jobs.values()].filter(job => job.owner === caller)),
+    attachController: vi.fn((_name: string) => () => {}),
+    start: (spec: { kind: string; label: string; owner?: string; run(job: { id: string; append(text: string): void; updateProgress(text: string): void }): { done: Promise<{ status: string }>; cancel(): void } }) => {
+      const id = `${spec.kind}-${jobs.size + 1}`, job = { id, owner: spec.owner, status: 'running', label: spec.label }
+      const hooks = spec.run({ id, append: () => {}, updateProgress: () => {} })
+      jobs.set(id, job); emit(job, 'registered')
+      producers.set(id, () => hooks.cancel())
+      void hooks.done.then(outcome => { producers.delete(id); end(id, job.status === 'stopping' ? 'killed' : outcome.status) }, () => { producers.delete(id); end(id, 'failed') })
+      return id
+    },
+    remove: (id: string) => {
+      if (['running', 'stopping'].includes(jobs.get(id)?.status ?? '')) throw new Error('Cannot remove live job')
+      jobs.delete(id)
+    },
+    list: vi.fn((caller: string) => [...jobs.values()].filter(job => !job.owner || job.owner === caller)),
     // A wait ends with the job, or fails once its signal aborts, which leaves the job's end uncollected.
     wait: vi.fn((id: string, _timeoutMs: number, _caller: string, signal?: AbortSignal) => new Promise<Job>((resolve, reject) => {
+      const current = jobs.get(id)
+      if (current && !['running', 'stopping'].includes(current.status)) { resolve({ ...current }); return }
       const wake = (job: Job) => { signal?.removeEventListener('abort', abort); resolve(job) }
       const abort = () => { waits.set(id, (waits.get(id) ?? []).filter(item => item !== wake)); reject(new Error('wait aborted')) }
       waits.set(id, [...waits.get(id) ?? [], wake])
       signal?.addEventListener('abort', abort, { once: true })
     })),
     // A killed job ends a moment later, as its process does, also under a test's fake timers.
-    kill: vi.fn((id: string) => { queueMicrotask(() => { end(id, 'killed') }); return 'requested' }) as Mock<(id: string) => string>,
+    kill: vi.fn((id: string) => {
+      const stop = producers.get(id)
+      if (stop) { jobs.get(id)!.status = 'stopping'; stop() }
+      else queueMicrotask(() => { end(id, 'killed') })
+      return 'requested'
+    }) as Mock<(id: string) => string>,
     events: { subscribe: (filter: { owner: string }, listener: (event: { type: string }) => void) => {
       const entry = { owner: filter.owner, listener }
       listeners.add(entry)

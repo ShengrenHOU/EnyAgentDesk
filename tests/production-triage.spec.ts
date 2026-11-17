@@ -1,11 +1,13 @@
 import { asToolBatch } from './fixtures/tool-batch.ts'
+import { z } from 'zod'
+import { startRuntime } from './fixtures/host.ts'
 /** Production pipeline: real durable effects, per-anchor evidence, ownership, and no business effects. */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { Store } from '../src/app/store.ts'
-import { Effects } from '../src/app/effects.ts'
+import { Store, SCHEMA_VERSION } from '../src/app/store.ts'
+import { Effects, Later } from '../src/app/effects.ts'
 import { TriageHandoffs } from '../src/app/triage-handoffs.ts'
 import { readWechatImContext } from '../src/sources/activity-wechat.ts'
 import type { ActivityTools } from '../src/sources/activity-types.ts'
@@ -30,7 +32,7 @@ const options = () => ({ repo: store, policy, now: () => now, externalAssessment
   executor: { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() }, outbox: { send: vi.fn(), status: () => undefined, withdraw: vi.fn() } })
 function setup(header?: (trigger: Trigger) => ImMessageHeader) {
   engine = new Engine(options())
-  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never)
+  effects = new Effects(store, { claim: () => ({ set: vi.fn() }) } as never, () => Date.parse(now))
   handoffs = new TriageHandoffs({ store, engine, enabled: () => true, evidence, policyVersion: () => version, now: () => now })
   service = new ProductionTriage({ store, engine, handoffs, effects, evidence, context: trigger => native(trigger.id), header,
     enabled: () => enabled, paused: () => paused, policy: () => version, prompt: () => prompt, now: () => now, deliver, completed })
@@ -42,6 +44,22 @@ const start = (ids = ['a']) => {
   return service.start('owner', 1, { start: '2026-11-09T00:00:00.000Z', end: '2026-11-11T00:00:00.000Z' })
 }
 const drain = async () => { effects.start(); await effects.idle('triageAssessment') }
+
+it('arms only a consumed production deadline and retries its current generation without maintenance polling', async () => {
+  add('owned-deadline')
+  const [batch] = start(['owned-deadline'])
+  deliver.mockRejectedValueOnce(new Later('Native inbox has not consumed the request'))
+  await drain()
+  expect(effects.pending('triageDeadline', batch!.id)).toBe(false)
+  now = new Date(Date.parse(now) + 3000).toISOString()
+  await effects.idle()
+  const consumed = store.get<ProductionBatch>(`triage-production:${batch!.id}`)!
+  expect(consumed.consumedAt).toBeDefined()
+  expect(effects.pending('triageDeadline', batch!.id)).toBe(true)
+  now = new Date(Date.parse(consumed.deadline!) + 1).toISOString()
+  await effects.idle()
+  expect(store.get<ProductionBatch>(`triage-production:${batch!.id}`)!.generation).toBe(2)
+})
 const consume = (batch: ProductionBatch) => {
   for (const input of batch.inputs) { let offset: number | null = 0; do { offset = service.context(batch.id, batch.generation, input.triggerId, offset).next_offset } while (offset !== null) }
 }
@@ -281,13 +299,13 @@ it('pauses, restores durable state across restart and does not duplicate judgmen
   consume(batch!); const live = service.read(batch!.id); expect(service.submit(live.id, 1, live.binding!, result(batch!)).state).toBe('completed')
 })
 
-it('migrates a schema11 held generated column and protects schema15 from old readers', () => {
+it('migrates a schema11 held generated column and protects the current schema from old readers', () => {
   add('a'); start(); store.db.exec('DROP INDEX disposition_held; ALTER TABLE disposition DROP COLUMN held; ALTER TABLE disposition ADD COLUMN held TEXT AS (value ->> \'$.triage.owner\'); CREATE INDEX disposition_held ON disposition(held) WHERE held IS NOT NULL')
   store.set(KV.store.schema, 11); store.close(); store = new Store(join(directory, 'state.sqlite')); setup()
-  expect(store.get(KV.store.schema)).toBe(15); expect(store.triageHandoffStatus().held).toBe(0)
+  expect(store.get(KV.store.schema)).toBe(SCHEMA_VERSION); expect(store.triageHandoffStatus().held).toBe(0)
   // The unchanged schema11 reader guard rejects this database before migration or state writes.
   const legacySchemaVersion = 11, persistedVersion = store.get(KV.store.schema)!
-  expect(() => { if (persistedVersion > legacySchemaVersion) throw new Error(`Unsupported orchestrator database version ${persistedVersion}`) }).toThrow('version 15')
+  expect(() => { if (persistedVersion > legacySchemaVersion) throw new Error(`Unsupported orchestrator database version ${persistedVersion}`) }).toThrow(`version ${SCHEMA_VERSION}`)
 })
 
 it('keeps page order and context hashes exact while accepting first-page reads', async () => {
@@ -437,7 +455,6 @@ it('preserves a preparing attempt across a pause during native reads and does no
 })
 
 it('real Runtime settings pause/resume preserves unconsumed production attempt despite settings revision changes', async () => {
-  const { z } = await import('zod'), { startRuntime } = await import('./fixtures/host.ts')
   const host = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
   try {
     const runtime = host.runtime

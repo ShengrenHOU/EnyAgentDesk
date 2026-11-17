@@ -53,8 +53,9 @@ export interface ProductionBatch {
 }
 const batches = family<ProductionBatch>('triage-production:')
 interface Host {
+  capacityChanged?(): void
   store: Store; engine: Engine; handoffs: TriageHandoffs
-  effects: Pick<Effects, 'enqueue' | 'handle' | 'cancel'>
+  effects: Pick<Effects, 'enqueue' | 'enqueueAt' | 'handle' | 'cancel'>
   evidence(trigger: Trigger): (ImEvidence & { configuration: string }) | undefined
   context(trigger: Trigger): ImContextReader
   header?(trigger: Trigger): ImMessageHeader
@@ -73,12 +74,22 @@ export class ProductionTriage {
     if (!host.engine.usesRepositories(host.store)) throw new Error('Production triage requires one Store')
     host.effects.handle('triageAssessment', async ({ generation }, id) => this.deliver(id, generation),
       { limit: () => host.enabled() && !host.paused() ? 1 : 0 })
+    host.effects.handle('triageDeadline', async ({ generation }, id) => {
+      const batch = host.store.get(batches(id))
+      if (batch?.generation === generation && batch.state === 'awaiting') this.maintain(id)
+    }, { limit: () => host.paused() ? 0 : 1 })
+  }
+  private scheduleDeadline(batch: ProductionBatch): void {
+    if (batch.state !== 'awaiting' || !batch.consumedAt || !batch.deadline || batch.pausedAt) {
+      this.host.effects.cancel('triageDeadline', batch.id); return
+    }
+    this.host.effects.enqueueAt('triageDeadline', batch.id, { generation: batch.generation }, Date.parse(batch.deadline))
   }
   private now() { return this.host.now?.() ?? new Date().toISOString() }
   private enabled() { if (!this.host.enabled() || this.host.paused()) throw new Error('Production triage disabled or paused') }
   private settingsFingerprint() { return hash({ ...this.host.store.settings(), paused: false }) }
   private revision() { return this.host.store.get(KV.settings.revision) ?? 0 }
-  activeCount() { return Number(this.host.store.db.prepare("SELECT COUNT(*) AS n FROM kv WHERE key LIKE 'triage-production:%' AND json_extract(value, '$.state') IN ('preparing', 'awaiting')").get()!.n) }
+  activeCount() { return Number(this.host.store.db.prepare("SELECT COUNT(*) AS n FROM kv WHERE production_state IN ('preparing', 'awaiting')").get()!.n) }
   private resolve(id: string): Input {
     const trigger = this.host.store.triggers.get(id), evidence = trigger && this.host.evidence(trigger)
     if (!trigger || !evidence || ![evidence.provider, evidence.account, evidence.conversation, evidence.message, evidence.version, evidence.configuration].every(Boolean)) throw new Error('IM source evidence unavailable')
@@ -114,7 +125,7 @@ export class ProductionTriage {
     return this.host.store.atomic(() => {
       const manifest = this.host.handoffs.read(owner)
       if (manifest.state === 'released' || manifest.generation !== generation) throw new Error('Stale handoff owner')
-      const previous = this.host.store.db.prepare("SELECT value FROM kv WHERE key LIKE 'triage-production:%' AND json_extract(value, '$.owner') = ?").all(owner).map(row => JSON.parse(String(row.value)) as ProductionBatch)
+      const previous = this.host.store.db.prepare('SELECT value FROM kv WHERE production_owner = ?').all(owner).map(row => JSON.parse(String(row.value)) as ProductionBatch)
       if (previous.length) {
         if (selected && previous.some(batch => JSON.stringify(batch.window) !== JSON.stringify(selected))) throw new Error('Owner already has another judgment window')
         return previous
@@ -205,7 +216,8 @@ export class ProductionTriage {
       if (batch.state !== 'queued') return batch
       const evaluations = this.host.store.threads.active().flatMap(thread => thread.evaluating ? [thread.evaluating] : [])
       if (this.activeCount() || evaluations.length >= 4 || evaluations.filter(item => item.strength === 'inferred').length >= 3) throw new Later('Main assessment capacity is occupied')
-      batch.state = 'preparing'; batch.updatedAt = this.now(); this.host.store.set(batches(id), batch); return batch
+      batch.state = 'preparing'; batch.updatedAt = this.now(); this.host.store.set(batches(id), batch)
+      this.host.store.afterCommit(() => this.host.capacityChanged?.()); return batch
     })
   }
   private boundContext(manifest: ImContextManifest, limit: number): ImContextManifest {
@@ -276,6 +288,7 @@ export class ProductionTriage {
         live.deadline = new Date(Date.parse(live.confirmedAt) + (this.host.timeoutMs?.() ?? 300_000)).toISOString()
         if (this.host.paused()) live.pausedAt = this.now()
         this.host.store.set(batches(id), live)
+        this.scheduleDeadline(live)
       })
     } catch (error) {
       if (error instanceof Later) throw error
@@ -292,6 +305,7 @@ export class ProductionTriage {
         }
         current.state = 'blocked'; current.problem = String(error).slice(0, 500); current.updatedAt = this.now()
         this.host.store.set(batches(id), current)
+        this.host.store.afterCommit(() => this.host.capacityChanged?.())
         return false
       })
       if (retrying) throw error
@@ -303,19 +317,21 @@ export class ProductionTriage {
   }
   /** Restore unfinished delivery through the existing effect without extending its deadline. */
   resume(): void {
-    const rows = this.host.store.db.prepare("SELECT value FROM kv WHERE key LIKE 'triage-production:%' AND json_extract(value, '$.state') = 'awaiting'").all()
+    this.maintain()
+    const rows = this.host.store.db.prepare("SELECT value FROM kv WHERE production_state = 'awaiting'").all()
     for (const row of rows) {
       const batch: ProductionBatch = JSON.parse(String(row.value))
       if (this.noticeCurrent(batch.id, batch.generation)) this.host.effects.enqueue('triageAssessment', batch.id, { generation: batch.generation })
     }
   }
   /** Periodic durable deadline/pause reconciliation; absent consumption evidence never starts the clock. */
-  maintain() {
-    const ids = this.host.store.db.prepare("SELECT json_extract(value, '$.id') AS id FROM kv WHERE key LIKE 'triage-production:%' AND json_extract(value, '$.state') = 'awaiting'").all().map(row => String(row.id))
+  maintain(only?: string) {
+    const ids = only ? [only] : this.host.store.db.prepare("SELECT json_extract(value, '$.id') AS id FROM kv WHERE production_state = 'awaiting'").all().map(row => String(row.id))
     for (const id of ids) this.host.store.atomic(() => {
       const batch = this.saved(id), now = this.now(), before = JSON.stringify(this.saved(id))
       if (this.host.paused() || (batch.automatic && !this.host.automaticEnabled?.())) {
         if (batch.consumedAt && !batch.pausedAt) { batch.pausedAt = now; batch.updatedAt = now; this.host.store.set(batches(id), batch) }
+        this.host.effects.cancel('triageDeadline', id)
         return
       }
       try { this.validate(id, batch.generation) } catch {
@@ -333,7 +349,11 @@ export class ProductionTriage {
         batch.state = 'blocked'; batch.problem = 'Consumed production judgment timed out; evidence retained for explicit retry'
       }
       if (JSON.stringify(batch) !== before) { batch.updatedAt = now; this.host.store.set(batches(id), batch) }
-      if (batch.state === 'blocked') this.host.effects.cancel('triageAssessment', id)
+      this.scheduleDeadline(batch)
+      if (batch.state === 'blocked') {
+        this.host.effects.cancel('triageAssessment', id)
+        this.host.store.afterCommit(() => this.host.capacityChanged?.())
+      }
     })
     this.host.prune?.()
   }
@@ -419,6 +439,8 @@ export class ProductionTriage {
         disposition.triage!.phase = 'triaged'; this.host.store.triggers.saveDisposition(input.triggerId, disposition)
       }
       this.host.store.set(batches(id), batch); this.host.effects.cancel('triageAssessment', id)
+      this.host.effects.cancel('triageDeadline', id)
+      this.host.store.afterCommit(() => this.host.capacityChanged?.())
       this.host.completed?.(batch)
       this.host.store.afterCommit(() => this.host.prune?.())
       return batch
@@ -464,6 +486,7 @@ export class ProductionTriage {
       batch.contexts = {}; if (batch.coverage) batch.coverage.gaps = [...(batch.coverage.planGaps ?? [])]
       delete batch.matterProvenance; delete batch.consumedAt; delete batch.confirmedAt; delete batch.deadline; delete batch.pausedAt; delete batch.binding; delete batch.result; delete batch.problem
       batch.state = 'queued'; batch.updatedAt = this.now()
+      this.host.effects.cancel('triageDeadline', id)
       if (automatic) batch.automaticRetries = (batch.automaticRetries ?? 0) + 1
       else delete batch.automaticRetries
       for (const input of batch.inputs) { const disposition = this.host.store.triggers.disposition(input.triggerId)!; disposition.triage!.phase = 'production'; disposition.triage!.batchId = batch.id; this.host.store.triggers.saveDisposition(input.triggerId, disposition) }
@@ -486,7 +509,8 @@ export class ProductionTriage {
       }
       if (!batch.previous) this.host.engine.releaseFromTriage(owner.inputs.filter(input => ids.has(input.triggerId)), batch.owner, batch.ownerGeneration)
       batch.state = 'rolled_back'; batch.updatedAt = this.now(); this.host.store.set(batches(id), batch)
-      this.host.effects.cancel('triageAssessment', id); this.host.handoffs.reconcile(batch.owner); this.host.store.afterCommit(() => this.host.prune?.()); return batch
+      this.host.effects.cancel('triageDeadline', id)
+      this.host.effects.cancel('triageAssessment', id); this.host.handoffs.reconcile(batch.owner); this.host.store.afterCommit(() => { this.host.prune?.(); this.host.capacityChanged?.() }); return batch
     })
   }
 }

@@ -27,6 +27,7 @@ import { remember, settingsRoute } from './route.ts'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Button } from './controls.tsx'
 import { LoadState } from './widgets.tsx'
+import { startViewEvents } from './view-events.ts'
 
 type ClientContext = Context & { sessions: ISessions }
 const NS = 'dshSuperagent'
@@ -104,6 +105,7 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
 export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace', 'layout']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => startViewEvents(ctx))
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
   const showTicket = (id: string) => {

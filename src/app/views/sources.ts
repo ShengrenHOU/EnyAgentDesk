@@ -43,6 +43,13 @@ function sourceState(instance: SourceInstance & { installed: boolean }, parts: {
   if (parts.some(part => part.state === 'starting')) return 'starting'
   return parts.some(part => part.state === 'paused') ? 'paused' : 'ready'
 }
+/** Current source lifecycle without historical counts or message bodies. */
+export function sourcesHealth(host: ViewHost, health: HealthMap, setup: SetupState) {
+  return host.sources.instances().map(instance => {
+    const summary = sourceHealth(host.sources, instance, health)
+    return { ...summary, installed: instance.installed, enabled: instance.enabled, state: sourceState(instance, summary.health, setup) }
+  })
+}
 export function sourcesStatus(host: ViewHost, health: HealthMap, setup: SetupState) {
   const { store, sources } = host
   const view = snapshot(host)

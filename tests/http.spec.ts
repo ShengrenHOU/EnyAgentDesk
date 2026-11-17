@@ -14,7 +14,7 @@ import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
 import { testMachine } from './fixtures/deployment.ts'
-import { startRuntime } from './fixtures/host.ts'
+import { startRuntime, jobRegistry } from './fixtures/host.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -71,6 +71,20 @@ it('reports the actual executor model source and server prepare shell', async ()
     } } } })
   }
 })
+
+it('serves current status while asynchronous startup is still restoring the host', async () => {
+  const ready = Promise.withResolvers<void>()
+  const call = serve({ ready: ready.promise, machine: testMachine(), configured: () => false, masterId: 'master', health: {},
+    executor: { activeCount: () => 0 }, store: { triageHandoffStatus: () => ({ held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' }),
+      settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } } })
+  let finished = false
+  const response = call('GET', 'state').then(value => { finished = true; return value })
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(finished).toBe(true)
+    expect(await response).toMatchObject({ status: 200 })
+  } finally { ready.resolve(); await response }
+})
 it('reports the running package build and its activation time', async () => {
   const call = serve({
     store: { triageHandoffStatus: () => ({ held: 0, blocked: 0, owners: [], contextComplete: false, state: 'empty' }), settings: () => SettingsSchema.parse({}), get: () => undefined, tickets: { open: () => [] } },
@@ -97,7 +111,7 @@ it('reads the default-branch checkpoint under the monitored repository scope', (
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = { jobs: jobRegistry().service, webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''

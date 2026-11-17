@@ -26,6 +26,8 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET workbench': { response: ReturnType<typeof import('./views/overview.ts').workbenchView> }
+  'GET source-health': { response: ReturnType<typeof import('./views/sources.ts').sourcesHealth> }
   'GET automatic-triage': { query?: { after?: number }; response: ReturnType<AutomaticTriage['status']> }
   'POST automatic-triage/recover': { body: { owners: Parameters<AutomaticTriage['recover']>[0]; action: 'retry' | 'release' }; response: ReturnType<AutomaticTriage['recover']> }
   'POST production-triage/:id/retry': { body: { generation: number }; response: Pick<ReturnType<ProductionTriage['retry']>, 'id' | 'generation' | 'state'> }

@@ -26,6 +26,44 @@ beforeEach(() => {
 afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }) })
 const relay = (text: string) => ({ text })
 
+it('restores a persisted future operation and wakes it without a global pass', async () => {
+  await effects.drain()
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  try {
+    effects = new Effects(store, new HealthBoard())
+    effects.enqueueAt('relay', 'future', relay('retained'), Date.now() + 5000)
+    await effects.drain()
+    effects = new Effects(store, new HealthBoard())
+    const run = vi.fn(async () => {})
+    effects.handle('relay', run); effects.start(); await effects.idle()
+    expect(run).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(5000); await effects.idle()
+    expect(run).toHaveBeenCalledOnce()
+    expect(effects.pending('relay')).toBe(false)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(run).toHaveBeenCalledOnce()
+    await effects.drain()
+  } finally { vi.useRealTimers() }
+})
+
+it('wakes a retry without polling and removes the cancelled deadline', async () => {
+  await effects.drain()
+  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+  try {
+    effects = new Effects(store, new HealthBoard())
+    const run = vi.fn().mockRejectedValueOnce(new Later('capacity')).mockResolvedValue(undefined)
+    effects.handle('relay', run); effects.start(); effects.enqueue('relay', 'retry', relay('once'))
+    await effects.idle(); expect(run).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2000); await effects.idle()
+    expect(run).toHaveBeenCalledTimes(2)
+    effects.enqueueAt('relay', 'cancelled', relay('never'), Date.now() + 5000)
+    effects.cancel('relay', 'cancelled'); await effects.idle()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(run).toHaveBeenCalledTimes(2)
+    await effects.drain()
+  } finally { vi.useRealTimers() }
+})
+
 it('yields to I/O when delayed retries become due while other rows are processed', async () => {
   let attempts = 0, finish = false
   effects.handle('relay', async () => {
