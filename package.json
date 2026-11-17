@@ -5,7 +5,7 @@
     "DeepSeek Harness Team (upstream dsh-superagent-prototype)"
   ],
   "license": "Apache-2.0",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "Persistent personal work coordination as a DeepSeek Harness bundle, with Codex and DSH execution, Feishu intake and optional GitHub integration.",
   "repository": {
@@ -52,6 +52,10 @@
     "README.md",
     "prompts",
     "skills",
+    "integrations/dsh-memory/main-role.patch",
+    "integrations/dsh-memory/manifest.json",
+    "integrations/dsh-memory/README.md",
+    "integrations/dsh-memory/LICENSE.upstream",
     "scripts/*.py",
     "scripts/**/*.mjs",
     "scripts/*.ps1",

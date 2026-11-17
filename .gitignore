@@ -9,3 +9,4 @@ __pycache__/
 *.log
 *.tsbuildinfo
 .DS_Store
+!integrations/dsh-memory/upstream-0.5.7.tgz

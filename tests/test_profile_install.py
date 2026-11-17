@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -74,6 +75,42 @@ class ProfileInstallTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'new private receipt'):
             module.install(self.profile, self.bundle, Path('pnpm.mjs'), Path('node'), self.receipt)
         self.assertEqual(self.receipt.read_text(), 'previous evidence')
+
+    def test_native_memory_uses_reviewed_pnpm_patch_and_preserves_existing_config(self):
+        adapter = ROOT / 'integrations/dsh-memory'
+        installed = self.profile / 'node_modules/@dsh-external/dsh-memory'
+        installed.mkdir(parents=True)
+        with tarfile.open(adapter / 'upstream-0.5.7.tgz') as stream:
+            for member in stream.getmembers():
+                if not member.isfile():
+                    continue
+                path = installed.joinpath(*Path(member.name).parts[1:])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(stream.extractfile(member).read())
+        cfg = self.profile / 'cordis.patch.yml'
+        (self.profile / 'package.json').write_text(json.dumps({'dependencies': {'@dsh-external/dsh-memory': 'file:upstream.tgz'}}))
+        cfg.write_text('- id: dsh-memory\n  config:\n    memoryDir: /private/unchanged\n    maxBytes: 12000\n- id: other\n  disabled: true\n')
+        with tarfile.open(self.bundle, 'w:gz') as archive:
+            for name in ['main-role.patch', 'manifest.json']:
+                archive.add(adapter / name, arcname='package/integrations/dsh-memory/' + name)
+        calls = []
+        def run(args, cwd, **kwargs):
+            calls.append(args)
+            if 'install' in args:
+                real_run(['git', '-c', 'core.autocrlf=false', 'apply', str(self.profile / 'patches/native-memory-main.patch')], cwd=installed, check=True, capture_output=True)
+                return subprocess.CompletedProcess(args, 0, '', '')
+            return real_run(args, cwd=cwd, **kwargs)
+        real_run = subprocess.run
+        with patch.object(module.subprocess, 'run', side_effect=run):
+            result = module.native_memory(self.profile, self.bundle, ['node', 'pnpm.mjs'], self.store.parent)
+        self.assertEqual(result['status'], 'patched')
+        self.assertIn('--ignore-scripts', next(args for args in calls if 'install' in args))
+        self.assertIn('memoryDir: /private/unchanged', cfg.read_text())
+        self.assertIn('maxBytes: 12000', cfg.read_text())
+        self.assertEqual(cfg.read_text().count('parentedRootPresets:'), 1)
+        with patch.object(module.subprocess, 'run') as run:
+            module.native_memory(self.profile, self.bundle, ['node', 'pnpm.mjs'], self.store.parent)
+            run.assert_not_called()
 
     def test_reads_pnpm_yaml_as_well_as_existing_json_metadata(self):
         self.metadata.write_text('storeDir: ' + json.dumps(str(self.store)) + '\n')

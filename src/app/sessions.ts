@@ -171,7 +171,7 @@ export class Sessions {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
-      // Workspace membership also selects cwd in DSH; sidebar grouping must not change a ticket's execution directory.
+      // A Ticket's native cwd is independent of sidebar membership; Workspace attachment must validate this same path.
       await ctx.sessionController.create({ sessionId: id as SessionId, cwd,
         agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
       result = await ctx.sessionController.resolveAgent(id as SessionId)

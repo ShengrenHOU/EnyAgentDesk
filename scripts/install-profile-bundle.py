@@ -6,6 +6,62 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import re
+
+
+def native_memory(profile, bundle, command, store_base):
+    """Apply the exact optional integration through pnpm; memory data is never opened."""
+    installed = profile / 'node_modules/@dsh-external/dsh-memory/package.json'
+    if not installed.exists():
+        return {'status': 'absent'}
+    version = json.loads(installed.read_text(encoding='utf-8'))['version']
+    with tarfile.open(bundle) as archive:
+        try:
+            patch = archive.extractfile('package/integrations/dsh-memory/main-role.patch').read()
+            contract = json.load(archive.extractfile('package/integrations/dsh-memory/manifest.json'))
+        except KeyError:
+            return {'status': 'not_requested'}
+    if version != '0.5.7':
+        return {'status': 'unsupported', 'version': version}
+    def matches(files):
+        return all(hashlib.sha256((installed.parent / file).read_bytes()).hexdigest() == digest for file, digest in files.items())
+    if not matches(contract['patched']):
+        if not matches(contract['original']):
+            raise ValueError('Memory package differs from the reviewed upstream and patched files')
+        patch_file = profile / 'patches/native-memory-main.patch'
+        patch_file.parent.mkdir(exist_ok=True)
+        if patch_file.exists() and patch_file.read_bytes() != patch:
+            raise ValueError('Preserve the existing native memory patch before upgrading it')
+        workspace = profile / 'pnpm-workspace.yaml'
+        text = workspace.read_text(encoding='utf-8') if workspace.exists() else ''
+        declaration = '  "@dsh-external/dsh-memory@0.5.7": patches/native-memory-main.patch\n'
+        if '@dsh-external/dsh-memory@0.5.7' in text and declaration.strip() not in text:
+            raise ValueError('An existing memory patch needs review; it was not replaced')
+        patch_file.write_bytes(patch)
+        if declaration.strip() not in text:
+            text = text.replace('patchedDependencies:\n', 'patchedDependencies:\n' + declaration, 1) if 'patchedDependencies:\n' in text else text.rstrip() + '\npatchedDependencies:\n' + declaration
+            workspace.write_bytes(text.encode('utf-8'))
+        subprocess.run([*command, 'install', '--no-frozen-lockfile', '--ignore-scripts', '--store-dir', str(store_base),
+                        '--config.confirmModulesPurge=false'], cwd=profile, check=True, capture_output=True, text=True, timeout=300)
+        if not matches(contract['patched']):
+            raise ValueError('pnpm did not install the expected memory adapter files')
+    # The existing loader override owns the role declaration; retain all other fields and budgets.
+    path = profile / 'cordis.patch.yml'
+    text = path.read_text(encoding='utf-8')
+    blocks = list(re.finditer(r'(?m)^- id: dsh-memory\s*\n', text))
+    if len(blocks) != 1:
+        raise ValueError('Memory adapter requires one existing dsh-memory profile override')
+    start = blocks[0].end()
+    following = re.search(r'(?m)^- ', text[start:])
+    end = start + following.start() if following else len(text)
+    block = text[start:end]
+    if not re.search(r'(?m)^    parentedRootPresets:', block):
+        if block.count('  config:\n') != 1:
+            raise ValueError('Memory adapter requires the existing config mapping')
+        block = block.replace('  config:\n', '  config:\n    parentedRootPresets: ["dsh-superagent-router"]\n', 1)
+        path.write_bytes((text[:start] + block + text[end:]).encode('utf-8'))
+    return {'status': 'patched', 'version': version, 'patchSha256': hashlib.sha256(patch).hexdigest(),
+            'preset': 'dsh-superagent-router'}
 
 
 def store_directory(profile):
@@ -57,6 +113,8 @@ def install(profile, bundle, pnpm_js, node, receipt_path):
         resolved = json.loads(package.read_text(encoding='utf-8'))
         if resolved.get('name') != target['name'] or resolved.get('version') != target['version']:
             raise ValueError('The profile still resolves another bundle; installation is not confirmed')
+        receipt['stage'] = 'native_memory'
+        receipt['memory'] = native_memory(profile, bundle, command, store_base)
         receipt.update(status='installed', resolvedVersion=resolved['version'], stage='complete')
         return receipt
     except Exception as error:

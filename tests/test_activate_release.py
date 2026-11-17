@@ -268,6 +268,12 @@ class ActivationTest(unittest.TestCase):
         self.assertFalse(self.live['paused'])
 
     def test_failed_verification_restores_code_and_configuration_but_keeps_new_records(self):
+        workspace = self.profile / 'pnpm-workspace.yaml'
+        workspace.write_text('packages: [.]\n', encoding='utf-8')
+        def installed(*args):
+            self.install(*args)
+            workspace.write_text('patchedDependencies: {}\n', encoding='utf-8')
+        self.installer.side_effect = installed
         def verify(config, version, *args):
             if version == '0.6.0':
                 raise RuntimeError('Candidate failed verification')
@@ -275,10 +281,22 @@ class ActivationTest(unittest.TestCase):
         with patch.object(activation, 'verify', side_effect=verify), self.assertRaisesRegex(RuntimeError, 'Candidate failed'):
             self.activate()
         self.assertEqual(json.loads(self.receipt.read_text())['rollback'], 'restored')
+        self.assertEqual(workspace.read_text(encoding='utf-8'), 'packages: [.]\n')
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual(activation.database(self.db)['tickets'], {'business-ticket', 'new-evidence-during-cutover'})
         self.assertFalse(self.live['paused'])
         self.assertIn('--frozen-lockfile', self.run.call_args_list[-2].args[0])
+
+    def test_failed_install_removes_new_workspace_patch_configuration(self):
+        workspace = self.profile / 'pnpm-workspace.yaml'
+        def failed_install(*args):
+            workspace.write_text('patchedDependencies: {}\n', encoding='utf-8')
+            raise RuntimeError('Memory patch install failed')
+        self.installer.side_effect = failed_install
+        with self.assertRaisesRegex(RuntimeError, 'Memory patch install failed'):
+            self.activate()
+        self.assertFalse(workspace.exists())
+        self.assertEqual(json.loads(self.receipt.read_text())['rollback'], 'restored')
 
     def test_schema_change_refuses_snapshot_rollback_and_preserves_paused_state(self):
         def verify(*args):

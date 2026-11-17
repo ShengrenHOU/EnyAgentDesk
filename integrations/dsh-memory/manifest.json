@@ -1,0 +1,20 @@
+{
+  "upstreamVersion": "0.5.7",
+  "upstreamArchiveSha256": "8e82bcbb6af0aab9d953b0de38faa529dc33e5f43c0589cedc81105e53e9ac6a",
+  "original": {
+    "lib/automation.js": "879c3351e7192cd3cdecab3d6b7fcbab5067dff9ec0682024a6e17718e1f9416",
+    "lib/client.js": "e8fa145196d0ed6fc27c797dd7d33d49d65489c5c4c7dac76c2ec33f5ebcba1b",
+    "lib/index.js": "d94e23188ee5389dda711717046fa0c0c221128c4e94e5a5fe39112ac52b4499",
+    "README.md": "3a524719b3d200545f8b0b750f4af5101689124fa6f91e031766544edbea996c",
+    "README.zh.md": "74d4170e37e7f3681d3991a43197361374d932a67c068b731e05099b9b704eee",
+    "lib/types/index.d.ts": "316462655b118bdf562fba3f99b9c9818da6ffa8c7fcf91492953c2f5a0b6e32"
+  },
+  "patched": {
+    "lib/automation.js": "c594ef6fa89f8ae6a69bba0816d5ecc474bbe1f9070f2ce6e53d428491c6df31",
+    "lib/client.js": "60527a448856ea9934a0fa6dd332eecd8b4c1d28400b469b87b1c754f8d3ec9e",
+    "lib/index.js": "5a264a125eea3ba19e76d7d686392cca306ce44867d3dacde45c8a615339fea7",
+    "README.md": "0046efb2445345d211a756e2af347f5d4529cee09951a57115c5a3544afac52c",
+    "README.zh.md": "8782e7374a9bf55543ff3e9750c58effea561d3e493ed42f5d8d5889cbaf36af",
+    "lib/types/index.d.ts": "ac23fb3195762ac526283b25a32508a22a5001c09dd09218e59bbd88840482eb"
+  }
+}

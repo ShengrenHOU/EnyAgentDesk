@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 — 2026-11-17
+
+- Restore automatic memory distillation for segmented Main Sessions while retaining native parent lineage. Real subagent-origin Sessions remain excluded through an opt-in trusted-preset setting in the existing memory plugin.
+- Keep first-time extraction on the latest native turn and exclude injected runtime context from new memory facts. Keep the existing stores, scopes, tools and asynchronous model pipeline.
+- Ship a reviewed exact-version pnpm patch for optional dsh-memory 0.5.7, including upstream MIT provenance and file hashes. Profile installation disables lifecycle scripts; activation backs up dependency patch configuration for rollback.
+
+Upgrade note: no business-state schema, source scope or execution-permission change from 0.9.0. Existing memory is preserved. Upstream bounded windows, model curation limits and consolidation throttling remain; pending in-process summarization is not a lossless event journal. Optional plugin versions other than reviewed 0.5.7 are not modified.
+
 ## 0.9.0 — 2026-11-17
 
 - Replace periodic global orchestration with committed lifecycle changes, per-judgment deadlines and durable Effects. Completed intake recovery epochs keep their cursor instead of repeatedly rescanning history.

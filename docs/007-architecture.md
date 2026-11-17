@@ -427,6 +427,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/main-sessions.ts` | MainSessions |
 | `src/app/sessions.ts` | Sessions |
 | `src/app/memory-tools.ts` | Scoped forwarding of installed native memory tools, preserving provider execution and refusing stale bindings |
+
+The optional native-memory integration in `integrations/dsh-memory` retains an
+immutable MIT upstream package and a pnpm-managed patch. It declares trusted
+parented coordinator presets without changing parent lineage or treating actual
+subagents as root conversations. Sidebar Workspace membership is independent of
+Ticket execution cwd; memory scopes continue to use native cwd/project identity.
 | `src/infra/delivery.ts` | `AgentDelivery`: shared DSH transport for Sessions and Source plugins; delivers once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
