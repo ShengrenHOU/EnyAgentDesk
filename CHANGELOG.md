@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.2 — 2026-11-17
+
+- Show `autoSummaryEligible` in native memory_stats text, so the model sees the same eligibility value as the structured result.
+- Upgrade the reviewed 0.9.1 memory patch through pnpm using exact prior-file and patch hashes. Back up and restore the patch file with dependency configuration; keep mandatory profile files required before stopping the host. Unknown modifications still fail closed.
+
+Upgrade note: no schema, memory path, source-scope or permission change from 0.9.1.
+
 ## 0.9.1 — 2026-11-17
 
 - Restore automatic memory distillation for segmented Main Sessions while retaining native parent lineage. Real subagent-origin Sessions remain excluded through an opt-in trusted-preset setting in the existing memory plugin.

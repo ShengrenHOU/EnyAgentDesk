@@ -76,7 +76,7 @@ class ProfileInstallTest(unittest.TestCase):
             module.install(self.profile, self.bundle, Path('pnpm.mjs'), Path('node'), self.receipt)
         self.assertEqual(self.receipt.read_text(), 'previous evidence')
 
-    def test_native_memory_uses_reviewed_pnpm_patch_and_preserves_existing_config(self):
+    def memory_profile(self):
         adapter = ROOT / 'integrations/dsh-memory'
         installed = self.profile / 'node_modules/@dsh-external/dsh-memory'
         installed.mkdir(parents=True)
@@ -93,6 +93,10 @@ class ProfileInstallTest(unittest.TestCase):
         with tarfile.open(self.bundle, 'w:gz') as archive:
             for name in ['main-role.patch', 'manifest.json']:
                 archive.add(adapter / name, arcname='package/integrations/dsh-memory/' + name)
+        return adapter, installed, cfg
+
+    def test_native_memory_uses_reviewed_pnpm_patch_and_preserves_existing_config(self):
+        adapter, installed, cfg = self.memory_profile()
         calls = []
         def run(args, cwd, **kwargs):
             calls.append(args)
@@ -111,6 +115,36 @@ class ProfileInstallTest(unittest.TestCase):
         with patch.object(module.subprocess, 'run') as run:
             module.native_memory(self.profile, self.bundle, ['node', 'pnpm.mjs'], self.store.parent)
             run.assert_not_called()
+
+    def test_upgrades_only_the_reviewed_prior_package_and_patch(self):
+        adapter, installed, cfg = self.memory_profile()
+        prior = ROOT / 'tests/fixtures/memory-0.9.1.patch'
+        subprocess.run(['git', '-c', 'core.autocrlf=false', 'apply', str(prior)], cwd=installed, check=True, capture_output=True)
+        patch_file = self.profile / 'patches/native-memory-main.patch'
+        patch_file.parent.mkdir()
+        patch_file.write_bytes(prior.read_bytes())
+        (self.profile / 'pnpm-workspace.yaml').write_text('patchedDependencies:\n  "@dsh-external/dsh-memory@0.5.7": patches/native-memory-main.patch\n')
+        real_run = subprocess.run
+        def reinstall(args, **kwargs):
+            real_run(['git', '-c', 'core.autocrlf=false', 'apply', '-R', str(prior)], cwd=installed, check=True, capture_output=True)
+            real_run(['git', '-c', 'core.autocrlf=false', 'apply', str(patch_file)], cwd=installed, check=True, capture_output=True)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(module.subprocess, 'run', side_effect=reinstall):
+            result = module.native_memory(self.profile, self.bundle, ['node', 'pnpm.mjs'], self.store.parent)
+        self.assertEqual(result['status'], 'patched')
+        self.assertEqual(patch_file.read_bytes(), (adapter / 'main-role.patch').read_bytes())
+
+    def test_rejects_an_unreviewed_patch_without_overwriting_it(self):
+        _, _, cfg = self.memory_profile()
+        before = cfg.read_bytes()
+        patch_file = self.profile / 'patches/native-memory-main.patch'
+        patch_file.parent.mkdir()
+        patch_file.write_bytes(b'unreviewed changes')
+        with patch.object(module.subprocess, 'run') as run, self.assertRaisesRegex(ValueError, 'Preserve the existing'):
+            module.native_memory(self.profile, self.bundle, ['node', 'pnpm.mjs'], self.store.parent)
+        run.assert_not_called()
+        self.assertEqual(patch_file.read_bytes(), b'unreviewed changes')
+        self.assertEqual(cfg.read_bytes(), before)
 
     def test_reads_pnpm_yaml_as_well_as_existing_json_metadata(self):
         self.metadata.write_text('storeDir: ' + json.dumps(str(self.store)) + '\n')

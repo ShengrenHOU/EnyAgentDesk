@@ -1,1 +1,2 @@
 integrations/dsh-memory/*.patch text eol=lf
+tests/fixtures/memory-*.patch text eol=lf

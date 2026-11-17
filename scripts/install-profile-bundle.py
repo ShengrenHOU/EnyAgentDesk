@@ -26,12 +26,14 @@ def native_memory(profile, bundle, command, store_base):
     def matches(files):
         return all(hashlib.sha256((installed.parent / file).read_bytes()).hexdigest() == digest for file, digest in files.items())
     if not matches(contract['patched']):
-        if not matches(contract['original']):
+        previous = contract.get('previous')
+        if not matches(contract['original']) and not (previous and matches(previous['files'])):
             raise ValueError('Memory package differs from the reviewed upstream and patched files')
         patch_file = profile / 'patches/native-memory-main.patch'
         patch_file.parent.mkdir(exist_ok=True)
         if patch_file.exists() and patch_file.read_bytes() != patch:
-            raise ValueError('Preserve the existing native memory patch before upgrading it')
+            if not previous or hashlib.sha256(patch_file.read_bytes()).hexdigest() != previous['patchSha256']:
+                raise ValueError('Preserve the existing native memory patch before upgrading it')
         workspace = profile / 'pnpm-workspace.yaml'
         text = workspace.read_text(encoding='utf-8') if workspace.exists() else ''
         declaration = '  "@dsh-external/dsh-memory@0.5.7": patches/native-memory-main.patch\n'

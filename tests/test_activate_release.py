@@ -270,9 +270,13 @@ class ActivationTest(unittest.TestCase):
     def test_failed_verification_restores_code_and_configuration_but_keeps_new_records(self):
         workspace = self.profile / 'pnpm-workspace.yaml'
         workspace.write_text('packages: [.]\n', encoding='utf-8')
+        memory_patch = self.profile / 'patches/native-memory-main.patch'
+        memory_patch.parent.mkdir()
+        memory_patch.write_bytes(b'reviewed original patch')
         def installed(*args):
             self.install(*args)
             workspace.write_text('patchedDependencies: {}\n', encoding='utf-8')
+            memory_patch.write_bytes(b'new reviewed patch')
         self.installer.side_effect = installed
         def verify(config, version, *args):
             if version == '0.6.0':
@@ -282,6 +286,7 @@ class ActivationTest(unittest.TestCase):
             self.activate()
         self.assertEqual(json.loads(self.receipt.read_text())['rollback'], 'restored')
         self.assertEqual(workspace.read_text(encoding='utf-8'), 'packages: [.]\n')
+        self.assertEqual(memory_patch.read_bytes(), b'reviewed original patch')
         self.assertEqual(self.config.read_bytes(), self.original)
         self.assertEqual(activation.database(self.db)['tickets'], {'business-ticket', 'new-evidence-during-cutover'})
         self.assertFalse(self.live['paused'])
@@ -297,6 +302,14 @@ class ActivationTest(unittest.TestCase):
             self.activate()
         self.assertFalse(workspace.exists())
         self.assertEqual(json.loads(self.receipt.read_text())['rollback'], 'restored')
+
+    def test_missing_required_lock_fails_before_stopping_the_host(self):
+        (self.profile / 'pnpm-lock.yaml').unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.activate()
+        self.stop.assert_not_called()
+        self.installer.assert_not_called()
+        self.assertFalse(self.live['paused'])
 
     def test_schema_change_refuses_snapshot_rollback_and_preserves_paused_state(self):
         def verify(*args):

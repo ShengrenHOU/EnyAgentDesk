@@ -120,7 +120,15 @@
              summaryBudgetRatio: { type: 'number' },
              summaryHighWater: { type: 'boolean' },
              injectedBytes: { type: 'number' },
-@@ -1973,6 +1975,7 @@
+@@ -1925,6 +1927,7 @@
+           `rollout files: ${value.rolloutFiles}${value.rolloutWindow !== undefined ? ` (window ${value.rolloutWindow.limit}${value.rolloutWindow.overflow ? ', OVERFLOW' : ''})` : ''}`,
+           `journal events: ${value.journalEvents} (cursor ${value.journalCursor})`,
+           `last consolidation: ${value.lastConsolidatedAt > 0 ? new Date(value.lastConsolidatedAt).toISOString() : 'never'}${value.lastPrune ? `, prune ${value.lastPrune.beforeBytes}->${value.lastPrune.afterBytes} B (target ${value.lastPrune.targetBytes} B / ${value.lastPrune.targetChars} chars)` : ''}${value.lastConsolidationPrunedAt > 0 ? `, pruned @ ${new Date(value.lastConsolidationPrunedAt).toISOString()}` : ''}${value.lastConsolidationTruncatedAt > 0 ? `, truncated @ ${new Date(value.lastConsolidationTruncatedAt).toISOString()}` : ''}`,
++          `autoSummaryEligible: ${value.autoSummaryEligible}`,
+           `active summaries: ${value.activeSummaries}, consolidating: ${value.consolidating}`,
+           `summary history: ${value.summaryHistoryFiles} files (keep ${value.keepSummaryVersions})`,
+           `archived raw entries: ${value.archivedRawCount} (${value.archivedRawBytes} bytes, archive budget ${value.rawArchiveMaxBytes})`,
+@@ -1973,6 +1976,7 @@
            summaryBytes,
            summaryVersion: summaryVersion(summary),
            summaryOverBudget: budget.overBudget,

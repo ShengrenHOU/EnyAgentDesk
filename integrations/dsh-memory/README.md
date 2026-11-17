@@ -45,3 +45,7 @@ scope and requires the configured number of new blocks. Completed summaries surv
 restart, but pending per-session debounce/retry timers are process-local. First-time
 extraction is a bounded latest-turn window, not a lossless replay of earlier turns.
 The adapter does not claim perfect recall or durable capture of every interrupted turn.
+
+The installer also accepts the exact reviewed 0.9.1 patch/file hashes as a prior
+revision. The activator backs up the actual patch file with the profile lock/config
+for rollback. Unknown package or patch edits still require a separate review.

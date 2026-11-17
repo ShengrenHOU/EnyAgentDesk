@@ -12,9 +12,20 @@
   "patched": {
     "lib/automation.js": "c594ef6fa89f8ae6a69bba0816d5ecc474bbe1f9070f2ce6e53d428491c6df31",
     "lib/client.js": "60527a448856ea9934a0fa6dd332eecd8b4c1d28400b469b87b1c754f8d3ec9e",
-    "lib/index.js": "5a264a125eea3ba19e76d7d686392cca306ce44867d3dacde45c8a615339fea7",
+    "lib/index.js": "a392c5ede4a4cb7b01553d082433b63459125c1e1268064535d7e78b8bdcb43a",
     "README.md": "0046efb2445345d211a756e2af347f5d4529cee09951a57115c5a3544afac52c",
     "README.zh.md": "8782e7374a9bf55543ff3e9750c58effea561d3e493ed42f5d8d5889cbaf36af",
     "lib/types/index.d.ts": "ac23fb3195762ac526283b25a32508a22a5001c09dd09218e59bbd88840482eb"
+  },
+  "previous": {
+    "patchSha256": "e6a177454ca1b749be69a842dfb8094d118343046076b1b4471103a9b760e2b6",
+    "files": {
+      "lib/automation.js": "c594ef6fa89f8ae6a69bba0816d5ecc474bbe1f9070f2ce6e53d428491c6df31",
+      "lib/client.js": "60527a448856ea9934a0fa6dd332eecd8b4c1d28400b469b87b1c754f8d3ec9e",
+      "lib/index.js": "5a264a125eea3ba19e76d7d686392cca306ce44867d3dacde45c8a615339fea7",
+      "README.md": "0046efb2445345d211a756e2af347f5d4529cee09951a57115c5a3544afac52c",
+      "README.zh.md": "8782e7374a9bf55543ff3e9750c58effea561d3e493ed42f5d8d5889cbaf36af",
+      "lib/types/index.d.ts": "ac23fb3195762ac526283b25a32508a22a5001c09dd09218e59bbd88840482eb"
+    }
   }
 }

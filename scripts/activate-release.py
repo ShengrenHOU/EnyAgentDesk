@@ -201,10 +201,12 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
         checkpoint('backup')
         backup = receipt_path.with_suffix('.backup')
         backup.mkdir(parents=True, exist_ok=False)
-        saved = {name: (profile / name).read_bytes() if (profile / name).exists() else None
-                 for name in ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml', 'pnpm-workspace.yaml']}
+        saved = {name: (profile / name).read_bytes() for name in ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']}
+        saved.update({name: (profile / name).read_bytes() if (profile / name).exists() else None
+                      for name in ['pnpm-workspace.yaml', 'patches/native-memory-main.patch']})
         for name, data in saved.items():
             if data is not None:
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
                 (backup / name).write_bytes(data)
         (backup / 'launcher.json').write_bytes(old_config_bytes)
         before_db = database(db, backup / 'orchestrator.sqlite')
@@ -275,6 +277,7 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
                         if data is None:
                             (profile / name).unlink(missing_ok=True)
                         else:
+                            (profile / name).parent.mkdir(parents=True, exist_ok=True)
                             (profile / name).write_bytes(data)
                     config_path.write_bytes(old_config_bytes)
                     config = launcher.validate_config(json.loads(old_config_bytes))

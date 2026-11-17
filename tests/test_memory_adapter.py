@@ -33,7 +33,7 @@ class MemoryAdapterTest(unittest.TestCase):
             contract = json.loads((ADAPTER / 'manifest.json').read_text())
             for file, digest in contract['patched'].items():
                 self.assertEqual(hashlib.sha256((folder / file).read_bytes()).hexdigest(), digest, file)
-            code = """
+            code = r"""
 import assert from 'node:assert/strict';
 import { canSummarizeSession as eligible, memoryEventWindow as window } from './lib/automation.js';
 const main = ['coordinator'];
@@ -49,6 +49,12 @@ const events=[{seq:1,type:'turn/start'},{seq:2,type:'user/message',data:'old'},{
 assert.deepEqual(window(events,0).map(e=>e.seq),[4,5]);
 assert.deepEqual(window(events,2).map(e=>e.seq),[3,4,5]);
 assert.deepEqual(window([...events,{seq:6,type:'user/message',data:{source:{kind:'runtime-context'}}}],0).map(e=>e.seq),[4,5]);
+const { readFileSync } = await import('node:fs');
+const source = readFileSync('./lib/index.js', 'utf8');
+const at = source.indexOf('render: (_args, value) => textOutput([', source.indexOf("name: 'memory_stats'"));
+const end = source.indexOf("].join('\\n'))", at) + "].join('\\n'))".length;
+const render = new Function('textOutput', 'return (' + source.slice(at + 'render: '.length, end) + ')')(text => text);
+assert.match(render({}, {autoSummaryEligible:true,scopes:[]}), /autoSummaryEligible: true/);
 console.log('seven eligibility assertions passed');
 """
             run = subprocess.run(['node', '--input-type=module', '-e', code], cwd=folder, check=True, capture_output=True, text=True)
