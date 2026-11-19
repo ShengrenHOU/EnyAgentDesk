@@ -9,10 +9,12 @@ it('renders grouped matter review and nested coverage without action or resolved
   const html = renderToStaticMarkup(<ProductionJudgments t={t} view={{ ...summary, limited: false, groups: [{ id: 'receipt', owner: 'owner', generation: 1,
     state: 'completed', window: { start: '2026-11-09', end: '2026-11-10' }, at: '2026-11-10', messages: 2, redacted: false, newerKnownEvidence: false, historical: false,
     problem: undefined, conversation: 'chat', counts: { informational: 1, suggested_action: 1, unknown: 0, none: 0 },
-    matters: [{ id: 'matter', title: 'Review shared plan', reason: 'Two related messages', triggerIds: ['a', 'b'] }],
+    matters: [{ id: 'matter', title: 'Review shared plan', reason: 'Two related messages', triggerIds: ['a', 'b'],
+      pendingReview: { lineId: 'line', lineTitle: 'Contract', nextStep: 'Verify the scope before approval' } }],
     items: [{ triggerId: 'a', historical: false, kind: 'informational', reason: 'A reference', contextHash: 'abc', gaps: ['local_sync_only'] }] }] }} />)
   expect(html).toContain('Review shared plan'); expect(html).toContain('Per-message audit')
   expect(html).toContain('Judgment recorded'); expect(html).toContain('suggested follow-ups')
+  expect(html).toContain('For review'); expect(html).toContain('Verify the scope before approval')
   expect(html).toContain('local_sync_only'); expect(html).not.toContain('<button'); expect(html).not.toContain('<input')
 })
 it('empty projection does not add a dashboard task or placeholder', () => {

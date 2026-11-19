@@ -46,7 +46,7 @@ const drain = async () => { effects.start(); await effects.idle('triageAssessmen
 const consume = (batch: ProductionBatch) => {
   for (const input of batch.inputs) { let offset: number | null = 0; do { offset = service.context(batch.id, batch.generation, input.triggerId, offset).next_offset } while (offset !== null) }
 }
-const result = (batch: ProductionBatch, kind: 'informational' | 'unknown' = 'informational') => ({ model: 'reported-model',
+const result = (batch: ProductionBatch, kind: 'informational' | 'suggested_action' | 'unknown' = 'informational') => ({ model: 'reported-model',
   items: batch.inputs.map(input => ({ triggerId: input.triggerId, kind, reason: 'A shared reference', context: (() => { try { const context = service.read(batch.id).contexts[input.triggerId]; return { revision: context?.revision ?? 1, hash: context?.hash ?? 'x'.repeat(64) } } catch { return { revision: 1, hash: 'x'.repeat(64) } } })(), matterIds: [] as string[] })), matters: [] })
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), 'production-triage-')); store = new Store(join(directory, 'state.sqlite'))
@@ -71,6 +71,23 @@ async function next(id: string, text = 'A concrete goal', chat = 'chat', nativeP
 function commit(current: Awaited<ReturnType<typeof next>>, proposals?: unknown[]) {
   return service.submit(current.batch.id, current.batch.generation, current.batch.binding!, { ...current.value, ...(proposals ? { proposals } : {}) } as never)
 }
+it('does not promote a mere acknowledgment to an action using other messages as its only evidence', async () => {
+  native = id => ({ assertActive() {}, async read(request) {
+    const anchor = { id, text: `private ${id}`, version: 'v1', createdAt: now }
+    return { provider, account: 'owner', conversation: 'chat', start: request.start, end: request.end, consistency: 'live_paginated', gaps: [], anchor,
+      messages: [anchor, { id: 'earlier-report', text: 'Prior run failed', version: 'v2', createdAt: now }] }
+  } })
+  const current = await next('ack', 'Missing deployment check')
+  const context = current.batch.contexts.ack!
+  const proposal = { localMatterId: 'local', relation: 'new', assessment: 'suggested_action', reason: 'The prior report describes a failure',
+    evidence: [{ kind: 'context', batchId: current.batch.id, generation: 1, triggerId: 'ack', revision: context.revision,
+      hash: context.hash, messageId: 'earlier-report', version: 'v2' }] }
+  expect(() => commit(current, [proposal])).toThrow('current input carrying the change')
+  current.value.items[0]!.kind = 'suggested_action'
+  expect(() => commit(current, [proposal])).toThrow('current input carrying the change')
+  expect(store.get<ProductionBatch>(`triage-production:${current.batch.id}`)!.state).toBe('awaiting')
+  expect(service.matters.overview().total).toBe(0)
+})
 function cite(batch: Pick<ProductionBatch, 'id' | 'generation' | 'inputs'>, triggerId = batch.inputs[0]!.triggerId) {
   return { kind: 'trigger' as const, batchId: batch.id, generation: batch.generation, triggerId, version: batch.inputs.find(input => input.triggerId === triggerId)!.identity.version }
 }
@@ -80,6 +97,7 @@ function prior(current: Pick<ProductionBatch, 'id' | 'generation'>, old: Product
 }
 function link(current: Awaited<ReturnType<typeof next>>, old: ProductionBatch, relation = 'continue') {
   const candidate = service.matterCandidates(current.batch.id, 1).groups.find(group => group.members.some(member => member.batchId === old.id))!
+  current.value.items[0]!.kind = 'suggested_action'
   return { localMatterId: 'local', relation, targetId: candidate.id, expectedRevision: candidate.revision, assessment: 'suggested_action', reason: 'Same observed goal', evidence: [cite(current.batch), cite(old)] }
 }
 it('associates two native channels with existing work and revalidates each receipt independently', async () => {
@@ -93,9 +111,9 @@ it('associates two native channels with existing work and revalidates each recei
   const groups = service.matters.overview().groups
   const feishu = groups.find(group => group.conversation === 'feishu-chat')!, wechat = groups.find(group => group.conversation === 'wechat-chat')!
   const delivery = vi.fn(() => engine.note(ticketId, 'Read associated evidence').inputs.at(-1)!.id)
-  const linked = service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', delivery)
+  const linked = service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', { deliver: delivery })
   expect(linked.inputId).toBeDefined()
-  expect(service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', delivery).reused).toBe(true)
+  expect(service.matters.handoff(feishu.id, feishu.revision, target, 'Same deployment', { deliver: delivery }).reused).toBe(true)
   expect(delivery).toHaveBeenCalledTimes(1)
   service.matters.handoff(wechat.id, wechat.revision, { kind: 'line', id: line.id }, 'Same deployment')
   const page = service.matters.workEvidence(target)
@@ -117,9 +135,9 @@ it('rolls back the association and context note together when delivery fails', a
   add('owner', 'owner-chat', true)
   const ticketId = engine.decide('owner', { kind: 'accept', title: 'Review', scope: 'Read evidence', name: 'review', reason: 'Owner request', acknowledgement: 'Received' }).ticketId!
   const matter = service.matters.overview().groups[0]!, before = structuredClone(store.tickets.get(ticketId))
-  expect(() => service.matters.handoff(matter.id, matter.revision, { kind: 'ticket', id: ticketId }, 'Evidence', () => {
+  expect(() => service.matters.handoff(matter.id, matter.revision, { kind: 'ticket', id: ticketId }, 'Evidence', { deliver: () => {
     engine.note(ticketId, 'Context'); throw new Error('Interrupted')
-  })).toThrow('Interrupted')
+  } })).toThrow('Interrupted')
   expect(store.tickets.get(ticketId)).toEqual(before)
   expect(service.matters.overview().groups[0]).toMatchObject({ revision: matter.revision })
   expect(service.matters.overview().groups[0]!.handoff).toBeUndefined()

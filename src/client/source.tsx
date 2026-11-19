@@ -144,9 +144,9 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
   const { problem, dropped } = source
   const { dot, label: state } = sourceMark(t, source.state)
   const { received, filtered, lastAt } = source.stats
-  // Omit healthy parts and suppress per-part notes when a setup problem already explains why the Source is stopped.
+  // Show active progress and faults, but skip quiet successful parts.
   const notes = (source.enabled || source.configError) && !problem && !setup?.problem ? source.health.filter(item => item.state === 'error'
-    || item.state === 'paused') : []
+    || item.state === 'paused' || item.state === 'starting') : []
   return <li className="dt-row">
     <Dot state={dot} label={state} />
     <div className="dt-row-main">
@@ -163,10 +163,16 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
           {t('sourceOpenSettings')}
         </button>
       </p>}
-      {notes.map(item => <p key={item.name} className={item.state === 'error' ? 'dt-error dt-clamp' : 'dt-hint dt-clamp'}>
-        {valueLabel(t, 'health', item.name)}{t('labelSeparator')}<span className={item.code ? undefined : 'dt-mono'}>{healthText(t,
-          item)}</span>
-      </p>)}
+      {notes.map(item => <div key={item.name}>
+        <p className={item.state === 'error' ? 'dt-error dt-clamp' : 'dt-hint dt-clamp'}>
+          {valueLabel(t, 'health', item.name)}{t('labelSeparator')}<span className={item.code ? undefined : 'dt-mono'}>{healthText(t, item)}</span>
+        </p>
+        {(item.state === 'error' || item.state === 'starting') && <div className="dt-row-meta">
+          {item.state === 'error' && <LabelValue label={t('sourceFailureSince')} value={item.failureSince ? when(item.failureSince, t('lang')) : t('sourceTimeUnknown')} />}
+          <LabelValue label={t('sourceLastSuccess')} value={item.lastSuccessAt ? when(item.lastSuccessAt, t('lang')) : t('sourceTimeUnknown')} />
+        </div>}
+      </div>)}
+      {notes.some(item => item.state === 'error') && <p className="dt-hint">{t('sourceMaintenanceAction')}</p>}
       {source.configError && <button type="button" className="dt-textlink"
         onClick={() => navigate(settingsRoute('source', { source: source.id }))}>{t('sourceOpenSettings')}</button>}
       {source.filtered.length > 0 && <DisclosureRow icon={<Icon name="filter" />} title={t('sourceFilteredTitle')} open={filteredOpen}

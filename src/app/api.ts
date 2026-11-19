@@ -15,7 +15,8 @@ import type { TicketListView } from './views/tickets.ts'
 import type { ExecutorTransfer } from './tools/routing.ts'
 import type { FollowupRequest, FollowupReceipt, Followups } from './followups.ts'
 import type { ManagementPatch, updateTicketManagement } from './management.ts'
-import type { LineDetail, LinesView } from './lines.ts'
+import type { LinesView } from './lines.ts'
+import type { ReadResults } from './read-models.ts'
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -54,7 +55,7 @@ export interface Api {
   'GET tickets/:id': { response: TicketPageView }
   'GET tickets/:id/evidence': { query?: { before?: number }; response: ReturnType<TriageMatters['workEvidence']> }
   'GET lines': { response: LinesView }
-  'GET lines/:id': { response: LineDetail }
+  'GET lines/:id': { response: NonNullable<ReadResults['line']> }
   'GET lines/:id/evidence': { query?: { before?: number }; response: ReturnType<TriageMatters['workEvidence']> }
   'POST lines/:id/membership': { body: { ticketId: string; targetLineId: string | null; evidence: string }; response: { changed: boolean } }
   'PUT tickets/:id/management': { body: ManagementPatch; response: ReturnType<typeof updateTicketManagement> }

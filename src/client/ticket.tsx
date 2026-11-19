@@ -12,7 +12,7 @@ import { Field } from './settings-kit.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, errorText, fullTime, localized, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
-import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
+import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, RefreshFailure, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
 
 type Input = TicketPageView['inputs'][number]
@@ -308,11 +308,11 @@ export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { setup } = usePanelData()
   const [preview, setPreview] = useState<{ title: string; url: string }>()
-  const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
+  const { data, error, updatedAt, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
-    title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : <LoadState
-      error={error} loading />}</>
+    title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : error
+      ? <RefreshFailure error={error} retry={reload} /> : <LoadState loading />}</>
   const status = ticketMark(t, data)
   const actor = actorName(t, data.mandate.actor)
   const { legacy } = data.basis
@@ -339,7 +339,7 @@ export function TicketPage({ id }: { id: string }) {
       {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}
       {data.codexThreadId && <code title="Codex thread">Codex: {data.codexThreadId}</code>}
     </PageHead>
-    {error && <LoadState error={error} loading={false} />}
+    {error && <RefreshFailure error={error} updatedAt={updatedAt} retry={reload} />}
     <WorkEvidence key={`${id}:evidence`} t={t} load={before => call('GET tickets/:id/evidence', { id, query: { before } })} />
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
@@ -415,6 +415,10 @@ export function TicketPage({ id }: { id: string }) {
         {data.codexThreadId && <Hint>{t('codexReportHistoryHint')}</Hint>}
       </Details>
     </div>}
+    {data.discussionConclusion && <Section title={t('discussionConclusionLabel')} icon="message">
+      <p>{data.discussionConclusion.summary}</p>
+      <When at={data.discussionConclusion.at} />
+    </Section>}
     <TicketManagement key={`${data.id}:management`} ticket={data} reload={reload} ended={!!data.ended} />
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>

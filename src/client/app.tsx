@@ -23,6 +23,7 @@ import { When } from './widgets.tsx'
 export interface AppProps {
   home?: ReactNode
   t: T; openSession: (sessionId: string) => Promise<void>
+  send?: ((sessionId: string, text: string) => Promise<void>) | undefined
   deploymentForm: DeploymentForm
   newDiscussion?: () => void
 }
@@ -110,7 +111,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
-/** The running package build, with a warning when the monitored source's default branch has moved past it. */
+/** The running package build and the observed default-branch head when it differs. */
 function RuntimeBadge() {
   const { t } = usePanel()
   const { state } = usePanelData()
@@ -119,12 +120,12 @@ function RuntimeBadge() {
   const unknown = t('runtimeUnknown')
   const detail = t('runtimeVersionTip', { version: runtime.packageVersion, commit: runtime.commit || unknown,
     builtAt: runtime.builtAt || unknown, startedAt: runtime.startedAt })
-  const behind = runtime.behind
-  return <Tag tone={behind ? 'warning' : 'quiet'} title={behind
-    ? `${detail}\n${t('runtimeBehindTip', { commit: runtime.commit || unknown, repository: runtime.repository || unknown,
-      branch: behind.branch, head: behind.head })}` : detail}>
-    {behind && <Icon name="alert" size={12} />}
-    {t('runtimeVersion', { version: runtime.packageVersion })}{behind ? ` · ${t('runtimeBehind', { branch: behind.branch })}` : ''}
+  const sourceDifference = runtime.behind
+  return <Tag tone="quiet" title={sourceDifference
+    ? `${detail}\n${t('runtimeSourceDifferenceTip', { repository: runtime.repository || unknown,
+      branch: sourceDifference.branch, head: sourceDifference.head })}` : detail}>
+    {t('runtimeVersion', { version: runtime.packageVersion })}{sourceDifference
+      ? ` · ${t('runtimeSourceDifference', { branch: sourceDifference.branch })}` : ''}
   </Tag>
 }
 
@@ -171,7 +172,7 @@ function Header({ masterId, newDiscussion, daily }: { masterId: string | undefin
 }
 
 /** Existing page bodies reused by the daily workbench and legacy deep links. */
-export function RouteContent({ route, deploymentForm }: { route: Route; deploymentForm: DeploymentForm }) {
+export function RouteContent({ route, deploymentForm, send }: { route: Route; deploymentForm: DeploymentForm; send?: AppProps['send'] }) {
   const { t } = usePanel()
   const { state, error, reload } = usePanelData()
   const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
@@ -179,7 +180,7 @@ export function RouteContent({ route, deploymentForm }: { route: Route; deployme
     switch (route.page) {
       case 'overview': return <OverviewPage />
       case 'source': return <SourceStatus />
-      case 'line': return <LinePage key={route.id} id={route.id} />
+      case 'line': return <LinePage key={route.id} id={route.id} send={send} />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
         : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
       case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
@@ -192,11 +193,11 @@ export function RouteContent({ route, deploymentForm }: { route: Route; deployme
   })()
 }
 
-function Pages({ route, openTab, deploymentForm, newDiscussion, home }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm; newDiscussion?: () => void; home?: ReactNode }) {
+function Pages({ route, openTab, deploymentForm, newDiscussion, home, send }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm; newDiscussion?: () => void; home?: ReactNode; send?: AppProps['send'] }) {
   const { t } = usePanel()
   const { state, error } = usePanelData()
   useEffect(() => { document.getElementById(`dt-tab-${route.page}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) }, [route.page])
-  const page = home && route.page === 'overview' ? home : <RouteContent route={route} deploymentForm={deploymentForm} />
+  const page = home && route.page === 'overview' ? home : <RouteContent route={route} deploymentForm={deploymentForm} send={send} />
   const tabs: readonly Tab[] = home ? ['overview', 'execution', 'source', 'settings'] : TABS
   const selected = route.page === 'line' ? 'overview' : home && (route.page === 'trigger' || route.page === 'eval') ? 'source' : route.page
   return <div className="dt-page">
@@ -211,7 +212,7 @@ function Pages({ route, openTab, deploymentForm, newDiscussion, home }: { route:
 }
 
 /** Root panel component managing route history and shared panel state. */
-export function App({ t, openSession, deploymentForm, newDiscussion, home }: AppProps) {
+export function App({ t, openSession, deploymentForm, newDiscussion, home, send }: AppProps) {
   const [location, setLocation] = useState(initialLocation)
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
@@ -224,6 +225,6 @@ export function App({ t, openSession, deploymentForm, newDiscussion, home }: App
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
   return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
-    <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} newDiscussion={newDiscussion} home={home} />
+    <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} newDiscussion={newDiscussion} home={home} send={send} />
   </PanelProvider>
 }

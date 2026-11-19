@@ -11,19 +11,29 @@ export function storeReads(db: DatabaseSync) {
     const held = Number(db.prepare('SELECT COUNT(*) AS n FROM disposition WHERE held IS NOT NULL').get()!.n)
     const owners = db.prepare('SELECT DISTINCT held AS owner FROM disposition WHERE held IS NOT NULL ORDER BY held LIMIT 20')
       .all().map(row => String(row.owner))
-    const blockedIntake = Number(db.prepare(`SELECT COUNT(*) AS n FROM disposition d
+    const intake = db.prepare(`SELECT accumulation.value ->> '$.blockedAt' AS at FROM disposition d
       JOIN kv accumulation ON accumulation.key = 'automatic-triage-group:' || d.held
-      WHERE d.held IS NOT NULL AND accumulation.value ->> '$.state' = 'blocked'`).get()!.n)
-    const blockedProduction = Number(db.prepare(`SELECT COUNT(*) AS n FROM kv production
-      JOIN json_each(production.value, '$.inputs') input
+      WHERE d.held IS NOT NULL AND accumulation.value ->> '$.state' = 'blocked'`).all()
+    const counts = new Map<string, number>()
+    for (const row of intake) {
+      const at = String(row.at ?? '')
+      counts.set(at, (counts.get(at) ?? 0) + 1)
+    }
+    // Materialize only bounded per-batch metadata before the indexed disposition join.
+    for (const row of db.prepare(`WITH blocked AS MATERIALIZED (
+      SELECT value ->> '$.id' AS id, value ->> '$.owner' AS owner, value ->> '$.ownerGeneration' AS generation,
+        value ->> '$.updatedAt' AS at, value -> '$.inputs' AS inputs FROM kv WHERE production_state = 'blocked')
+      SELECT blocked.at AS at FROM blocked JOIN json_each(blocked.inputs) input
       JOIN disposition d ON d.id = input.value ->> '$.triggerId'
-      WHERE production.production_state = 'blocked' AND d.value ->> '$.triage.phase' = 'production'
-        AND production.value ->> '$.id' = d.value ->> '$.triage.batchId'
-        AND production.value ->> '$.owner' = d.value ->> '$.triage.owner'
-        AND production.value ->> '$.ownerGeneration' = d.value ->> '$.triage.generation'`).get()!.n)
-    const blocked = blockedIntake + blockedProduction
-    return { held, blocked, owners, contextComplete: false as const,
-      state: blocked ? 'blocked' as const : held ? 'held_awaiting_judgment' as const : 'empty' as const }
+      WHERE d.value ->> '$.triage.phase' = 'production'
+        AND blocked.id = d.value ->> '$.triage.batchId'
+        AND blocked.owner = d.value ->> '$.triage.owner'
+        AND blocked.generation = d.value ->> '$.triage.generation'`).iterate()) {
+      const at = String(row.at ?? '')
+      counts.set(at, (counts.get(at) ?? 0) + 1)
+    }
+    const blockedGroups = Array.from(counts, ([at, count]) => ({ at: Date.parse(at), count }))
+    return { held, blockedGroups, owners }
   },
   unavailableSince: (since: string): Decision[] => values<Decision>('SELECT value FROM decision INDEXED BY decision_unavailable_at WHERE unavailable_at >= ? ORDER BY rowid DESC LIMIT 200', since),
   latestDecision: (thread: string): Decision | undefined => values<Decision>('SELECT value FROM decision WHERE thread = ? ORDER BY rowid DESC LIMIT 1', thread)[0],

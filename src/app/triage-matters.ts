@@ -7,7 +7,7 @@ import type { ImEvidence, ImMessageHeader } from '../sources/kind.ts'
 import type { Store } from './store.ts'
 import type { ProductionBatch } from './production-triage.ts'
 import { evidenceRevision, imScope } from './im-evidence-revisions.ts'
-import { findLineOf, readLine } from './lines.ts'
+import { activeTicket, findLineOf, readLine } from './lines.ts'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const Id = z.string().min(1).max(200)
 export const MatterEvidenceSchema = z.discriminatedUnion('kind', [
@@ -23,14 +23,17 @@ export const MatterProposalSchema = z.object({ localMatterId: Id, relation: z.en
 }).strict()
 type Proposal = z.infer<typeof MatterProposalSchema>
 export interface MatterTarget { kind: 'ticket' | 'line'; id: string }
-export interface MatterHandoffReceipt { matterId: string; revision: number; target: MatterTarget; reused: boolean; inputId?: string }
+export interface LineReview { reference: string; batchId: string; generation: number; title: string; nextStep: string }
+type Review = { nextStep: string; memberId: string; revision: number }
+type Handoff = MatterTarget & { inputId?: string; review?: Review }
+export interface MatterHandoffReceipt { matterId: string; revision: number; target: MatterTarget; reused: boolean; inputId?: string; reviewSaved?: true }
 interface Matter {
   id: string; scope: string; revision: number; title: string; reason: string; assessment: Proposal['assessment']
   anchorBatchId: string; observedRevision?: number; createdAt: string; updatedAt: string; related?: string
-  handoff?: MatterTarget & { at: string; reason: string; inputId?: string }
+  handoff?: Handoff & { at: string; reason: string }
 }
 export interface Member { id: string; batchId: string; generation: number; localMatterId: string; matterId: string; originId: string }
-export interface Event { id: string; matterId: string; revision: number; kind: 'new' | 'continue' | 'related' | 'split' | 'retract_related' | 'handoff'; at: string; memberId: string; reason: string; evidence: Evidence[]; dependencies?: string[]; handoff?: MatterTarget & { inputId?: string } }
+export interface Event { id: string; matterId: string; revision: number; kind: 'new' | 'continue' | 'related' | 'split' | 'retract_related' | 'handoff'; at: string; memberId: string; reason: string; evidence: Evidence[]; dependencies?: string[]; handoff?: Handoff }
 interface Reads { dependencies?: Record<string, true>; candidates: Record<string, number>; contexts: Record<string, { hash: string; revision: number; next: number | null; complete?: boolean }> }
 const matters = family<Matter>('triage-matter:')
 const members = family<Member>('triage-matter-member:')
@@ -55,6 +58,46 @@ export class TriageMatters {
   }
   private batch(id: string) { const batch = this.store.get<ProductionBatch>(`triage-production:${id}`); if (!batch) throw new Error('Unknown evidence receipt'); return batch }
   private scope(batch: ProductionBatch) { if (!batch.inputs[0]) throw new Error('Empty evidence receipt'); return imScope(batch.inputs[0].identity) }
+  /** A receipt-local suggestion may have continued an older canonical matter. Never synthesize its handoff ID. */
+  handoffReference(batch: ProductionBatch, localId: string, cache: Map<string, boolean>) {
+    const member = this.store.get(members(memberId(batch, localId)))
+    const matter = member && this.store.get(matters(member.matterId))
+    if (!matter || !this.isReadable(matter, cache)) return undefined
+    return { matter_id: matter.id, matter_revision: matter.revision }
+  }
+  /** Show the proposed step on its own receipt until a newer judgment or handoff supersedes it. */
+  pendingReview(batch: ProductionBatch, localId: string, cache: Map<string, boolean>) {
+    const member = this.store.get(members(memberId(batch, localId)))
+    const matter = member && this.store.get(matters(member.matterId)), handoff = matter?.handoff
+    const review = handoff?.review
+    if (!matter || handoff?.kind !== 'line' || !review || review.revision !== matter.revision || review.memberId !== member?.id) return
+    const line = readLine(this.store, handoff.id)
+    if (line && this.isReadable(matter, cache)) return { nextStep: review.nextStep, lineTitle: line.title, lineId: line.id }
+  }
+  /** A line only reads its latest saved review proposals. The original receipt still owns the evidence. */
+  lineReviews(lineId: string): LineReview[] {
+    const rows = this.store.db.prepare(`SELECT value FROM kv WHERE key LIKE 'triage-matter:%'
+      AND value ->> '$.handoff.kind' = 'line' AND value ->> '$.handoff.id' = ?
+      AND value ->> '$.handoff.review.revision' = value ->> '$.revision'
+      ORDER BY value ->> '$.handoff.at' DESC, key LIMIT 12`).all(lineId)
+    const readable = new Map<string, boolean>()
+    return rows.flatMap(row => {
+      const matter = JSON.parse(String(row.value)) as Matter
+      const review = matter.handoff!.review!
+      const member = this.store.get(members(review.memberId))
+      if (!member || member.matterId !== matter.id) return []
+      const batch = this.store.get<ProductionBatch>(`triage-production:${member.batchId}`)
+      if (!batch || batch.state !== 'completed' || batch.generation !== member.generation) return []
+      const local = batch.result?.matters.find(item => item.id === member.localMatterId)
+      const current = local && batch.result?.items.some(item => {
+        if (item.kind !== 'suggested_action' || !local.triggerIds.includes(item.triggerId)) return false
+        const marker = this.store.triggers.disposition(item.triggerId)?.triage
+        return marker?.batchId === batch.id && marker.owner === batch.owner && marker.generation === batch.ownerGeneration
+      })
+      if (!current || !this.isReadable(matter, readable)) return []
+      return [{ reference: member.id, batchId: batch.id, generation: member.generation, title: matter.title, nextStep: review.nextStep }]
+    })
+  }
   private readable(batch: ProductionBatch) {
     return batch.inputs.every(input => { const trigger = this.store.triggers.get(input.triggerId), current = trigger && this.evidence(trigger)
       return !!current && input.fingerprint === hash({ trigger, evidence: current }) })
@@ -230,6 +273,13 @@ export class TriageMatters {
       }
       const assessment = proposal?.assessment ?? (item.triggerIds.some(id => batch.result!.items.find(item => item.triggerId === id)?.kind === 'unknown') ? 'unknown' : item.triggerIds.some(id => batch.result!.items.find(item => item.triggerId === id)?.kind === 'suggested_action') ? 'suggested_action' : 'informational')
       if (proposal && assessment !== 'unknown' && item.triggerIds.some(id => batch.result!.items.find(item => item.triggerId === id)?.kind === 'unknown')) throw new Error('Unknown local evidence must remain an unknown projection')
+      if (!legacy && assessment === 'suggested_action') {
+        const actionable = batch.result!.items.filter(input => input.kind === 'suggested_action' && item.triggerIds.includes(input.triggerId))
+        if (!refs.some(ref => ref.batchId === batch.id && actionable.some(input => input.triggerId === ref.triggerId
+          && (ref.kind === 'trigger' || ref.messageId === batch.contexts[input.triggerId]?.manifest.anchor.id)))) {
+          throw new Error('Suggested action requires a citation to a current input carrying the change')
+        }
+      }
       if (assessment === 'no_further_action_suggested' && !refs.some(ref => ref.kind === 'context' && ref.batchId === batch.id)) throw new Error('Changed suggestion requires cited positive current context evidence; absence cannot cancel')
       const matter: Matter = relation === 'continue' ? { ...target!, revision: target!.revision + 1, title: item.title, reason: proposal!.reason, assessment, updatedAt: batch.updatedAt }
         : { id: own, scope: this.scope(batch), revision: 1, title: item.title, reason: proposal?.reason ?? item.reason, assessment,
@@ -322,24 +372,33 @@ export class TriageMatters {
       }) }
   }
   /** Atomically associate readable evidence and, for a Ticket, save its context note once. */
-  handoff(id: string, revision: number, target: MatterTarget, reason: string, deliver?: () => string): MatterHandoffReceipt {
+  handoff(id: string, revision: number, target: MatterTarget, reason: string, options: { deliver?: () => string; nextStep?: string } = {}): MatterHandoffReceipt {
     return this.store.atomic(() => {
-      const matter = this.get(id)
-      if (!this.isReadable(matter) || !this.membership(id).length) throw new Error('Matter evidence is unavailable')
+      const matter = this.get(id), latest = this.membership(id).at(-1)
+      if (!latest || !this.isReadable(matter)) throw new Error('Matter evidence is unavailable')
       if (!reason.trim() || reason.length > 2000) throw new Error('Provide a bounded handoff reason')
-      const destination = target.kind === 'ticket' ? this.store.tickets.get(target.id) : readLine(this.store, target.id)
-      if (!destination) throw new Error('Unknown handoff destination')
-      const operation = hash(['handoff', id, revision, target.kind, target.id, reason]), previous = this.store.get(events(operation))
+      const line = target.kind === 'line' ? readLine(this.store, target.id) : undefined
+      if (!(target.kind === 'ticket' ? this.store.tickets.get(target.id) : line)) throw new Error('Unknown handoff destination')
+      const operation = hash(['handoff', id, revision, target.kind, target.id, reason, ...(options.nextStep ? [options.nextStep] : [])])
+      const previous = this.store.get(events(operation))
       if (previous?.handoff) return { matterId: id, revision: previous.revision, target, reused: true,
+        ...(previous.handoff.review ? { reviewSaved: true } : {}),
         ...(previous.handoff.inputId ? { inputId: previous.handoff.inputId } : {}) }
       if (matter.revision !== revision) throw new Error('Read the current matter revision before handoff')
-      const inputId = deliver?.(), at = new Date().toISOString()
-      matter.handoff = { ...target, at, reason, ...(inputId ? { inputId } : {}) }
+      if (options.nextStep && (!line || activeTicket(this.store, line) || matter.assessment !== 'suggested_action')) {
+        throw new Error('Save a suggested step only for actionable evidence on a line without an open Ticket')
+      }
+      const inputId = options.deliver?.(), at = new Date().toISOString()
+      const handoff: Handoff = { ...target, ...(inputId ? { inputId } : {}), ...(options.nextStep ? {
+        review: { nextStep: options.nextStep, memberId: latest.id, revision: revision + 1 },
+      } : {}) }
+      matter.handoff = { ...handoff, at, reason }
       matter.revision++; matter.updatedAt = at
       this.store.set(matters(id), matter)
       this.store.set(events(operation), { id: operation, matterId: id, revision: matter.revision, kind: 'handoff', at,
-        memberId: '', reason, evidence: [], handoff: { ...target, ...(inputId ? { inputId } : {}) } })
-      return { matterId: id, revision: matter.revision, target, reused: false, ...(inputId ? { inputId } : {}) }
+        memberId: '', reason, evidence: [], handoff })
+      return { matterId: id, revision: matter.revision, target, reused: false,
+        ...(handoff.review ? { reviewSaved: true } : {}), ...(inputId ? { inputId } : {}) }
     })
   }
   detail(batch: ProductionBatch, id: string, before?: number) {

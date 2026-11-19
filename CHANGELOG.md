@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.9 — 2026-11-19
+
+- Open the original Ticket Session directly from the Main conversation and personal workbench. Save a confirmed short conclusion on the Ticket and notify Main.
+- Describe differing runtime and default-branch commits without inferring which build is newer.
+
+## 0.9.8 — 2026-11-18
+
+- Put decisions, recent results, and the next automated follow-up first in the daily workbench.
+- Show actionable suggestions on their original work line and bring the evidence into the main conversation for discussion.
+- Preserve ticket and line details and drafts if a refresh fails. Show the last successful read and offer an inline retry.
+
+Upgrade note: no schema, dependency, source-scope or execution-permission change from 0.9.7.
+
+## 0.9.7 — 2026-11-18
+
+- Keep a suggested next step with its original work line when there is no open Ticket. The proposal appears in Information follow-up with its evidence and stays available for a fresh authorized request.
+- Preserve triage ownership, source access checks and the original admission policy. A related Ticket handoff or a newer judgment supersedes the proposal.
+
+Upgrade note: no schema, dependency, source-scope or execution-permission change from 0.9.6. Historical messages are not replayed.
+
+## 0.9.6 — 2026-11-18
+
+- Expose the canonical matter ID and revision on each exact triage receipt. The existing note tool records source evidence on the original Ticket and describes its note limit.
+- Separate recent triage blocks, earlier backlog and undated records. Source diagnostics show the first observed fault and last confirmed successful check when available.
+- Keep ordinary activity-source failures and recovery in the health view, retaining existing notifications on explicit legacy monitors.
+- Keep summary lookup at baseline cost by reusing the indexed ownership check and cached projection.
+
+Upgrade note: no dependency, schema, source-scope or permission changes. Includes the fixes previously activated locally as 0.9.5. Historical evidence is not replayed.
+
 ## 0.9.4 — 2026-11-17
 
 - Reconcile an opened native Session when an Agent availability or removal notification disagrees with its running state, so completed work does not retain a live elapsed-time indicator.

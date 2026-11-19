@@ -1,7 +1,7 @@
 /** Existing projections reused by isolated read jobs over the canonical database. */
 import type { Store } from './store.ts'
 import { detail, linesView, type LinesView } from './lines.ts'
-import { TriageMatters, type MatterTarget } from './triage-matters.ts'
+import { TriageMatters, type LineReview, type MatterTarget } from './triage-matters.ts'
 import { productionOverview } from './production-triage.ts'
 import type { Trigger } from '../core/model.ts'
 import type { ImEvidence, ImMessageHeader } from '../sources/kind.ts'
@@ -13,7 +13,7 @@ export interface ReadResults {
   stats: HistoricalStats; lines: LinesView
   matters: ReturnType<TriageMatters['overview']>; production: ReturnType<typeof productionOverview>
   history: { stats: HistoricalStats; matters: ReadResults['matters']; production: ReadResults['production'] }
-  evidence: ReturnType<TriageMatters['workEvidence']>; line: ReturnType<typeof detail>
+  evidence: ReturnType<TriageMatters['workEvidence']>; line: (NonNullable<ReturnType<typeof detail>> & { reviews?: LineReview[] }) | undefined
 }
 export interface ReadPage { before?: number; limit?: number; unresolved?: boolean; active?: boolean; target?: MatterTarget; id?: string }
 export interface EvidenceAccess { evidence?: ImEvidence & { configuration: string }; header?: ImMessageHeader }
@@ -36,7 +36,10 @@ export function readModel(store: Store, kind: keyof ReadResults, at: number, pag
     }
     case 'line': {
       if (!page.id) throw new Error('Line view requires its identity')
-      return detail(store, page.id, new Date(at))
+      const line = detail(store, page.id, new Date(at))
+      if (!line) return
+      const reviews = new TriageMatters(store, evidence).lineReviews(line.id)
+      return reviews.length ? { ...line, reviews } : line
     }
     case 'history': return { stats: historicalStats(store, at), matters: new TriageMatters(store, evidence, header).overview(),
       production: productionOverview(store, evidence, {}, header) }

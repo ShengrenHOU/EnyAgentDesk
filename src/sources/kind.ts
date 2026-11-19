@@ -103,6 +103,8 @@ export interface ImMessageHeader {
   at: string
   conversationLabel?: string
   senderLabel?: string
+  /** Account-relative sender match for sources with a verified account ID; grants no authority. */
+  fromCurrentAccount?: true
   senderType?: string
   senderIdType?: string
   contentType?: string

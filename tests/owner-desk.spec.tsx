@@ -2,7 +2,7 @@
 import { act, useSyncExternalStore } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
-import { TurnQuickReply } from '../src/client/quick-reply.tsx'
+import { TurnQuickReply, WorkerDiscussionSave } from '../src/client/quick-reply.tsx'
 import { OwnerDesk } from '../src/client/owner-desk.tsx'
 import type { InputState } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { zh } from '../src/client/locales.ts'
@@ -87,6 +87,35 @@ it('shows global work only on the main conversation and opens no task merely by 
   const send = await mount('worker-one')
   expect(document.querySelector('.dt-owner-desk')).toBeNull()
   expect(send).not.toHaveBeenCalled()
+})
+
+it('opens the original worker Session directly from the Main card', async () => {
+  const send = await mount()
+  await click(document.querySelector<HTMLButtonElement>('.dt-owner-tabs button')!)
+  await click(zh.openOriginalSession)
+  expect(openMain).toHaveBeenCalledWith('worker-t1', expect.any(AbortSignal))
+  expect(send).not.toHaveBeenCalled()
+  expect(openTicket).not.toHaveBeenCalled()
+})
+
+it('keeps a failed conclusion draft bound to the exact assistant reply', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new Error('offline'))
+    .mockResolvedValue(Response.json({ sessionId: 'worker-t1', throughSeq: 36 }))
+  vi.stubGlobal('fetch', fetch)
+  const container = document.createElement('div')
+  document.body.append(container)
+  root = createRoot(container)
+  await act(async () => { root.render(<WorkerDiscussionSave sessionId="worker-t1" throughSeq={36} t={t} />) })
+  await click(zh.discussionConclusionSave)
+  const draft = 'Reviewed the final figures.'
+  const input = document.querySelector('textarea')!
+  await type(input, draft)
+  await click(zh.save)
+  expect(input.value).toBe(draft)
+  await click(zh.save)
+  expect(fetch.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual(Array(2).fill(
+    ['/api/superagent-workbench/worker-discussion', { sessionId: 'worker-t1', throughSeq: 36, summary: draft }]))
+  expect(document.querySelector('[role="status"]')?.textContent).toBe(zh.discussionConclusionSaved)
 })
 
 it('starts collapsed and remembers the owner opening it', async () => {

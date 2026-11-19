@@ -88,7 +88,8 @@ it('serializes different pages of one view kind instead of spawning unbounded wo
   } finally { await jobs.close(); store.close(); rmSync(directory, { recursive: true, force: true }) }
 })
 
-it('isolates audit graphs while the live Source owns access and rejects results across revocation', async () => {
+// This scenario waits for three real worker starts and exits, which can exceed Vitest's default on the Windows runner.
+it('isolates audit graphs while the live Source owns access and rejects results across revocation', { timeout: 15_000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'read-audit-')), store = new Store(join(directory, 'state.sqlite'))
   store.saveSettings({})
   const sources = new SourceRegistry(() => store.settings())

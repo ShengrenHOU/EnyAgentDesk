@@ -28,6 +28,10 @@ export interface MainTransition {
   handoff?: string
 }
 
+export interface WorkerDiscussionConclusion {
+  sessionId: string; throughSeq: number; summary: string; at: string
+}
+
 export const KV = {
   /** DSH executor: workspace path whose preparation started but has not been verified successfully. */
   dsh: { preparing: family<string, [ticket: string]>('dsh-preparing:') },
@@ -49,6 +53,7 @@ export const KV = {
     mainForwarded: family<{ to: string; at: string }>('main-forwarded:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
+  workbench: { conclusion: family<WorkerDiscussionConclusion, [ticket: string]>('workbench-conclusion:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
   queues: { relays: record<{ id: string; text: string }[]>('relay-queue'), unsubscribed: record<string[]>('subscription-results'),
     prompts: record<number | null>('prompt-notification'), settings: record<number | null>('settings-notification') },

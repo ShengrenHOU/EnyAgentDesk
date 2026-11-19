@@ -47,13 +47,26 @@ async function mount(focus: object | null = null, requested: object | null = nul
   return { send, openSession, refresh, actions, openManagement, openDomainSettings, openGithubSettings, openWorkList }
 }
 
-it('leads the home page with Lines and keeps their empty state ahead of the decision queue', async () => {
-  await mount()
+it('leads with decisions, then recent results and scheduled work ahead of Lines and audit', async () => {
+  const recent = { ...server.tickets.ended[0]!, sessionId: 'worker-t0',
+    ended: { ...server.tickets.ended[0]!.ended!, at: new Date().toISOString() } }
+  localStorage.setItem('dsh-superagent/workbench-last-visit', String(Date.now() - 60_000))
+  server.work = { working: [], workingTotal: 0, waiting: [], waitingTotal: 0, delivered: [recent], deliveredTotal: 1 }
+  server.ticketDetails.t1!.followups = [{ id: 'next', at: '2099-01-01T00:00:00Z', reason: '核对下一批结果', createdAt: '2026-11-08T00:00:00Z' }]
+  const { openSession, send } = await mount()
   const lines = document.querySelector('.pw-lines')!
   expect(lines).not.toBeNull()
   expect(lines.textContent).toContain(zh.lineEmpty)
-  const queue = document.querySelector('.pw-queue')!
-  expect(lines.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  const text = document.querySelector('.pw-main')!.textContent!
+  const order = [zh.queueTitle, zh.homeResults, zh.homeProgress, zh.followupNext, zh.lineTitle, zh.homeInformationAudit].map(label => text.indexOf(label))
+  expect(order.every(position => position >= 0)).toBe(true)
+  expect(order).toEqual(order.toSorted((a, b) => a - b))
+  expect(text).toContain(zh.homeSinceVisit)
+  expect(text).toContain('核对下一批结果')
+  const delivered = [...document.querySelectorAll('.pw-task')].find(card => card.querySelector('.pw-title-button')?.textContent === recent.title)!
+  await click([...delivered.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === zh.openOriginalSession)!)
+  expect(openSession).toHaveBeenCalledWith(recent.sessionId)
+  expect(send).not.toHaveBeenCalled()
 })
 
 it('keeps the Lines section when the optional queue endpoint fails', async () => {
@@ -149,7 +162,8 @@ it.each([true, false])('keeps the Today reply target across card and detail navi
   await click(zh.workbenchSendUpdate)
   const otherCard = [...document.querySelectorAll<HTMLElement>('.pw-task')]
     .find(card => card.querySelector('.pw-title-button')?.textContent === '另一件事')!
-  const cardReply = otherCard.querySelector<HTMLButtonElement>('.pw-actions button')!
+  const cardReply = [...otherCard.querySelectorAll<HTMLButtonElement>('.pw-actions button')]
+    .find(button => button.textContent === zh.ownerDeskRevise)!
   await click(cardReply)
   expect(document.querySelector('.pw-supplement')?.textContent).toContain('修复回归')
   expect(cardReply.disabled).toBe(true)
@@ -193,9 +207,12 @@ it('restores each edited reply across Tickets and discards only the named draft'
   server.ticketDetails.t2 = { ...server.ticketDetails.t1!, id: 't2', title: '另一件事', attention: undefined }
   await mount()
   const editor = () => document.querySelector<HTMLTextAreaElement>('.pw-supplement textarea')!
-  const otherEntry = () => [...document.querySelectorAll<HTMLElement>('.pw-task')]
-    .find(card => card.querySelector('.pw-title-button')?.textContent === '另一件事')!
-    .querySelector<HTMLButtonElement>('.pw-actions button')!
+  const otherEntry = () => {
+    const card = [...document.querySelectorAll<HTMLElement>('.pw-task')]
+      .find(item => item.querySelector('.pw-title-button')?.textContent === '另一件事')!
+    return [...card.querySelectorAll<HTMLButtonElement>('.pw-actions button')]
+      .find(button => button.textContent === zh.ownerDeskRevise)!
+  }
   await click(zh.queueRevise)
   await type(editor(), '工单 A 的草稿')
   await click(otherEntry())
@@ -420,6 +437,8 @@ it('shows one business wait when the same native reminder is also listed', async
   server.automations = { available: true, items: [{ id: 'native-linked', sessionId: 'master', title: 'Delivery reminder', scheduledAt: check.at,
     ticketId: 't1', ticketTitle: 'Delivery', requestId: 'linked', status: 'scheduled' }] }
   await mount()
+  expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain(zh.followupNext)
+  expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain('Delivery reminder')
   await click(document.querySelector<HTMLButtonElement>('.dt-followup-toggle')!)
   expect(document.querySelectorAll('.dt-followup-agenda li')).toHaveLength(1)
   expect(document.querySelector('.dt-followup-agenda')?.textContent).toContain(zh.followupAutomationScheduled)
@@ -594,7 +613,8 @@ it('confirms ending only the selected task and retains its record and results', 
   server.ticketDetails.t1!.deliverables = [{ title: '已有成果', url: 'https://example.com/report' }]
   const { send, openManagement } = await mount()
   expect(document.body.textContent).toContain(zh.queueHint)
-  const end = document.querySelector<HTMLButtonElement>('.pw-task .pw-actions button:nth-child(2)')!
+  const end = [...document.querySelectorAll<HTMLButtonElement>('.pw-task .pw-actions button')]
+    .find(button => button.textContent === zh.homeStopMatter)!
   await click(end)
   expect(document.querySelector('[role="dialog"]')?.textContent).toContain('修复回归')
   await click(zh.cancel)
@@ -638,7 +658,8 @@ it('shows a long-lived line with its latest result and its recorded judgement', 
     active: { id: 't1', title: '修复回归', updatedAt: at, stage: 'working' },
     lastResult: { ticketId: 't0', title: '旧工单', at, summary: '阶段结果已归档' },
     latestJudgement: { at, action: 'attached', evidence: '盘点文档与推进步骤属于同一入股交易' } }
-  const detail: LinePageView = { ...line, judgements: [
+  const detail: LinePageView = { ...line, reviews: [{ reference: 'exact-source', batchId: 'contract-batch', generation: 2,
+    title: '收到合同草稿', nextStep: '核对交付期限与服务范围' }], judgements: [
     { at, action: 'opened', evidence: '同一入股交易：申昊智维投资任能' },
     { at, action: 'attached', ticketId: 't1', evidence: '盘点文档与推进步骤属于同一入股交易' },
   ], tickets: [
@@ -649,7 +670,7 @@ it('shows a long-lived line with its latest result and its recorded judgement', 
   server.lines = { open: [line, { id: 'line2', title: '另一个明确目标', status: 'open', createdAt: at, updatedAt: at,
     ticketCount: 0, openCount: 0 }], closed: [], closedTotal: 0, generatedAt: at }
   server.lineDetails = { line1: detail }
-  await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
+  const { send, openSession } = await mount(null, null, [], { items: [], counts: { open: 0, deferred: 0, ignored: 0 } })
   expect(document.body.textContent).toContain(zh.lineTitle)
   expect(document.body.textContent).toContain('申昊战略入股')
   expect(document.body.textContent).toContain('阶段结果已归档')
@@ -658,6 +679,28 @@ it('shows a long-lived line with its latest result and its recorded judgement', 
   expect(document.body.textContent).toContain('盘点文档与推进步骤属于同一入股交易')
   expect(document.body.textContent).toContain('正在准备对外方案')
   expect(document.body.textContent).toContain(zh.lineTickets)
+  expect(document.body.textContent).toContain('核对交付期限与服务范围')
+  await click(zh.lineReviewDiscuss)
+  expect(send).toHaveBeenCalledTimes(1)
+  expect(send.mock.calls[0]?.[1]).toContain('triage/receipt/contract-batch/2')
+  expect(send.mock.calls[0]?.[1]).toContain('triage/evidence/exact-source')
+  expect(send.mock.calls[0]?.[1]).toContain('只读')
+  expect(openSession).toHaveBeenCalledTimes(1)
+  const previous = globalThis.fetch
+  let down = true
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => down && /\/lines\/line1(?:\?|$)/.test(url) && (init?.method ?? 'GET') === 'GET'
+    ? Response.json({ error: 'Line detail unavailable' }, { status: 503 }) : previous(url, init)))
+  await click(zh.lineCorrectMembership)
+  await type(document.querySelector<HTMLTextAreaElement>('.pw-membership textarea')!, '保留原主线草稿')
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  expect(document.querySelector('.pw-line-detail .pw-stale')?.textContent).toContain('上次成功读取')
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-membership textarea')?.value).toBe('保留原主线草稿')
+  expect(document.querySelector('.pw-line-detail')?.textContent).toContain('正在准备对外方案')
+  expect(document.querySelector('.pw-line-detail')?.textContent).not.toContain('核对交付期限与服务范围')
+  down = false
+  await click(document.querySelector<HTMLButtonElement>('.pw-line-detail .pw-stale button')!)
+  expect(document.querySelector('.pw-line-detail .pw-stale')).toBeNull()
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-membership textarea')?.value).toBe('保留原主线草稿')
   for (const target of ['line2', '']) {
     await click(zh.lineCorrectMembership)
     const form = document.querySelector<HTMLFormElement>('.pw-membership')!
@@ -675,6 +718,27 @@ it('shows a long-lived line with its latest result and its recorded judgement', 
     expect(document.querySelector('.pw-membership')).toBeNull()
     expect(document.body.textContent).toContain(zh.lineMembershipSaved)
   }
+})
+
+it('shows a Ticket detail refresh failure in place without losing the current reply draft', async () => {
+  server.ticketDetails.t1!.attention = server.person[0]!.attention
+  await mount()
+  await click(document.querySelector<HTMLButtonElement>('.pw-decision .pw-title-button')!)
+  await click(zh.workbenchAnswer)
+  await type(document.querySelector<HTMLTextAreaElement>('.pw-collaboration textarea')!, '仍在编辑的答复')
+  const previous = globalThis.fetch
+  let down = true
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => down && /\/tickets\/t1(?:\?|$)/.test(url)
+    ? Response.json({ error: 'Ticket detail unavailable' }, { status: 503 }) : previous(url, init)))
+  await act(async () => { document.dispatchEvent(new Event('visibilitychange')) }); await settle()
+  const failure = document.querySelector('.pw-main .pw-stale')!
+  expect(failure.textContent).toContain('上次成功读取')
+  expect(document.querySelector('.pw-aside-detail-status')?.textContent).toContain('上次成功读取')
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-collaboration textarea')?.value).toBe('仍在编辑的答复')
+  down = false
+  await click(failure.querySelector<HTMLButtonElement>('button')!)
+  expect(document.querySelector('.pw-main .pw-stale')).toBeNull()
+  expect(document.querySelector<HTMLTextAreaElement>('.pw-collaboration textarea')?.value).toBe('仍在编辑的答复')
 })
 
 it('keeps a loaded queue, labels it stale when a poll fails, and retries it', async () => {

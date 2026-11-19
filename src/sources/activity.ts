@@ -210,6 +210,9 @@ export function createActivityKind(bindings: ActivitySourceBindings, tools: Acti
       return { at: event.at,
         ...(event.label ? { conversationLabel: event.label } : {}),
         ...(event.senderLabel ? { senderLabel: event.senderLabel } : {}),
+        ...(event.provider === 'feishu-messages' && event.accountId === bindings.lark.expectedUserId
+          && event.senderId === event.accountId && event.senderType === 'user' && event.senderIdType === 'open_id'
+          ? { fromCurrentAccount: true } as const : {}),
         ...(event.senderType ? { senderType: event.senderType } : {}),
         ...(event.senderIdType ? { senderIdType: event.senderIdType } : {}),
         ...(event.contentType ? { contentType: event.contentType } : {}),
@@ -283,17 +286,19 @@ export async function assertOwnerAudience(commands: Commands, bindings: Activity
 }
 
 function providerHealth(ctx: SourceContext, provider: ActivityProvider, progress: ActivityProgress, state: 'ready' | 'error'): void {
-  ctx.report(healthName(provider), { state, at: progress.lastSuccess,
+  ctx.report(healthName(provider), { state, at: progress.lastSuccess, lastSuccessAt: progress.lastSuccess,
+    ...(state === 'error' && progress.firstFailure ? { failureSince: progress.firstFailure } : {}),
     detail: `Last success: ${progress.lastSuccess ?? 'never'}; objects ${progress.objects ?? 0}; records ${progress.records ?? 0}; changes ${progress.changes ?? 0}; partial ${progress.partial ?? 0}; left to the Feishu Source ${progress.skipped ?? 0}; next scan ${progress.nextAt ?? 'now'}`
       + (progress.error ? `; ${progress.error}` : '') })
 }
 
-/** Adds an idempotent source-health notice to the configured owner destination. */
+/** Only an explicit monitor Ticket owns a health notification channel; normal intake reports on the health page. */
 function notice(ctx: SourceContext, config: ActivityConfig, provider: ActivityProvider, ticket: Ticket | undefined, progress: ActivityProgress, recovered: boolean): void {
-  const channel = ticket ? ctx.triggers.get(ticket.origin.triggerId)?.channel : ownerDiscussionChannel(ctx)
+  if (!ticket) return
+  const channel = ctx.triggers.get(ticket.origin.triggerId)?.channel
   if (!channel || !['feishu', 'workbench'].includes(channel.source)) return
   ctx.notify({ id: key('activity-health', collection(config), activation(config), provider, progress.firstFailure ?? '', recovered ? 'recovered' : 'failed'),
-    channel, kind: 'notice', ...ticket ? { ticketId: ticket.id } : {},
+    channel, kind: 'notice', ticketId: ticket.id,
     text: recovered ? `${provider} 近期动态读取已恢复，将继续按来源配置采集与分流。`
       : `${provider} 近期动态已连续 ${progress.failures} 次未完整读取。读取进度保留，系统会继续重试；请查看中台来源健康，必要时恢复来源连接或授权。` })
 }
@@ -426,7 +431,7 @@ export async function scanActivityRound(ctx: SourceContext, bindings: ActivitySo
         error: error instanceof Error ? error.message : String(error) }
       ctx.atomic(() => {
         assertActive()
-        if (progress.failures >= config.failuresBeforeError && !previous.alerted) {
+        if (config.routing === 'monitor' && progress.failures >= config.failuresBeforeError && !previous.alerted) {
           notice(ctx, config, provider, target(ctx, config, bindings, signature, signal), progress, false)
           progress.alerted = true
         }

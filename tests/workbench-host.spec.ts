@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { SessionId, SessionSeq, SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { apply } from '../src/sources/workbench-host.ts'
 import { startRuntime, feishu, type Host } from './fixtures/host.ts'
@@ -19,6 +19,7 @@ let discussion: ConnectionFetchRoute
 let summary: ConnectionFetchRoute
 let update: ConnectionFetchRoute
 let answer: ConnectionFetchRoute
+let workerDiscussion: ConnectionFetchRoute
 let queue: ConnectionFetchRoute
 let queueAction: ConnectionFetchRoute
 let artifact: ConnectionFetchRoute
@@ -62,6 +63,7 @@ beforeEach(async () => {
     else if (value.methods.includes('GET')) discussion = value
     else if (value.path.endsWith('/update')) update = value
     else if (value.path.endsWith('/answer')) answer = value
+    else if (value.path.endsWith('/worker-discussion')) workerDiscussion = value
     else route = value
     return async () => {}
   } } })
@@ -94,6 +96,43 @@ it('publishes an observed-source task through its private owner channel and reta
 })
 const input = { sessionId: 'discussion', requestId: 'request-1', throughSeq: 0, instruction: 'Prepare a reading note' }
 const send = (body: unknown) => route.fetch(new Request('http://localhost/api/superagent-workbench/delegate', { method: 'POST', body: JSON.stringify(body) }))
+
+it('retains a reviewed conclusion on an ended Ticket and informs Main only once', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('review-note', 'Prepare the reading note'))
+  const ended = h.runtime.engine.report(ticket.id, { state: 'ready', summary: 'Original report' })
+  expect(ended.ended?.outcome).toBe('completed')
+  const message = createAssistantMessage({ content: [{ type: 'text', text: 'Private discussion text' }], source: { provider: 'test', model: 'test' } })
+  setInspection({ meta: { ...liveInspection.meta, id: SessionId(sessionId) }, inheritedEventCount: SessionLogOffset(0),
+    events: [
+      { type: 'assistant/message', seq: SessionSeq(1), time: 1000, surfaceOp: 'append', data: { turn: 1, step: 1, stream: [], message } },
+      { type: 'turn/end', seq: SessionSeq(2), time: 2000, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'assistant/message', seq: SessionSeq(3), time: 3000, surfaceOp: 'append', data: { turn: 2, step: 1, stream: [], message } },
+      { type: 'turn/end', seq: SessionSeq(4), time: 4000, data: { turn: 2, reason: { kind: 'completed' } } },
+    ] })
+  const submit = (body: unknown) => workerDiscussion.fetch(new Request('http://localhost/api/superagent-workbench/worker-discussion',
+    { method: 'POST', body: JSON.stringify(body) }))
+  const input = { sessionId, throughSeq: 3, summary: 'Owner confirmed scope.' }
+  expect((await submit({ ...input, sessionId: h.runtime.masterId })).status).toBe(409)
+  expect((await submit({ ...input, throughSeq: 2 })).status).toBe(409)
+  const result = await submit(input)
+  expect(result.status).toBe(200)
+  const saved = await result.json()
+  expect(saved).toMatchObject(input)
+  await h.runtime.effects.idle('notice')
+  expect(await (await submit(input)).json()).toEqual(saved)
+  expect((await submit({ ...input, throughSeq: 1 })).status).toBe(409)
+  expect((await submit({ ...input, summary: 'Different conclusion for the same reply' })).status).toBe(409)
+  await h.runtime.effects.idle('notice')
+  const notices = h.agents.get(h.runtime.masterId)!.inbox.nextStep.flatMap(message => message.content)
+    .filter(block => block.type === 'text' && block.text.includes('owner_discussion_conclusion'))
+  expect(notices).toHaveLength(1)
+  expect(notices[0]).toMatchObject({ text: expect.stringContaining(input.summary) })
+  expect(JSON.stringify(notices)).not.toContain('Private discussion text')
+  expect(h.runtime.store.tickets.get(ticket.id)).toEqual(ended)
+  expect((await h.api('GET', `tickets/${ticket.id}`)).body).toMatchObject({ sessionId, discussionConclusion: saved })
+  expect(await h.runTool(h.runtime.masterId, 'orchestrator_read', { resource: `ticket/${ticket.id}` }))
+    .toMatchObject({ discussion_conclusion: saved })
+})
 
 it('saves cross-source answers on the exact Ticket through the authenticated carrier, without inspecting a discussion', async () => {
   const { ticket } = await h.acceptedTicket(feishu('answer-1', 'Prepare the note'))

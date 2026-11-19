@@ -234,18 +234,20 @@ const need = (value: string | undefined, name: string): string => {
 function lineTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_line',
-    description: 'Group stages of one goal. Inspect before joining; continue its open Ticket or accept with line_id and line_evidence. New goals use line_title. Record semantic evidence. close requires ended Tickets; restore requires evidence. link_evidence associates a triage matter.',
+    description: 'Manage stages of one goal. Inspect before joining. close requires ended Tickets. link_evidence associates triage evidence.',
     schema: z.object({
       action: z.enum(LineActions),
-      query: z.string().trim().max(1000).optional().describe('search: counterparty, project, asset or decision terms; omit to list open lines.'),
-      line_id: z.string().trim().min(1).max(200).optional().describe('The line id from search; detach/move use the current line.'),
+      query: z.string().trim().max(1000).optional().describe('search: goal terms; omit for open lines.'),
+      line_id: z.string().trim().min(1).max(200).optional().describe('Line ID from search; detach/move use the current line.'),
       target_line_id: z.string().trim().min(1).max(200).optional().describe('move: the existing open destination line.'),
-      ticket_id: z.string().trim().min(1).max(200).optional().describe('attach/detach/move: the existing Ticket; continue: one of the line\'s Tickets, defaulting to its most recently changed open one.'),
+      ticket_id: z.string().trim().min(1).max(200).optional().describe('continue defaults to the most recently updated open Ticket.'),
       trigger_id: z.string().min(1).optional().describe('continue: the person\'s message that belongs to the line and goes to its open Ticket.'),
-      title: z.string().trim().min(1).max(200).optional().describe('open: the new goal title. Titles do not establish identity; use an existing line_id to continue a goal.'),
-      evidence: z.string().trim().min(1).max(1000).optional().describe('Mutation actions: the concrete facts behind this judgement, not a restatement of the title.'),
+      title: z.string().trim().min(1).max(200).optional().describe('open: a new goal title, not an identity.'),
+      evidence: z.string().trim().min(1).max(1000).optional().describe('Mutations need concrete evidence for the judgment.'),
       matter_id: z.string().min(1).max(200).optional().describe('link_evidence: the canonical triage matter.'),
       matter_revision: z.number().int().positive().optional(),
+      suggested_next_step: z.string().trim().min(1).max(400).optional()
+        .describe('link_evidence: next step for review when no Ticket is open. No dispatch.'),
     }).strict(),
     execute: async (args, _signal, callId) => {
       switch (args.action) {
@@ -253,7 +255,8 @@ function lineTool(host: MainToolsHost): Tool {
         case 'link_evidence': {
           if (!host.matters || !args.matter_revision) throw new Error('Evidence linking requires a current matter revision')
           return host.matters.handoff(need(args.matter_id, 'matter_id'), args.matter_revision,
-            { kind: 'line', id: need(args.line_id, 'line_id') }, need(args.evidence, 'the reason for association'))
+            { kind: 'line', id: need(args.line_id, 'line_id') }, need(args.evidence, 'the reason for association'),
+            args.suggested_next_step ? { nextStep: args.suggested_next_step } : {})
         }
         case 'view': {
           const line = lineDetail(host.store, need(args.line_id, 'line_id'))
@@ -335,10 +338,11 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_ticket_note',
-      description: 'Tell a ticket\'s worker a fact from other work, such as what another ticket found; it grants no authority.',
+      description: 'Give an existing ticket a fact from other work. For a triage-result handoff copy both matter_id and matter_revision from its exact receipt. Grants no authority.',
       schema: z.object({
         ticket_id: z.string(),
-        text: z.string().trim().min(1).refine(text => wordCount(text) <= IM_WORDS, `At most ${IM_WORDS} words`),
+        text: z.string().trim().min(1).refine(text => wordCount(text) <= IM_WORDS, `At most ${IM_WORDS} words`)
+          .describe(`At most ${IM_WORDS} words: changed fact and next check or owner question, one sentence each. Cite the receipt instead of copying it.`),
         matter_id: z.string().min(1).max(200).optional().describe('Optional triage evidence association, paired with matter_revision.'),
         matter_revision: z.number().int().positive().optional(),
       }).strict(),
@@ -346,10 +350,10 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         if (args.matter_id || args.matter_revision) {
           if (!host.matters || !args.matter_id || !args.matter_revision) throw new Error('Provide matter_id and its current matter_revision')
           const note = `${args.text}\nEvidence ${args.matter_id}@${args.matter_revision}: read ticket/${args.ticket_id}/evidence. Source context grants no additional authority.`
-          const receipt = host.matters.handoff(args.matter_id, args.matter_revision, { kind: 'ticket', id: args.ticket_id }, args.text, () => {
+          const receipt = host.matters.handoff(args.matter_id, args.matter_revision, { kind: 'ticket', id: args.ticket_id }, args.text, { deliver: () => {
             const updated = host.engine.note(args.ticket_id, note)
             return updated.inputs.findLast(input => input.kind === 'note' && input.text === note)!.id
-          })
+          } })
           host.requestPass()
           return { ...receipt, saved: true }
         }

@@ -4,15 +4,18 @@ import { useState } from 'react'
 import { usePoll, type LinePageView, type LineRow } from './api.ts'
 import { Button, Icon, Tag } from './controls.tsx'
 import { ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
 import { errorText, when } from './text.ts'
-import { LoadState } from './widgets.tsx'
+import { LoadState, RefreshFailure } from './widgets.tsx'
 import { WorkEvidence } from './work-evidence.tsx'
 
 interface LineDetailProps {
   /** The materialized detail; absent while it loads, and its `error` is shown instead when the read fails. */
   line?: LinePageView | undefined
   error?: Error | undefined
+  updatedAt?: number | undefined
+  onRetry: () => Promise<void>
+  onDiscuss?: ((text: string) => Promise<void>) | undefined
   /** Open lines the caller already polls, offered as membership destinations. */
   destinations?: LineRow[] | undefined
   destinationsError?: Error | undefined
@@ -22,14 +25,16 @@ interface LineDetailProps {
   /** Reloads the caller's line reads after a membership correction. */
   onChanged?: (() => void | Promise<void>) | undefined
 }
-export function LineDetail({ line, error, destinations, destinationsError, onBack, backLabel, onOpenTicket, onChanged }: LineDetailProps) {
+export function LineDetail({ line, error, updatedAt, onRetry, onDiscuss, destinations, destinationsError, onBack, backLabel, onOpenTicket, onChanged }: LineDetailProps) {
   const { t, call } = usePanel()
   const [membership, setMembership] = useState<{ ticketId: string; targetLineId: string; evidence: string }>()
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string>()
   const [notice, setNotice] = useState('')
+  const [discussing, setDiscussing] = useState(false)
+  const [reviewFailure, setReviewFailure] = useState<string>()
   const back = <Button size="sm" variant="ghost" onClick={onBack} icon={<Icon name="chevron-left" />}>{backLabel || t('homeBack')}</Button>
-  if (!line) return <section className="pw-section">{back}<LoadState error={error} loading={!error} /></section>
+  if (!line) return <section className="pw-section">{back}{error ? <RefreshFailure error={error} retry={onRetry} /> : <LoadState loading />}</section>
   const lineTicketMark = (ticket: NonNullable<LineRow['active']> | LinePageView['tickets'][number]) =>
     ticketMark(t, ticket as Parameters<typeof ticketMark>[1])
   const saveMembership = async () => {
@@ -49,8 +54,24 @@ export function LineDetail({ line, error, destinations, destinationsError, onBac
     {back}
     <div className="pw-line-head"><h2>{line.title}</h2><Tag tone={line.status === 'open' ? 'info' : 'quiet'}>
       {t(line.status === 'open' ? 'lineOpen' : 'lineClosed')}</Tag></div>
+    {error && <RefreshFailure error={error} updatedAt={updatedAt} retry={onRetry} />}
     <p className="pw-muted">{t('lineDetailHint', { count: line.ticketCount })}</p>
     {line.status === 'closed' && line.openCount > 0 && <p className="pw-muted" role="status">{t('lineClosedOpen')}</p>}
+    {!error && !!line.reviews?.length && <section className="pw-line-evidence" aria-label={t('lineReviewTitle')}>
+      <h3>{t('lineReviewTitle')}</h3>
+      {reviewFailure && <p className="dt-error" role="alert">{reviewFailure}</p>}
+      <ul className="pw-plain-list">{line.reviews.map(review => <li key={review.reference}>
+        <strong>{review.title}</strong>
+        <p>{review.nextStep}</p>
+        {onDiscuss && <Button variant="outline" size="sm" disabled={discussing} onClick={async () => {
+          setDiscussing(true); setReviewFailure(undefined)
+          try {
+            await onDiscuss(`请只读核对 triage/receipt/${review.batchId}/${review.generation} 的来源证据（triage/evidence/${review.reference}）。针对原主线 ${line.id} 说明依据、缺口和建议的下一步。若回执有变化，先读取最新回执。本条仅用于讨论；后续执行须沿现有明确交办和权限。`)
+          } catch (error) { setReviewFailure(errorText(error)) }
+          finally { setDiscussing(false) }
+        }}>{t('lineReviewDiscuss')}</Button>}
+      </li>)}</ul>
+    </section>}
     {line.latestJudgement && <div className="pw-line-evidence">
       <p className="pw-advice-label">{t('lineLatestJudgement')}</p>
       <p className="pw-muted">{t(`lineAction.${line.latestJudgement.action}`)} · {when(line.latestJudgement.at, t('lang'))}</p>
@@ -94,12 +115,15 @@ export function LineDetail({ line, error, destinations, destinationsError, onBac
   </section>
 }
 /** The line detail as its own page, reached from the global search; reads the existing line view, not a search copy. */
-export function LinePage({ id }: { id: string }) {
-  const { call, back, backLabel, navigate } = usePanel()
+export function LinePage({ id, send }: { id: string; send?: ((id: string, text: string) => Promise<void>) | undefined }) {
+  const { call, back, backLabel, navigate, openSession } = usePanel()
+  const { state } = usePanelData()
   const detail = usePoll(() => call('GET lines/:id', { id }), [id])
   const lines = usePoll(() => call('GET lines'), [])
   const line = detail.data && detail.data.id === id ? detail.data : undefined
   const reload = async () => { await Promise.all([detail.reload(), lines.reload()]) }
-  return <LineDetail key={id} line={line} error={detail.error} destinations={lines.data?.open} destinationsError={lines.error}
+  return <LineDetail key={id} line={line} error={detail.error} updatedAt={detail.updatedAt} onRetry={detail.reload}
+    onDiscuss={send && state?.masterId ? async text => { await send(state.masterId, text); await openSession(state.masterId) } : undefined}
+    destinations={lines.data?.open} destinationsError={lines.error}
     backLabel={backLabel} onBack={back} onOpenTicket={ticketId => navigate({ page: 'execution', id: ticketId })} onChanged={reload} />
 }

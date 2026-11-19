@@ -60,10 +60,10 @@ it('arms only a consumed production deadline and retries its current generation 
   await effects.idle()
   expect(store.get<ProductionBatch>(`triage-production:${batch!.id}`)!.generation).toBe(2)
 })
-const consume = (batch: ProductionBatch) => {
+const consume = (batch: Pick<ProductionBatch, 'id' | 'generation' | 'inputs'>) => {
   for (const input of batch.inputs) { let offset: number | null = 0; do { offset = service.context(batch.id, batch.generation, input.triggerId, offset).next_offset } while (offset !== null) }
 }
-const result = (batch: ProductionBatch, kind: 'informational' | 'suggested_action' | 'unknown' = 'informational') => ({ model: 'reported-model',
+const result = (batch: Pick<ProductionBatch, 'id' | 'inputs'>, kind: 'informational' | 'suggested_action' | 'unknown' = 'informational') => ({ model: 'reported-model',
   items: batch.inputs.map(input => ({ triggerId: input.triggerId, kind, reason: 'A shared reference', context: (() => { try { const context = service.read(batch.id).contexts[input.triggerId]; return { revision: context?.revision ?? 1, hash: context?.hash ?? 'x'.repeat(64) } } catch { return { revision: 1, hash: 'x'.repeat(64) } } })(), matterIds: [] as string[] })), matters: [] })
 const longContext = (id: string, text = 'context '): ImContextReader => ({ assertActive() {}, async read(request) {
   const anchor = { id, text: `private ${id}`, version: 'v1', createdAt: '2026-11-10T00:00:00.000Z' }
@@ -370,16 +370,46 @@ it('retries an exhausted read deadline when no native anchor was obtained', asyn
   expect(deliver).not.toHaveBeenCalled()
 })
 
-it('allows WeChat-style local-sync informational judgment with explicit version/history gaps, never proven none', async () => {
+it('saves the readable input after another input exhausts its context retries without advancing coverage', async () => {
+  const normal = native
+  native = id => id === 'b' ? ({ assertActive() {}, async read() { throw new ImContextReadError(true) } }) : normal(id)
+  add('a'); add('b'); const [batch] = start(['a', 'b']); await drain()
+  for (let retry = 0; retry < 2; retry++) {
+    store.db.prepare("UPDATE effect SET due = 0 WHERE kind = 'triageAssessment'").run()
+    await drain()
+  }
+  const live = service.read(batch!.id)
+  expect(live.state).toBe('awaiting')
+  expect(live.contexts.b).toMatchObject({ anchor: { status: 'missing' }, gaps: expect.arrayContaining(['context_read_failed']) })
+  consume(live)
+  const value = result(live); value.items.find(item => item.triggerId === 'b')!.kind = 'unknown'
+  service.submit(live.id, live.generation, live.binding!, value)
+  expect(store.db.prepare("SELECT COUNT(*) AS n FROM kv WHERE key LIKE 'triage-conversation-cursor:%'").get()!.n).toBe(0)
+  const retry = service.retry(live.id, live.generation)
+  expect(retry.inputs.map(input => input.triggerId)).toEqual(['b'])
+  expect(store.triggers.disposition('a')?.triage).toMatchObject({ phase: 'triaged', batchId: live.id })
+})
+
+it('keeps a readable courtesy independent of a changed anchor and retains the local version gap', async () => {
   const normal = native; native = id => { const reader = normal(id); return { ...reader, async read(...args) {
-    const page = await reader.read(...args); delete page.anchor!.version; delete page.messages[0]!.version
-    page.gaps.push('local_sync_only', 'history_unsupported', 'anchor_version_unverified'); return page
+    const page = await reader.read(...args)
+    if (id === 'a') { delete page.anchor!.version; page.gaps.push('local_sync_only') }
+    else page.anchor!.version = 'edited'
+    return page
   } } }
-  add('a'); const [batch] = start(); await drain(); consume(batch!); const live = service.read(batch!.id)
-  expect(live.contexts.a!.anchor.status).toBe('unverified')
-  expect(() => service.submit(live.id, 1, live.binding!, { ...result(batch!), items: [{ ...result(batch!).items[0]!, kind: 'none' }] })).toThrow('unknown')
-  const completed = service.submit(live.id, 1, live.binding!, result(batch!))
-  expect(completed.state).toBe('completed'); expect(productionOverview(store, evidence).groups[0]!.items[0]!.gaps).toContain('local_sync_only')
+  add('a'); add('b'); const [batch] = start(['a', 'b']); await drain(); consume(batch!); const live = service.read(batch!.id)
+  const baseline = result(batch!)
+  const noWork = { ...baseline.items[0]!, kind: 'none' as const }
+  const changed = { ...baseline.items[1]!, kind: 'unknown' as const }
+  expect(() => service.submit(live.id, 1, live.binding!, { ...baseline, items: [noWork, baseline.items[1]!] })).toThrow('must remain unknown')
+  expect(() => service.submit(live.id, 1, live.binding!, { ...baseline,
+    items: [{ ...noWork, matterIds: ['old-action'] }, changed],
+    matters: [{ id: 'old-action', title: 'Earlier report', reason: 'Courtesy did not add a change', triggerIds: ['a'] }] })).toThrow('No-work input')
+  expect(service.submit(live.id, 1, live.binding!, { ...baseline, items: [noWork, changed] }).state).toBe('completed')
+  expect(productionOverview(store, evidence).groups[0]!.items).toEqual(expect.arrayContaining([
+    expect.objectContaining({ triggerId: 'a', kind: 'none', gaps: expect.arrayContaining(['local_sync_only', 'anchor_version_unverified']) }),
+    expect.objectContaining({ triggerId: 'b', kind: 'unknown' }),
+  ]))
 })
 
 it('rolling back an unknown successor restores the prior completed fence rather than legacy pending', async () => {
@@ -402,7 +432,6 @@ it.each(['informational', 'suggested_action'] as const)('real WeChat native adap
   add('wx1.a'); const [batch] = start(['wx1.a']); await drain(); consume(batch!); const live = service.read(batch!.id)
   expect(live.contexts['wx1.a']!.anchor).toMatchObject({ status: 'unverified', contentMatch: true })
   const value = { ...result(batch!), items: [{ ...result(batch!).items[0]!, kind }] }
-  expect(() => service.submit(live.id, 1, live.binding!, { ...value, items: [{ ...value.items[0]!, kind: 'none' }] })).toThrow('unknown')
   const receipt = service.submit(live.id, 1, live.binding!, value)
   expect(receipt.contexts['wx1.a']!.manifest).toMatchObject({ contextComplete: false, consistency: 'native_snapshot',
     gaps: expect.arrayContaining(['local_sync_only', 'native_version_unavailable', 'deletion_status_unavailable']) })

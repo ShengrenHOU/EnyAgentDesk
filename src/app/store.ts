@@ -296,10 +296,18 @@ export class Store implements Repositories {
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
   }
   /** One derived status per relevant write; no view request rescans unchanged handoff records. */
-  triageHandoffStatus() {
+  triageHandoffStatus(now = Date.now()) {
     const status = this.depth || this.readOnly ? this.read.triageHandoffStatus()
       : this.handoffSnapshot ??= this.read.triageHandoffStatus()
-    return { ...status, owners: [...status.owners] }
+    let recent = 0, older = 0, undated = 0
+    for (const group of status.blockedGroups) {
+      if (!Number.isFinite(group.at)) undated += group.count
+      else if (group.at >= now - 86_400_000) recent += group.count
+      else older += group.count
+    }
+    const blocked = recent + older + undated
+    return { held: status.held, blocked, recent, older, undated, owners: [...status.owners], contextComplete: false as const,
+      state: blocked ? 'blocked' as const : status.held ? 'held_awaiting_judgment' as const : 'empty' as const }
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
   readonly read: ReturnType<typeof storeReads>

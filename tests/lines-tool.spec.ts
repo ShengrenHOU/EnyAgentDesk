@@ -2,6 +2,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { z } from 'zod'
 import { detail } from '../src/app/lines.ts'
+import { productionOverview } from '../src/app/production-triage.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
@@ -12,9 +13,18 @@ const rename = (host: Host, id: string, title: string) => {
 }
 const line = (host: Host, id: string) => detail(host.runtime.store, id)!
 
-it('hands a judged receipt to an existing worker through normal tools and fences cached reads after revocation', async () => {
+it.each([
+  { change: 'New PR head invalidates the old check result; the new check is still pending',
+    next: 'Recheck required checks on the new head before taking any merge action', ownerQuestion: undefined },
+  { change: 'The counterparty asks the owner to approve a revised contract term before signing',
+    next: 'Verify the revised term and prepare the owner decision without sending a reply',
+    ownerQuestion: 'Do you approve the revised contract term for signature?' },
+  { change: 'A contract draft arrived for a work line with no open Ticket',
+    next: 'Read the draft and verify the service scope and terms before review', ownerQuestion: undefined, reviewOnly: true },
+])('preserves the next step for $change', async ({ change, next, ownerQuestion, reviewOnly }) => {
   h = await startRuntime(undefined, { triageHandoff: true, triageProduction: true })
-  const { ticket, sessionId } = await h.acceptedTicket(feishu('evidence-work', 'Review deployment evidence'))
+  const accepted = reviewOnly ? undefined : await h.acceptedTicket(feishu('evidence-work', 'Read new evidence and follow the existing work'))
+  const ticketCount = h.runtime.store.tickets.list().length
   const runtime = h.runtime, sourceId = 'evidence-test'
   runtime.sources.register({ kind: sourceId, title: { en: 'Evidence', zh: 'Evidence' }, description: { en: 'Evidence', zh: 'Evidence' },
     schema: z.object({}), fields: [], health: [], scope: () => ({ listened: true, observed: true }),
@@ -25,18 +35,54 @@ it('hands a judged receipt to an existing worker through normal tools and fences
   runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources, [sourceId]: { allowed: [{ id: 'sender' }] } } } })
   const id = 'deployment-evidence'
   runtime.engine.receive({ id, source: sourceId, threads: [{ source: sourceId, id: 'chat' }], actor: { source: sourceId, id: 'sender' }, human: true,
-    text: 'Deployment evidence from a native source', at: '2026-11-11T01:00:00.000Z', meta: {} })
+    text: change, at: '2026-11-11T01:00:00.000Z', meta: {} })
   runtime.triageHandoffs.adopt('evidence-owner', [id], runtime.triageHandoffs.preview([id]).fingerprint)
   const [batch] = runtime.productionTriage.start('evidence-owner', 1, { start: '2026-11-11T00:00:00.000Z', end: '2026-11-12T00:00:00.000Z' })
   await runtime.idle(); h.consume()
   const current = runtime.productionTriage.read(batch!.id), context = current.contexts[id]!
   let offset: number | null = 0
   do { offset = runtime.productionTriage.context(current.id, 1, id, offset).next_offset } while (offset !== null)
-  runtime.productionTriage.submit(current.id, 1, current.binding!, { model: 'test', items: [{ triggerId: id, kind: 'informational',
-    reason: 'Deployment update', context: { revision: context.revision, hash: context.hash }, matterIds: ['deployment'] }],
-    matters: [{ id: 'deployment', title: 'Deployment update', reason: 'Same deployment', triggerIds: [id] }] })
+  runtime.productionTriage.submit(current.id, 1, current.binding!, { model: 'fixture', items: [{ triggerId: id, kind: 'suggested_action',
+    reason: change, context: { revision: context.revision, hash: context.hash }, matterIds: ['change'] }],
+    matters: [{ id: 'change', title: 'Existing work changed', reason: change, triggerIds: [id] }] })
   const matter = runtime.productionTriage.matters.overview().groups[0]!
-  const args = { ticket_id: ticket.id, text: 'Read the deployment update', matter_id: matter.id, matter_revision: matter.revision }
+  const receipt = await h.runTool(runtime.masterId, 'orchestrator_read',
+    { resource: `triage/receipt/${current.id}/1`, limit: 8000 })
+  const [{ matter_id, matter_revision }] = JSON.parse(String(receipt.text)).matters
+  expect({ matter_id, matter_revision }).toEqual({ matter_id: matter.id, matter_revision: matter.revision })
+  if (!accepted) {
+    const name = 'orchestrator_line'
+    const { line: opened } = await h.runTool(runtime.masterId, name, { action: 'open', title: 'Contract review',
+      evidence: 'Owner tracks this agreement on an existing line' }) as { line: { id: string } }
+    await expect(h.route({ kind: 'accept', trigger_id: id, title: 'Review contract', worktree_name: 'review-contract',
+      acknowledgement: 'Review the contract.', line_id: opened.id, line_evidence: 'The same agreement' })).rejects.toThrow('held by a controlled triage')
+    const args = { action: 'link_evidence', line_id: opened.id, evidence: change, matter_id, matter_revision, suggested_next_step: next }
+    expect(await h.runTool(runtime.masterId, name, args)).toMatchObject({ revision: matter_revision + 1, reviewSaved: true, reused: false })
+    expect(await h.runTool(runtime.masterId, name, args)).toMatchObject({ reviewSaved: true, reused: true })
+    expect(runtime.store.tickets.list()).toHaveLength(ticketCount)
+    expect(runtime.store.triggers.disposition(id)?.triage?.phase).toBe('triaged')
+    expect(line(h, opened.id).tickets).toHaveLength(0)
+    const group = () => productionOverview(runtime.store, trigger => runtime.sources.imEvidence(trigger), { id: current.id }).groups[0]!
+    expect(group().matters[0]?.pendingReview).toEqual({ lineId: opened.id, lineTitle: 'Contract review', nextStep: next })
+    const detail = async () => (await h!.api('GET', `lines/${opened.id}`)).body
+    expect(await detail()).toMatchObject({ reviews: [{ batchId: current.id, generation: 1, nextStep: next }] })
+    const permitted = runtime.store.settings()
+    runtime.store.saveSettings({ ...permitted, sources: { ...permitted.sources, [sourceId]: { enabled: false, config: {} } } })
+    expect(group().matters).toEqual([])
+    expect((await detail()).reviews).toBeUndefined()
+    runtime.store.saveSettings(permitted)
+    const { ticket } = await h.acceptedTicket(feishu('owner-authorizes-review', 'Read the draft for this work line'))
+    await h.runTool(runtime.masterId, name, { action: 'attach', line_id: opened.id, ticket_id: ticket.id, evidence: 'Owner commissioned the review' })
+    await expect(h.runTool(runtime.masterId, name, { ...args, matter_revision: matter_revision + 1 })).rejects.toThrow('without an open Ticket')
+    expect(group().matters[0]?.pendingReview?.nextStep).toBe(next)
+    expect(await h.runTool(runtime.masterId, 'orchestrator_ticket_note', { ticket_id: ticket.id, text: next,
+      matter_id, matter_revision: matter_revision + 1 })).toMatchObject({ saved: true })
+    expect(group().matters[0]?.pendingReview).toBeUndefined()
+    expect((await detail()).reviews).toBeUndefined()
+    return
+  }
+  const { ticket, sessionId } = accepted
+  const args = { ticket_id: ticket.id, text: next, matter_id, matter_revision }
   const first = await h.runTool(runtime.masterId, 'orchestrator_ticket_note', args)
   expect(first.saved).toBe(true)
   expect((await h.runTool(runtime.masterId, 'orchestrator_ticket_note', args)).reused).toBe(true)
@@ -45,8 +91,21 @@ it('hands a judged receipt to an existing worker through normal tools and fences
   const resource = `ticket/${ticket.id}/evidence/${page.items[0]!.reference}`
   const read = await h.runTool(sessionId, 'orchestrator_read', { resource, limit: 100 })
   expect(read.text).toContain('batchId')
+  await runtime.idle()
+  if (ownerQuestion) {
+    await h.runTool(sessionId, 'orchestrator_report', { state: 'waiting', summary: next, human_action: ownerQuestion })
+    expect(runtime.store.tickets.get(ticket.id)!.attention).toMatchObject({ question: ownerQuestion })
+  } else {
+    const at = new Date(Date.now() + 60_000).toISOString()
+    await h.runTool(sessionId, 'orchestrator_followup', { request_id: 'current-head-check', at, reason: next })
+    expect(runtime.followups.list(ticket.id)).toMatchObject([{ id: 'current-head-check', at, reason: next }])
+    expect(runtime.store.tickets.get(ticket.id)!.attention).toBeUndefined()
+  }
+  expect(runtime.store.tickets.list()).toHaveLength(ticketCount)
   await expect(h.runTool(sessionId, 'orchestrator_read', { resource: `triage/evidence/${page.items[0]!.reference}` })).rejects.toThrow('main Session')
   runtime.store.saveSettings({ ...runtime.store.settings(), sources: { ...runtime.store.settings().sources, [sourceId]: { enabled: false, config: {} } } })
+  const redacted = await h.runTool(runtime.masterId, 'orchestrator_read', { resource: `triage/receipt/${current.id}/1` })
+  expect(JSON.parse(String(redacted.text)).matters).toEqual([])
   await expect(h.runTool(sessionId, 'orchestrator_read', { resource, offset: 100 })).rejects.toThrow('access changed')
 })
 

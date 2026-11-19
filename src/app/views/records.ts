@@ -156,7 +156,11 @@ export function threadFacts(store: Store, thread: Thread) {
 export type ThreadFactsView = ReturnType<typeof threadFacts>
 export const ticketLine = (view: Snapshot, ticket: Ticket) => {
   const codex = ticket.execution?.executor !== 'dsh' && view.store.get(KV.codex.binding(ticket.id))
-  return { ...ticketSummary(ticket), ...(codex ? { sessionId: '', codexThreadId: codex.threadId } : {}),
+  const conclusion = view.store.get(KV.workbench.conclusion(ticket.id))
+  const summary = ticketSummary(ticket)
+  return { ...summary, sessionId: codex ? '' : conclusion?.sessionId ?? summary.sessionId,
+    ...(codex ? { codexThreadId: codex.threadId } : {}),
+    ...(conclusion ? { discussionConclusion: conclusion } : {}),
     threads: view.threadsOf(ticket.id).map(thread => threadFacts(view.store, thread)) }
 }
 export function threadTitle(store: Pick<Store, 'read'>, thread: Thread): string {

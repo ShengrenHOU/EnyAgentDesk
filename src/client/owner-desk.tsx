@@ -11,7 +11,7 @@ import { ReplyForm } from './reply-form.tsx'
 import { replyDraftKey, useReplyDrafts, type ReplyDraftTarget } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, when, type T } from './text.ts'
-import { CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite } from './widgets.tsx'
+import { CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite, SessionButton } from './widgets.tsx'
 
 interface Props {
   sessionId: string; t: T; send(text: string): Promise<void>; openTicket(id: string): void
@@ -195,6 +195,7 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
             <div className="dt-owner-task-head"><button type="button" className="dt-open" onClick={() => openTicket(ticket.id)}>{ticket.title}</button>
               <Tag tone={ticket.attention && group !== 'deferred' ? 'warning' : 'quiet'}>{ticketMark(t, ticket).label}</Tag></div>
             <p className={ticket.attention && group !== 'deferred' ? 'dt-owner-question' : 'dt-owner-summary'}>{ticket.attention?.question ?? ticket.summary}</p>
+            {ticket.discussionConclusion && <p className="dt-owner-summary"><strong>{t('discussionConclusionLabel')}</strong> · {ticket.discussionConclusion.summary}</p>}
             {group === 'deferred' && ticket.until && <p className="dt-hint">{t('queueDeferredUntil',
               { at: fullTime(ticket.until, t('lang')) })}</p>}
             {question && <QuickReply value={quick[ticket.id]?.text ?? ''}
@@ -203,6 +204,7 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
             {(ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => <p key={item.id} className="dt-hint">
               {t('ticketFollowupAt')} {when(item.at, t('lang'))} · {item.reason}</p>)}
             <div className="dt-owner-actions">
+              {ticket.sessionId && <SessionButton variant="outline" sessionId={ticket.sessionId} label={t('openOriginalSession')} />}
               <Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
                 onClick={() => choose(ticket)}>{t(ticket.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>
               {ticket.stage === 'person' && ticket.actions.stop && (ticket.action === 'failed' || ticket.action === 'blocked')
@@ -253,7 +255,7 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
 export function OwnerDesk(props: Props) {
   // A Ticket worker never owns the global desk or its subscriptions.
   if (props.sessionId.startsWith('worker-')) return null
-  return <PanelProvider t={props.t} openSession={async () => {}} navigate={route => {
+  return <PanelProvider t={props.t} openSession={id => props.openMain(id, new AbortController().signal)} navigate={route => {
     if (route.page === 'execution' && route.id) props.openTicket(route.id)
   }} back={() => {}} backLabel={props.t('ownerDeskTitle')}>
     <Desk {...props} />

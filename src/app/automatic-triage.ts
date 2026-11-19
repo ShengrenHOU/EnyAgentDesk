@@ -16,7 +16,7 @@ type Lane = 'live' | 'historical'
 interface Group {
   owner: string; scope: string; source: string; lane: Lane; state: 'open' | 'sealed' | 'transferred' | 'blocked' | 'released'
   ids: string[]; firstAt: string; lastAt: string; oldestAt: string; newestAt: string; chars: number; fingerprint: string; problem?: string
-  fingerprintVersion?: 2
+  fingerprintVersion?: 2; blockedAt?: string
 }
 interface Scan { highwater: number; nextHighwater?: number; cursor: number; scanned: number; captured: number; skipped: Record<string, number>; completedAt?: string; nextSweep?: string }
 const scanKey = record<Scan>('automatic-triage-scan')
@@ -117,6 +117,7 @@ export class AutomaticTriage {
     let group = row ? JSON.parse(String(row.value)) as Group : undefined
     if (group && (!this.matchesSnapshot(group) || handoffs.read(group.owner).state !== 'held')) {
       group.state = handoffs.read(group.owner).state === 'released' ? 'released' : 'blocked'; group.problem = 'Source, settings, policy, prompt or ownership changed; explicit recovery required'
+      if (group.state === 'blocked') group.blockedAt = now
       store.set(groups(group.owner), group); group = undefined
     }
     const chars = Buffer.byteLength(trigger.text.slice(0, 4000), 'utf8')
@@ -190,6 +191,7 @@ export class AutomaticTriage {
       if (handoffs.read(group.owner).state === 'released') { group.state = 'released'; store.set(groups(group.owner), group); return }
       if (!this.matchesSnapshot(group)) {
         group.state = 'blocked'; group.problem = 'Source, settings, policy or prompt changed; held evidence retained for explicit recovery'
+        group.blockedAt = now
         store.set(groups(group.owner), group); return
       }
       // Production plans the native window per conversation from that conversation's covered cursor; the
@@ -216,7 +218,7 @@ export class AutomaticTriage {
       if (action === 'release') { handoffs.release(owner, generation); group.state = 'released' }
       else {
         if (!this.retryAvailable(group, generation)) throw new Error('Source or exclusive owner is unavailable')
-        group.fingerprint = this.snapshot(group.ids); group.fingerprintVersion = 2; group.state = 'sealed'; delete group.problem
+        group.fingerprint = this.snapshot(group.ids); group.fingerprintVersion = 2; group.state = 'sealed'; delete group.problem; delete group.blockedAt
       }
       store.set(groups(owner), group)
       return { owner, generation, state: group.state, messages: group.ids.length }

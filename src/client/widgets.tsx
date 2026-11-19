@@ -34,6 +34,14 @@ export function Section({ title, count, children, action, hint, badge, icon }: {
   </section>
 }
 export function Hint({ children }: { children: ReactNode }) { return <p className="dt-hint">{children}</p> }
+export function RefreshFailure({ error, updatedAt, retry }: { error: Error; updatedAt?: number; retry(): Promise<void> }) {
+  const { t } = usePanel()
+  return <div className="pw-stale" role="status">
+    <div><p>{updatedAt === undefined ? errorText(error) : t('detailStaleNotice', { at: fullTime(new Date(updatedAt).toISOString(), t('lang')) })}</p>
+      {updatedAt !== undefined && <p className="pw-muted">{errorText(error)}</p>}</div>
+    <Button size="sm" variant="outline" onClick={() => void retry()}>{t('retry')}</Button>
+  </div>
+}
 export function LabelValue({ label, value }: { label: string; value: ReactNode }) {
   return <span className="dt-lv"><span className="dt-lv-label">{label}</span> <span className="dt-lv-value">{value}</span></span>
 }

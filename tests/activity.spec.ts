@@ -542,6 +542,24 @@ it.each(['pause', 'disable', 'change', 'unsubscribe'] as const)('checks a %s bef
   expect(scanWechatActivity).not.toHaveBeenCalled()
 })
 
+it('shows sustained intake failures in health without sending them into the Main discussion', async () => {
+  const h = host()
+  h.sources.register(workbenchKind)
+  h.ctx.state.set(KV.runtime.masterId, 'owner-session')
+  const settings = store.settings()
+  store.saveSettings({ ...settings, sources: { ...settings.sources, workbench: { enabled: true, config: { ownerId: 'native-owner' } } } })
+  saveConfig(config({ ticketId: '', collectionId: 'personal-updates', routing: 'tasks', failuresBeforeError: 2 }))
+  const firstFailure = iso()
+  vi.mocked(scanLarkMessages).mockRejectedValue(new Error('Reader connection unavailable'))
+  for (let count = 0; count < 3; count++) { await h.scan(); clock += 120_000 }
+  expect(h.board.all['activity:feishu-messages']).toMatchObject({ state: 'error', failureSince: firstFailure })
+  expect(store.receipts.waiting()).toHaveLength(0)
+  vi.mocked(scanLarkMessages).mockResolvedValue(complete)
+  await h.scan()
+  expect(h.board.all['activity:feishu-messages']).toMatchObject({ state: 'ready', lastSuccessAt: iso() })
+  expect(store.receipts.waiting()).toHaveLength(0)
+})
+
 it('queues one sustained-failure notice and one recovery only to the owner control topic, while normal polls stay quiet', async () => {
   const h = host()
   vi.mocked(scanLarkMessages).mockRejectedValue(new Error('Reader connection unavailable'))
@@ -621,6 +639,9 @@ it('projects native message headers without changing evidence identity, and fenc
   expect(renamed.id).toBe(trigger.id)
   expect(sources.imEvidence(renamed)).toEqual(sources.imEvidence(trigger))
   expect(sources.imHeader(activityTrigger(event(), selected))).toEqual({ at: original.at })
+  const self = { ...original, senderId: 'ou_owner', senderType: 'user' }
+  expect(sources.imHeader(activityTrigger(self, selected)).fromCurrentAccount).toBe(true)
+  expect(sources.imHeader(activityTrigger({ ...self, senderIdType: 'user_id' }, selected)).fromCurrentAccount).toBeUndefined()
   const otherOwner = createActivityKind({ ...bindings, lark: { ...bindings.lark, expectedUserId: 'ou_different_owner' } }, tools)
   expect(otherOwner.imEvidence?.(trigger, selected)).toBeUndefined()
   saveConfig(selected, false)

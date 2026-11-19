@@ -93,10 +93,12 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
       clearTimeout(timer)
       try {
         const value = await loader.current()
-        lastOk.current = Date.now()
-        if (active) startTransition(() => setState(previous => same(previous.data, value)
-          ? previous.error ? { data: previous.data as T, updatedAt: lastOk.current } : previous
-          : { data: value, updatedAt: lastOk.current }))
+        if (!active) return
+        const receivedAt = Date.now()
+        lastOk.current = receivedAt
+        startTransition(() => setState(previous => same(previous.data, value)
+          ? previous.error ? { data: previous.data as T, updatedAt: receivedAt } : previous
+          : { data: value, updatedAt: receivedAt }))
       } catch (failure) {
         // Keep the last successful time on the failure so the view can label stale data instead of presenting it as current.
         if (active) setState(previous => ({ ...previous, error: failure instanceof Error ? failure : new Error(String(failure)),

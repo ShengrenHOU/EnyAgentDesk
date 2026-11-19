@@ -47,6 +47,7 @@ function host(overrides: Partial<SourceContextDeps> = {}) {
     ready: Promise.resolve(), configured: () => true, receive, ...overrides }
   // The Sources' functions take the context; plugin entries and kind callbacks take the host, which builds each kind's context.
   const value = { ...parts, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(parts, kind),
+    saveWorkerDiscussion: async () => { throw new Error('No native workbench in this fixture') },
     runSource: (run: (signal: AbortSignal) => Promise<unknown>) => {
       const controller = new AbortController()
       const running = run(controller.signal)
@@ -80,6 +81,23 @@ it('admits configured default-branch CI as an inferred candidate without grantin
   h.store.close()
 })
 const healthOf = new WeakMap<SourceRegistry, HealthBoard>()
+it('keeps the last successful source check distinct from the start of a fault', () => {
+  const h = host()
+  try {
+    const lastSuccessAt = '2026-11-18T05:00:00.000Z'
+    h.report('github', { state: 'ready', detail: 'No new events', lastSuccessAt })
+    h.report('github', { state: 'error', detail: 'Temporary failure' })
+    const failureSince = h.health.github!.failureSince
+    expect(failureSince).toBeDefined()
+    h.report('github', { state: 'starting', detail: 'Checking again' })
+    h.report('github', { state: 'error', detail: 'Still failing' })
+    expect(h.health.github).toMatchObject({ lastSuccessAt, failureSince })
+    h.report('github', { state: 'ready', detail: 'Recovered', lastSuccessAt: '2026-11-18T05:05:00.000Z' })
+    expect(h.health.github!.failureSince).toBeUndefined()
+    expect(h.health.github!.lastSuccessAt).toBe('2026-11-18T05:05:00.000Z')
+  } finally { h.store.close() }
+})
+
 function emptyRegistry(): SourceRegistry {
   const board = new HealthBoard()
   const sources = new SourceRegistry(() => SettingsSchema.parse({}), board)

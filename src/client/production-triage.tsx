@@ -4,9 +4,10 @@ import type { productionOverview } from '../app/production-triage.ts'
 import { useHistoryPage } from './api.ts'
 import type { T } from './text.ts'
 type View = ReturnType<typeof productionOverview>
-export function ProductionJudgments({ view, t, loadPage, onDiscuss, onRetry, onRecoverIntake, discussionDisabled = false }: {
+export function ProductionJudgments({ view, t, loadPage, onDiscuss, onOpenLine, onRetry, onRecoverIntake, discussionDisabled = false }: {
   view: View; t: T; loadPage?: (before: number, unresolved?: boolean) => Promise<View>
   onDiscuss?: (id: string, generation: number) => void; discussionDisabled?: boolean
+  onOpenLine?: (id: string) => void
   onRetry?: (id: string, generation: number) => Promise<void>
   onRecoverIntake?: () => Promise<string>
 }) {
@@ -68,9 +69,13 @@ export function ProductionJudgments({ view, t, loadPage, onDiscuss, onRetry, onR
         {group.problem && <p role="status">{group.problem}</p>}
         {onDiscuss && !group.historical && <button type="button" className="dt-textlink" disabled={discussionDisabled}
           onClick={() => onDiscuss(group.id, group.generation)}>{label('Discuss in main conversation', '到主对话讨论')}</button>}
-        <ul>{group.matters.map(matter => <li key={matter.id}><strong>{matter.title}</strong><p>{matter.reason}</p></li>)}</ul>
+        <ul>{group.matters.map(matter => <li key={matter.id}><strong>{matter.title}</strong>
+          {matter.pendingReview && <p><strong>{label('For review', '待复核')}</strong> · {matter.pendingReview.lineTitle}<br />{matter.pendingReview.nextStep}
+            {onOpenLine && <><br /><button type="button" className="dt-textlink" onClick={() => onOpenLine(matter.pendingReview!.lineId)}>
+              {t('lineReviewOpen')}</button></>}</p>}
+          <p>{matter.reason}</p></li>)}</ul>
         <details><summary>{label('Per-message audit', '逐消息审计')}</summary><ul>{group.items.map(item => <li key={item.triggerId}>
-          {item.provider} · {item.header?.senderLabel || item.sender || label('Unidentified sender', '发送者未识别')} · {item.direction} · {item.header?.at}
+          {item.provider} · {item.header?.fromCurrentAccount ? label('Current account', '本人账号') : item.header?.senderLabel || item.sender || label('Unidentified sender', '发送者未识别')} · {item.direction} · {item.header?.at}
           <small>{item.triggerId} · {stateLabel(item.kind ?? group.state)}</small><p>{item.reason}</p>
           <p>{item.gaps.join(', ')}</p><small>{item.contextHash}</small>
         </li>)}</ul></details>

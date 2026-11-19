@@ -43,7 +43,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'triage/evidence/<id>', holds: 'one source receipt' },
   { name: 'triage/receipts', holds: 'pending receipts' },
   { name: 'line/<id>/evidence', holds: 'source receipt references linked to a line and its Tickets' },
-  { name: 'ticket/<id>', holds: 'card, origin, threads, required skills, recent assignments, report excerpts and inputs', executor: true },
+  { name: 'ticket/<id>', holds: 'card, origin, threads, required skills, recent assignments, report excerpts, inputs and latest saved discussion conclusion', executor: true },
   { name: 'ticket/<id>/assignment', holds: 'its assignment text', executor: true },
   { name: 'ticket/<id>/evidence', holds: 'linked source receipts', executor: true },
   { name: 'ticket/<id>/evidence/<reference>', holds: 'one source receipt', executor: true },
@@ -266,7 +266,9 @@ const ROUTES: readonly Route[] = [
     return sourcePage(read, 'information receipt', async () => {
       const inputs = group.redacted ? [] : group.items.map(item => ({ triggerId: item.triggerId,
         text: host.store.triggers.get(item.triggerId)?.text }))
-      return { ...group, inputs }
+      // Handoff IDs must be available on the first text page, ahead of long per-input reasons.
+      const { id, generation, matters, ...receipt } = group
+      return { id, generation, matters, ...receipt, inputs }
     })
   }],
   ['triage/evidence/', read => {
@@ -389,6 +391,7 @@ const ROUTES: readonly Route[] = [
       const threads = [...subscribed.map(thread => marked(thread.key, !!thread.context?.includes(id))),
         ...[...bound].filter(key => !subscribed.some(thread => thread.key === key)).map(key => marked(key, false))]
       return { ...ticketDetails(ticket, threads, batchOf(host, ticket), !!ticketId),
+        discussion_conclusion: host.store.get(KV.workbench.conclusion(id)),
         ...(ticket.execution?.executor !== 'dsh' ? { executionStages: host.store.get(KV.codex.stages(id)) } : {}),
         ...(ticket.execution?.handoffs?.length ? { executorHandoffs: ticket.execution.handoffs } : {}), ...retry }
     }

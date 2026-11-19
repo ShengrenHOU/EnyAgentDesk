@@ -9,7 +9,7 @@ import { actorName, fullTime, localized, readableMarkers, reasonLabel, valueLabe
 import { ActionLink, ConfirmButton, LabelValue, LoadState, SessionButton, StageMark, When } from './widgets.tsx'
 
 /** Read-only global projection of pending Ticket checks and the automations they were moved to; cancellation uses existing receipts. */
-export function PendingFollowups({ openTicket }: { openTicket(id: string): void }) {
+export function PendingFollowups({ openTicket, showNext = false }: { openTicket(id: string): void; showNext?: boolean }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET followups'), [])
   const automations = usePoll(() => call('GET followups/automations'), [])
@@ -21,10 +21,24 @@ export function PendingFollowups({ openTicket }: { openTicket(id: string): void 
   const migrated = native.filter(task => !data?.some(item => item.ticketId === task.ticketId && item.id === task.requestId))
   const available = automations.data?.available ?? false
   const count = data && automations.data ? data.length + migrated.length : '…'
+  const current = showNext && data && automations.data && !error && !automations.error
+  const firstCheck = current ? data.find(item => !item.blocked && !automationOf(item)) : undefined
+  const firstAutomation = current ? native.filter(item => item.status === 'scheduled'
+    && !data.some(check => check.ticketId === item.ticketId && check.id === item.requestId && check.blocked))
+    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))[0] : undefined
+  const next = firstAutomation && (!firstCheck || firstAutomation.scheduledAt < firstCheck.at)
+    ? { ticketId: firstAutomation.ticketId, title: firstAutomation.ticketTitle, reason: firstAutomation.title, at: firstAutomation.scheduledAt }
+    : firstCheck
   const automationLabel = (status: 'scheduled' | 'paused' | 'ended' | 'unknown') => status === 'paused' ? t('followupAutomationPaused') : t(status === 'scheduled'
     ? 'followupAutomationScheduled' : status === 'ended' ? 'followupAutomationEnded' : 'followupAutomationUnknown')
   const changed = async () => { await Promise.all([reload(), automations.reload()]) }
   return <section className="dt-followup-agenda">
+    {next && !open && <div className="dt-hint">
+      <strong>{t('followupNext')}</strong>
+      <p><button type="button" className="dt-open" onClick={() => openTicket(next.ticketId)}>{next.title}</button>
+        {' · '}<time dateTime={next.at}>{fullTime(next.at, t('lang'))}</time></p>
+      <p>{next.reason}</p>
+    </div>}
     <button type="button" className="dt-followup-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
       <Icon name={open ? 'chevron-down' : 'chevron-right'} size={14} />
       <span>{t('followupAgenda')} · {count}</span>

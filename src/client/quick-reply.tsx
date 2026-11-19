@@ -115,6 +115,43 @@ export function TurnQuickReply(props: TurnReplyProps) {
   if (props.sessionId.startsWith('worker-')) return null
   return <MainTurnReply {...props} />
 }
+
+/** Confirm the short Ticket record from the original assistant reply without sending a new chat turn. */
+export function WorkerDiscussionSave({ sessionId, throughSeq, t }: { sessionId: string; throughSeq: number; t: T }) {
+  const [open, setOpen] = useState(false)
+  const [summary, setSummary] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [failure, setFailure] = useState<string>()
+  const submit = async () => {
+    if (!summary.trim() || busy) return
+    setBusy(true); setFailure(undefined)
+    try {
+      const response = await fetch('/api/superagent-workbench/worker-discussion', { method: 'POST',
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, throughSeq, summary: summary.trim() }) })
+      const receipt = await response.json()
+      if (!response.ok) throw new Error(receipt.error ?? t('discussionConclusionFailed'))
+      if (receipt.sessionId !== sessionId || receipt.throughSeq !== throughSeq) throw new Error(t('discussionConclusionFailed'))
+      setSaved(true); setOpen(false)
+    } catch (error) { setFailure(errorText(error)) }
+    finally { setBusy(false) }
+  }
+  if (saved) return <p className="dt-hint" role="status">{t('discussionConclusionSaved')}</p>
+  if (!open) return <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>{t('discussionConclusionSave')}</Button>
+  return <form className="dt-turn-reply dt-fields" onSubmit={event => { event.preventDefault(); void submit() }}>
+    <label className="dt-field">
+      <span>{t('discussionConclusionLabel')}</span>
+      <textarea autoFocus rows={3} maxLength={600} value={summary} disabled={busy}
+        placeholder={t('discussionConclusionHint')} onChange={event => setSummary(event.target.value)} />
+    </label>
+    <div className="pw-actions">
+      <Button size="sm" variant="outline" type="submit" disabled={busy || !summary.trim()}>{t('save')}</Button>
+      <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={() => setOpen(false)}>{t('cancel')}</Button>
+    </div>
+    {failure && <p role="alert" className="dt-error">{failure}</p>}
+  </form>
+}
+
 function MainTurnReply({ sessionId, turn, seq, quote, t, send }: TurnReplyProps) {
   const target = { turn, seq, quote }
   const current = useSyncExternalStore(watchTurns, () => (selectedTurn.get(sessionId) ?? newestTurn.get(sessionId))?.seq === seq, none)

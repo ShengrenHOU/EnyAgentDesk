@@ -38,16 +38,17 @@ export interface MainCommit {
   /** When that head was observed, which must be later than the build for the comparison to prove anything. */
   observedAt?: string | undefined
 }
-/** The running build as the panel shows it, with `behind` when the build is not the source's current default-branch commit. */
+/** The running build and the observed default-branch head when its commit ID differs. */
 export interface RuntimeVersion extends PackageIdentity {
   /** When this dsh-superagent instance started, the activation time of the running artifact. */
   startedAt: string
+  /** Legacy response name for a source difference. No Git ancestry was checked. */
   behind?: { branch: string; head: string }
 }
 /**
  * Compares the running build with the default-branch commit the repository's GitHub Source last read. The comparison needs
  * the same repository and an observation later than the build: a checkpoint written before this artifact was built, as after
- * an upgrade, still holds the previous head and cannot show that the build is behind.
+ * an upgrade, still holds the previous head and should not appear as a current difference.
  */
 export function runtimeVersion(identity: PackageIdentity, startedAt: string, main?: MainCommit): RuntimeVersion {
   const head = main?.head?.toLowerCase(), commit = identity.commit.toLowerCase()

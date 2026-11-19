@@ -75,6 +75,8 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   expect(all('.dt-form > .dt-list > .dt-row')[0]!.querySelector('.dt-row-meta')?.textContent).toBe('24 小时到达 12被过滤 2最近 ' + document.querySelector('.dt-row-meta time, .dt-row-meta .dt-lv:last-child .dt-lv-value')?.textContent)
   expect(text()).toContain(zh['sourceState.error'])
   expect(text()).toContain('socket closed')
+  expect(text()).toContain(`${zh.sourceFailureSince} ${zh.sourceTimeUnknown}`)
+  expect(text()).toContain(zh.sourceMaintenanceAction)
   expect(all('.dt-card')).toHaveLength(0)
   server.setup = { ...server.setup, problem: problemOf('agentCliUnset') }
   await remount()

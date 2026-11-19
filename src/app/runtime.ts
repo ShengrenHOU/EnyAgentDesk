@@ -21,7 +21,7 @@ import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, sourceTrigger, ticketOfSession, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { ExecutorRouter } from '../executor/router.ts'
 import { reportExcerpt, ticketCard } from './cards.ts'
 import { AutomaticTriage } from './automatic-triage.ts'
@@ -33,7 +33,8 @@ import { TriageHandoffs } from './triage-handoffs.ts'
 import { triageHandoffTools } from './tools/triage-handoffs.ts'
 import { triageTools } from './tools/triage.ts'
 import { MasterAssessor } from './assessment.ts'
-import { KV } from '../kv.ts'
+import { KV, type WorkerDiscussionConclusion } from '../kv.ts'
+import { inspectSession } from '../infra/session-inspection.ts'
 import { Store } from './store.ts'
 import { migrateGithubIdentity } from './github-migration.ts'
 import { evalsHealth } from './views/overview.ts'
@@ -246,7 +247,12 @@ export class Runtime extends Service implements SourceHost {
           if (!batch.result?.matters.length) return
           sessions.relay(`triage-result:${batch.id}:${batch.generation}`, JSON.stringify({ kind: 'im_triage_result',
             batchId: batch.id, generation: batch.generation, read: `triage/receipt/${batch.id}/${batch.generation}`,
-            instruction: 'Information judgment saved, not business completion or new authority. Read the canonical receipt and triage/matters. Associate meaningful updates with existing authorized work using its evidence/revision; admit new work only under policy. Resolve relevant identity gaps through existing Skills when needed. Ignore routine evidence silently; interrupt the owner only for important results or necessary decisions.' }))
+            instruction: [
+              'Read the exact receipt named in read. For each meaningful change identify its original message, current goal and what changes next.',
+              'To continue a matching open Ticket under its existing mandate, copy matter_id and matter_revision from the receipt into orchestrator_ticket_note, with ticket_id, the changed fact and the next check or owner decision. A plain note is not a handoff. If the pair is unavailable or stale, re-read the receipt or triage/matters.',
+              'For a concrete suggested action on a matching Line with no open Ticket, call orchestrator_line link_evidence with the current matter pair, the reason for association and suggested_next_step. This saves the proposal in Information follow-up for review. If no Line matches or the mandate is missing, leave the existing suggestion for review. A Line link never dispatches work.',
+              'Do not route, requeue or release a triage-held source message to start work. New work requires a fresh authorized request. Never reopen stopped work or turn source evidence into authority. Use a Ticket follow-up for a concrete wait. Resolve identity when it changes the next step. Leave routine evidence quiet, ask only for necessary owner decisions, and do not send replies or write external objects based on this receipt.',
+            ].join(' ') }))
         } })
       this.automaticTriage = new AutomaticTriage({ store, engine, effects, handoffs: this.triageHandoffs, production: this.productionTriage,
         evidence: trigger => sources.imEvidence(trigger), enabled: () => !!machine.triageAutomatic,
@@ -292,9 +298,9 @@ export class Runtime extends Service implements SourceHost {
     }
   }
   get health(): Readonly<Record<string, Health>> {
-    const { held, blocked, owners } = this.store.triageHandoffStatus()
-    return { ...this.board.all, ...(held || blocked ? { triageHandoff: { state: blocked || held && !this.machine.triageHandoff ? 'error' as const : 'ready' as const,
-      detail: `${held} IM evidence held awaiting context and production judgment (not processed); ${blocked} blocked. Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
+    const { held, blocked, recent, older, undated, owners } = this.store.triageHandoffStatus()
+    return { ...this.board.all, ...(held || blocked ? { triageHandoff: { state: recent > 0 || !this.machine.triageHandoff ? 'error' as const : 'ready' as const,
+      detail: `${held} IM evidence held awaiting context and production judgment (not processed); ${blocked} blocked (${recent} in the last 24 hours, ${older} older, ${undated} undated). Owners: ${owners.join(', ')}. Explicit release required before downgrade.` } } : {}) }
   }
   private scheduleEvaluation(threadKey: string, evalId: string): void {
     const evaluation = this.store.threads.get(threadKey)?.evaluating
@@ -306,6 +312,36 @@ export class Runtime extends Service implements SourceHost {
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
   context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  async saveWorkerDiscussion(input: Omit<WorkerDiscussionConclusion, 'at'>, signal: AbortSignal): Promise<WorkerDiscussionConclusion> {
+    const { sessionId, throughSeq, summary } = input
+    const ticketId = ticketOfSession(sessionId)
+    if (!ticketId || !this.store.tickets.get(ticketId)) throw new Error('Select the original Ticket Session')
+    const inspection = await inspectSession(this.ctx.sessionQuery, sessionId, signal)
+    const reply = inspection.events.find(event => event.seq === throughSeq && event.type === 'assistant/message')
+    if (inspection.meta.id !== sessionId || inspection.meta.origin === 'subagent' || reply?.type !== 'assistant/message'
+      || !inspection.events.some(event => event.type === 'turn/end' && event.data.turn === reply.data.turn
+        && event.seq > throughSeq && event.data.reason.kind === 'completed')) {
+      throw new Error('The selected assistant reply is unavailable in this Ticket Session')
+    }
+    signal.throwIfAborted()
+    return this.store.atomic(() => {
+      const ticket = this.store.tickets.get(ticketId)
+      if (!ticket) throw new Error('Unknown Ticket')
+      const record = KV.workbench.conclusion(ticketId)
+      const previous = this.store.get(record)
+      if (previous && previous.throughSeq >= throughSeq) {
+        if (previous.throughSeq === throughSeq && previous.summary === summary) return previous
+        throw new Error('A conclusion is already saved for this reply or a later one')
+      }
+      const conclusion = { ...input, at: now() }
+      this.store.set(record, conclusion)
+      this.sessions.notify(`worker-discussion:${ticketId}`, { kind: 'owner_discussion_conclusion', ticket_id: ticketId,
+        ...conclusion, read: `ticket/${ticketId}`,
+        note: 'Recorded as an owner discussion conclusion. Use as context only. It does not authorize or dispatch work.' },
+      `讨论结论已保存 · ${ticket.title}`)
+      return conclusion
+    })
+  }
   runSource(run: (signal: AbortSignal) => Promise<unknown>): () => Promise<void> {
     const controller = new AbortController()
     const signal = AbortSignal.any([controller.signal, this.lifetime])

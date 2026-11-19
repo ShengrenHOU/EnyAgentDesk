@@ -1,4 +1,4 @@
-/** Personal workspace: the open Lines lead, then the decision queue and the work that still runs; detailed discussion stays in the main Session. */
+/** Personal workspace: decisions, recent results and the next automatic follow-up lead the daily view. */
 import { CanonicalMatters } from './triage-matters.tsx'
 import { ProductionJudgments } from './production-triage.tsx'
 import { useEffect, useRef, useState } from 'react'
@@ -13,7 +13,7 @@ import { ReplyForm } from './reply-form.tsx'
 import { replyDraftKey, useReplyDrafts } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, localized, valueLabel, when, type T } from './text.ts'
-import { CloseTicketButton, ConfirmButton, ExternalLink, LoadState, MarkdownLite } from './widgets.tsx'
+import { CloseTicketButton, ConfirmButton, ExternalLink, LoadState, MarkdownLite, RefreshFailure, SessionButton } from './widgets.tsx'
 
 interface QueueAdvice { summary: string; reason?: string; risk?: string; draft?: string }
 interface QueueItem {
@@ -28,6 +28,7 @@ interface QueueView {
 }
 /** The fields a failed or blocked Ticket needs for its close action, shared by list rows and their detail. */
 type CloseTarget = { id: string; title: string; actions: { retry: boolean; stop: boolean }; stage: string; action?: string }
+const LAST_VISIT = 'dsh-superagent/workbench-last-visit'
 interface Props {
   t: T
   send(id: string, text: string): Promise<void>
@@ -50,6 +51,15 @@ export function Workbench(props: Props) {
   const { t, call } = usePanel()
   const { state, error: stateError } = usePanelData()
   const { data, error, reload: reloadWorkbench } = usePoll(() => call('GET workbench'), [])
+  const [lastVisit] = useState(() => {
+    try { return Number(localStorage.getItem(LAST_VISIT)) || undefined } catch { return undefined }
+  })
+  const recordedVisit = useRef(false)
+  useEffect(() => {
+    if (!data || error || recordedVisit.current) return
+    recordedVisit.current = true
+    try { localStorage.setItem(LAST_VISIT, String(Date.now())) } catch { /* A visit marker is only a display preference. */ }
+  }, [data, error])
   const [informationOpen, setInformationOpen] = useState(false)
   const matters = usePoll(() => informationOpen ? call('GET triage-matters') : Promise.resolve(null), [informationOpen])
   const judgments = usePoll(() => informationOpen ? call('GET production-triage') : Promise.resolve(null), [informationOpen])
@@ -112,7 +122,7 @@ export function Workbench(props: Props) {
     } catch (error) { setFailure(errorText(error)); return false }
     finally { setBusy(false) }
   }
-  /** Detailed discussion belongs to the main Session, so open it once the message was accepted. */
+  /** Open the main Session after explicitly sending it a new request. */
   const discuss = async (text: string) => {
     if (!await send(text) || !state?.masterId) return
     await props.openSession(state.masterId).catch(error => setFailure(errorText(error)))
@@ -247,6 +257,7 @@ export function Workbench(props: Props) {
       <Tag tone={ticket.attention ? 'warning' : 'quiet'}>{ticketMark(t, ticket).label}</Tag></div>
     {ticket.working && <p className="pw-muted pw-working">{workingLine(ticket.working)}</p>}
     {ticket.attention ? <MarkdownLite text={ticket.attention.question} /> : <p className="pw-clamp">{ticket.summary || ticket.note?.text}</p>}
+    {ticket.discussionConclusion && <p className="pw-clamp"><strong>{t('discussionConclusionLabel')}</strong> · {ticket.discussionConclusion.summary}</p>}
     {(ticket.followups ?? (ticket.followup ? [ticket.followup] : [])).map(item => <div className="pw-actions" key={item.id}>
       <p className="pw-muted">{t('ticketFollowupAt')} {when(item.at, t('lang'))} · {item.reason}</p>
       <ConfirmButton label={t('homeCancelFollowup')} title={t('homeCancelFollowupTitle')}
@@ -259,8 +270,11 @@ export function Workbench(props: Props) {
       const source = sources.data?.find(source => source.id === id)
       return <span key={id}>{source ? localized(t, source.title) : valueLabel(t, 'source', id)}</span>
     })}
-      <time dateTime={ticket.updatedAt}>{when(ticket.updatedAt, t('lang'))}</time></div>
-    <div className="pw-actions"><Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
+      <time dateTime={ticket.updatedAt}>{when(ticket.updatedAt, t('lang'))}</time>
+      {ticket.ended && lastVisit && Date.parse(ticket.ended.at) > lastVisit && <Tag tone="info">{t('homeSinceVisit')}</Tag>}</div>
+    <div className="pw-actions">
+      {ticket.sessionId && <SessionButton variant="outline" sessionId={ticket.sessionId} label={t('openOriginalSession')} />}
+      <Button size="sm" variant="outline" disabled={busy} title={busy ? t('workbenchSubmitting') : undefined}
       onClick={() => respond({ ticketId: ticket.id, title: ticket.title,
       ...(ticket.attention ? { attentionId: ticket.attention.id, question: ticket.attention.question } : {}) })}>
       {t(ticket.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>
@@ -374,19 +388,26 @@ export function Workbench(props: Props) {
         <div className="pw-section-title"><h2>{preview.title}</h2>
         <div className="pw-actions"><ExternalLink href={preview.url}>{t('details')}</ExternalLink><Button size="sm" variant="ghost" onClick={closePreview}>{t('close')}</Button></div></div>
         <iframe title={preview.title} src={preview.url} sandbox="" /></section>}
-      {selectedLine ? <LineDetail key={selectedLine} line={lineView} error={lineDetail.error} destinations={lines.data?.open}
+      {selectedLine ? <LineDetail key={selectedLine} line={lineView} error={lineDetail.error} updatedAt={lineDetail.updatedAt} onRetry={lineDetail.reload}
+        onDiscuss={state?.masterId ? async text => { await props.send(state.masterId, text); await props.openSession(state.masterId) } : undefined}
+        destinations={lines.data?.open}
         destinationsError={lines.error} backLabel={t('homeBack')} onBack={() => setSelectedLine(undefined)}
         onOpenTicket={id => { setSelectedLine(undefined); setSelected(id) }} onChanged={change} /> : selected ? <section className="pw-section"><Button size="sm" variant="ghost" onClick={() => setSelected(undefined)} icon={<Icon name="chevron-left" />}>{t('homeBack')}</Button>
-        {detail.data?.id === selected ? <><h2>{detail.data.title}</h2><Tag>{ticketMark(t, detail.data).label}</Tag><MarkdownLite text={detail.data.attention?.question ?? detail.data.summary} />
-          <div className="pw-actions">{detail.data.ended?.by !== 'human' && <Button variant="primary" disabled={busy}
+        {detail.data?.id === selected ? <><h2>{detail.data.title}</h2><Tag>{ticketMark(t, detail.data).label}</Tag>
+          {detail.error && <RefreshFailure error={detail.error} updatedAt={detail.updatedAt} retry={detail.reload} />}
+          <MarkdownLite text={detail.data.attention?.question ?? detail.data.summary} />
+          {detail.data.discussionConclusion && <p><strong>{t('discussionConclusionLabel')}</strong> · {detail.data.discussionConclusion.summary}</p>}
+          <div className="pw-actions">
+            {detail.data.sessionId && <SessionButton sessionId={detail.data.sessionId} variant="outline" label={t('openOriginalSession')} />}
+            {detail.data.ended?.by !== 'human' && <Button variant="primary" disabled={busy}
             title={busy ? t('workbenchSubmitting') : undefined} onClick={() => respond({ ticketId: detail.data!.id,
             title: detail.data!.title, ...(detail.data!.attention ? { attentionId: detail.data!.attention.id, question: detail.data!.attention.question } : {}) })}>
             {t(detail.data.attention ? 'workbenchAnswer' : 'ownerDeskRevise')}</Button>}
             {closeButton(detail.data) || stopButton(detail.data)}
             <Button variant="ghost" onClick={() => props.openManagement(selected)}>{t('homeFullRecord')}</Button></div>
           {detail.data.deliverables?.map(item => <ExternalLink key={item.url} href={item.url}>{item.title}</ExternalLink>)}
-        </> : <LoadState error={detail.error} loading />}</section>
-      : <>{lineList}{!queue.data ? <LoadState loading error={queue.error} /> : <>
+        </> : detail.error ? <RefreshFailure error={detail.error} retry={detail.reload} /> : <LoadState loading />}</section>
+      : <>{!queue.data ? <LoadState loading error={queue.error} /> : <>
         <section className="pw-queue" aria-label={t('queueTitle')}>
           <div className="pw-section-title"><h2>{t('queueTitle')}</h2></div><p className="pw-muted">{t('queueHint')}</p>
           {queue.error && queue.data && <div className="pw-stale" role="status">
@@ -419,8 +440,20 @@ export function Workbench(props: Props) {
         <div className="pw-task-grid">{stalled.map(card)}</div>
       </section>}
       {queue.data && !queue.data.items.length && !stalled.length && <p className="pw-muted">{t('queueSilence')}</p>}
+      {data && <>
+        {section(t('homeResults'), data.work?.delivered.slice(0, 3) ?? [], t('homeNoResults'), data.work?.deliveredTotal, 'ended')}
+        <p className="pw-muted">{t('homeResultsHint')}</p>
+        <Button size="sm" variant="outline" onClick={() => props.openWorkList('ended')}>{t('homeFullHistory')}</Button>
+        <div className="pw-section-title"><h2>{t('homeProgress')}</h2><span>{(data.work?.workingTotal ?? 0) + (data.work?.waitingTotal ?? 0)}</span>
+          <button type="button" className="dt-textlink" onClick={() => props.openWorkList('open')}>{t('homeAllWork')}</button></div>
+        <div className="pw-task-grid">{active.slice(0, 4).map(card)}</div>
+      </>}
+      <PendingFollowups openTicket={setSelected} showNext />
+      {lineList}
       <details className="pw-queue-fold" onToggle={event => setInformationOpen(event.currentTarget.open)}>
         <summary>{t('homeInformationAudit')}{state?.triageHandoff && <> · {t('homeInformationHeld', { count: state.triageHandoff.held, blocked: state.triageHandoff.blocked })}</>}</summary>
+        {informationOpen && !!state?.triageHandoff?.blocked && state.triageHandoff.recent !== undefined &&
+          <p className="pw-muted">{t('homeBlockedAge', { recent: state.triageHandoff.recent, older: state.triageHandoff.older, undated: state.triageHandoff.undated })}</p>}
         {informationOpen && <>
         {matters.error && <LoadState loading={false} error={matters.error} />}
         {judgments.error && <LoadState loading={false} error={judgments.error} />}
@@ -428,6 +461,7 @@ export function Workbench(props: Props) {
       {matters.data && <CanonicalMatters view={matters.data} t={t} loadPage={before => call('GET triage-matters', { query: { before } })}
         openWork={(kind, id) => { setSelected(kind === 'ticket' ? id : undefined); setSelectedLine(kind === 'line' ? id : undefined) }} />}
       {judgments.data && <ProductionJudgments view={judgments.data} t={t}
+        onOpenLine={id => { setSelected(undefined); setSelectedLine(id) }}
         onRetry={state?.triageRecovery?.production ? async (id, generation) => { await call('POST production-triage/:id/retry', { id, body: { generation } }); await reload() } : undefined}
         onRecoverIntake={state?.triageRecovery?.intake ? async () => {
           const owners: { owner: string; generation: number }[] = []
@@ -452,13 +486,6 @@ export function Workbench(props: Props) {
         onDiscuss={(id, generation) => void discuss(`请用 orchestrator_read 读取 triage/receipt/${id}/${generation}，只读核对这组信息及原始来源。说明当前判断、未完成原因和已有工作线关联，结合证据建议下一步；已有事项沿原工作线继续讨论。若回执已变更，先读取 triage/receipts 获取当前引用。此请求用于核对与讨论，执行动作沿已有授权。`)} />}
         </>}
       </details>
-        <PendingFollowups openTicket={setSelected} />
-        <div className="pw-section-title"><h2>{t('homeProgress')}</h2><span>{(data?.work?.workingTotal ?? 0) + (data?.work?.waitingTotal ?? 0)}</span>
-          <button type="button" className="dt-textlink" onClick={() => props.openWorkList('open')}>{t('homeAllWork')}</button></div>
-        <div className="pw-task-grid">{active.slice(0, 4).map(card)}</div>
-        {section(t('homeResults'), data?.work?.delivered.slice(0, 3) ?? [], t('homeNoResults'), data?.work?.deliveredTotal, 'ended')}
-        <p className="pw-muted">{t('homeResultsHint')}</p>
-        <Button size="sm" variant="outline" onClick={() => props.openWorkList('ended')}>{t('homeFullHistory')}</Button>
         <details className="pw-queue-fold pw-reference"><summary>{t('queueReference')}</summary>
           <section className="pw-domains" aria-label={t('homeDomains')}><div className="pw-section-title"><h2>{t('homeDomains')}</h2>
             <div className="pw-actions"><Button size="sm" variant="ghost" onClick={props.openDomainSettings}>{t('homeManageDomains')}</Button>
@@ -508,6 +535,9 @@ export function Workbench(props: Props) {
               ? <ConfirmButton label={t('homeDiscardDraft')} title={t('homeDiscardDraftTitle')} message={t('homeDiscardDraftConfirm')}
                 onConfirm={async () => { drafts.forget(reply); setReply(undefined); setInstruction(''); setChatOpen(false) }} />
               : <Button variant="ghost" size="sm" onClick={() => { drafts.forget(reply); setReply(undefined); setChatOpen(false) }}>{t('cancel')}</Button>}</div>
+        {chatOpen && selected === reply.ticketId && detail.data?.id === selected && detail.error && <div className="pw-aside-detail-status">
+          <RefreshFailure error={detail.error} updatedAt={detail.updatedAt} retry={detail.reload} />
+        </div>}
         {reply.question && <MarkdownLite text={reply.question} />}
         {replacedQuestion && <div className="pw-actions">
           <p className="dt-hint" role="status">{t('homeDraftAttentionChanged')}</p>

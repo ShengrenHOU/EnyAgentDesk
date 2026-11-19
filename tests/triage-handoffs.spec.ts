@@ -46,19 +46,21 @@ it('holds without Decisions, source ACK, Ticket, outbox or trigger changes; rele
   expect(store.triageHandoffStatus().held).toBe(0)
 })
 
-it('reports normal held work as healthy and only current blocked owners as errors', () => {
+it('keeps history visible without reporting it as a new outage', () => {
   add('a'); adopt()
   const health = () => Object.getOwnPropertyDescriptor(Runtime.prototype, 'health')!.get!.call({ store, board: { all: {} }, machine: { triageHandoff: true } })
   expect(health().triageHandoff.state).toBe('ready')
   expect(store.triageHandoffStatus()).toMatchObject({ held: 1, blocked: 0 })
   store.set('automatic-triage-group:test-owner', { state: 'blocked' })
-  expect(health().triageHandoff.state).toBe('error')
-  expect(store.triageHandoffStatus().blocked).toBe(1)
+  expect(health().triageHandoff.state).toBe('ready')
+  expect(store.triageHandoffStatus()).toMatchObject({ blocked: 1, recent: 0, older: 0, undated: 1 })
   const disposition = store.triggers.disposition('a')!
   store.triggers.saveDisposition('a', { ...disposition, triage: { ...disposition.triage!, phase: 'production', batchId: 'batch' } })
-  store.set('triage-production:batch', { id: 'batch', state: 'blocked', owner: 'test-owner', ownerGeneration: 1, inputs: [{ triggerId: 'a' }] })
-  expect(store.triageHandoffStatus()).toMatchObject({ held: 0, blocked: 1, state: 'blocked' })
+  const failureAt = Date.now()
+  store.set('triage-production:batch', { id: 'batch', state: 'blocked', owner: 'test-owner', ownerGeneration: 1, updatedAt: new Date(failureAt).toISOString(), inputs: [{ triggerId: 'a' }] })
+  expect(store.triageHandoffStatus()).toMatchObject({ held: 0, blocked: 1, recent: 1, state: 'blocked' })
   expect(health().triageHandoff.state).toBe('error')
+  expect(store.triageHandoffStatus(failureAt + 86_400_001)).toMatchObject({ blocked: 1, recent: 0, older: 1, undated: 0 })
   store.set('triage-production:batch', { id: 'batch', state: 'blocked', owner: 'test-owner', ownerGeneration: 2, inputs: [{ triggerId: 'a' }] })
   expect(store.triageHandoffStatus().blocked).toBe(0)
   expect(health().triageHandoff).toBeUndefined()

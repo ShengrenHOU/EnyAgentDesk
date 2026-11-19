@@ -38,6 +38,25 @@ export function apply(ctx: Context): void {
         })
     })))
   ctx.effect(() => registerWorkbenchTool(ctx))
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: '/api/superagent-workbench/worker-discussion', methods: ['POST'], requestBody: 'buffered',
+    async fetch(request) {
+      try {
+        const source = ctx.orchestrator.context(workbenchKind)
+        await source.ready
+        if (!source.config<WorkbenchConfig>('workbench')?.ownerId) return Response.json({ error: 'Native workbench is disabled' }, { status: 503 })
+        const body = await request.text()
+        if (Buffer.byteLength(body) > 8192) return Response.json({ error: 'Conclusion is too large' }, { status: 413 })
+        const input = z.object({ sessionId: z.string().min(1).max(200), throughSeq: z.number().int().nonnegative(),
+          summary: z.string().trim().min(1).max(600) }).strict().parse(JSON.parse(body))
+        const result = await ctx.orchestrator.saveWorkerDiscussion(input, request.signal)
+        return Response.json(result, { headers: { 'cache-control': 'no-store' } })
+      } catch (error) {
+        if (error instanceof z.ZodError || error instanceof SyntaxError) return Response.json({ error: 'Invalid conclusion request' }, { status: 400 })
+        return Response.json({ error: error instanceof Error ? error.message : 'Conclusion was not saved' }, { status: 409 })
+      }
+    },
+  }))
   ctx.effect(() => ctx.connection.fetch.register({ path: '/api/superagent-workbench/answer', methods: ['POST'], requestBody: 'buffered',
     async fetch(request) {
       try {

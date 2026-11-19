@@ -4,7 +4,7 @@ import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import type { SourceRegistry } from './registry.ts'
 import type { SetupProblem } from '../setup.ts'
-import type { Family, Key } from '../kv.ts'
+import type { Family, Key, WorkerDiscussionConclusion } from '../kv.ts'
 import { fill } from '../infra/text.ts'
 
 /** Fixed English health templates (`{name}` placeholders); the panel localizes each `code` in the interface language. */
@@ -17,7 +17,11 @@ export const HEALTH_TEXT = {
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
 export type HealthCode = keyof typeof HEALTH_TEXT
-export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string> }
+export type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: HealthCode; values?: Record<string, string>;
+  /** Last confirmed successful check, distinct from the latest event or status-update time. */
+  lastSuccessAt?: string;
+  /** Start of the current failure, when known to the reporter. */
+  failureSince?: string }
 export function health(state: Health['state'], code: HealthCode, values: Record<string, string> = {}): Health {
   return { state, detail: fill(HEALTH_TEXT[code], values), code, ...Object.keys(values).length ? { values } : {} }
 }
@@ -27,6 +31,8 @@ export interface SourceHost {
   runSource(run: (signal: AbortSignal) => Promise<unknown>): () => Promise<void>
   /** Returns the context for one Source kind; its `report` writes only the health entries declared by the kind. */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
+  /** Owner-authenticated workbench action. This records a conclusion without dispatching work. */
+  saveWorkerDiscussion(input: Omit<WorkerDiscussionConclusion, 'at'>, signal: AbortSignal): Promise<WorkerDiscussionConclusion>
 }
 /** Display label, URL, and facts (`null` removes a fact) that a Source publishes on a Thread. */
 export interface ThreadDescription { label?: string; url?: string; facts?: Record<string, ThreadFact | null> }

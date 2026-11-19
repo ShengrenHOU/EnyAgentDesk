@@ -76,7 +76,11 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     notify: message => { deps.outbox.send(message) },
     report: (entry, value) => {
       if (!kind.health.includes(entry)) throw new Error(`The ${kind.kind} Source has no health entry ${entry}`)
-      health.get(entry)?.set(value)
+      const slot = health.get(entry), previous = slot?.get()
+      const lastSuccessAt = value.lastSuccessAt ?? (value.code === 'sourceOff' ? undefined : previous?.lastSuccessAt)
+      const failureSince = value.state === 'error' ? value.failureSince ?? previous?.failureSince ?? new Date().toISOString()
+        : value.state === 'starting' ? previous?.failureSince : undefined
+      slot?.set({ ...value, ...(lastSuccessAt ? { lastSuccessAt } : {}), ...(failureSince ? { failureSince } : {}) })
     },
   }
 }

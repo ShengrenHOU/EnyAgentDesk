@@ -399,7 +399,8 @@ async function pollRepositoryRound(ctx: SourceContext, signal?: AbortSignal): Pr
   const dropped = (round.dropped.length ? `; deleted on GitHub: ${named(round.dropped)}` : '')
     + (round.abandoned.length ? `; dropped after their reads kept failing: ${named(round.abandoned)}` : '')
     + (round.tally.skipped ? `; ${round.tally.skipped} unreadable items skipped` : '')
-  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
+  ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started,
+    lastSuccessAt: new Date().toISOString() })
   return interval
 }
 /** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
@@ -624,7 +625,10 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
         + (failures.length ? `: ${failures.join('; ')}` : ''), at: new Date().toISOString() })
   }
   if (failures.length) throw new Error(`${failures.length}/${repositories.length} repositories unavailable: ${failures.join('; ')}`)
-  if (!signal?.aborted) ctx.report('github', { state: 'ready', detail: `${repositories.length} repositories polled; next poll >= ${interval}s`, at: new Date().toISOString() })
+  if (!signal?.aborted) {
+    const at = new Date().toISOString()
+    ctx.report('github', { state: 'ready', detail: `${repositories.length} repositories polled; next poll >= ${interval}s`, at, lastSuccessAt: at })
+  }
   return interval
 }
 

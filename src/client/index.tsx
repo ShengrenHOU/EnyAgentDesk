@@ -22,7 +22,7 @@ import type { T } from './text.ts'
 import { WorkbenchAction } from './workbench.tsx'
 import { OwnerDesk } from './owner-desk.tsx'
 import { Workbench } from './personal-workbench.tsx'
-import { TurnQuickReply } from './quick-reply.tsx'
+import { TurnQuickReply, WorkerDiscussionSave } from './quick-reply.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import { remember, settingsRoute } from './route.ts'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
@@ -100,7 +100,7 @@ function Mounted({ ctx, t, conversation }: { ctx: ClientContext; t: T; conversat
   if (conversation) return <PanelProvider t={t} openSession={openSession} navigate={() => ctx.layout.selectPanel(WORKBENCH_ID)}>
     <MainConversationEntry openSession={openSession} sessions={ctx.sessions} />
   </PanelProvider>
-  return <App t={t} openSession={openSession} deploymentForm={form}
+  return <App t={t} openSession={openSession} deploymentForm={form} send={send}
     home={<DailyHome t={t} send={send} openSession={openSession} />} />
 }
 
@@ -136,7 +136,14 @@ export function apply(ctx: ClientContext): void {
       return conversation.send(text)
     } }),
   }, (props: TurnTailOwnerProps & { sessionId: string; t: T; send(text: string): Promise<void> }) => {
-    const closing = props.turn.data.get('turn-tail')?.closing?.finalNode
+    const turnTail = props.turn.data.get('turn-tail')
+    const tail = turnTail?.closing
+    const closing = tail?.finalNode
+    if (props.sessionId.startsWith('worker-')) {
+      return tail?.status === 'settled' && closing
+        ? <WorkerDiscussionSave key={`${props.sessionId}:${closing.seq}`} sessionId={props.sessionId} throughSeq={closing.seq} t={props.t} />
+        : null
+    }
     const quote = closing?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
     return <TurnQuickReply sessionId={props.sessionId} t={props.t} turn={props.turn.turn} seq={closing?.seq ?? props.seq}
       quote={quote} send={props.send} />
