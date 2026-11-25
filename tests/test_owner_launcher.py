@@ -523,6 +523,14 @@ class OwnerLauncherTest(unittest.TestCase):
             with patch.object(launcher, 'state', return_value=state), self.assertRaises(RuntimeError):
                 launcher.activation_preflight(config)
 
+    def test_first_management_post_includes_local_origin(self):
+        base = f"http://127.0.0.1:{self.config['port']}"
+        request = launcher.urllib.request.Request(base + '/orchestrator/api/executor/pause', data=b'{}')
+        with self.opener({}) as make_opener:
+            launcher.management_open(self.config, request, 15)
+            sent = make_opener.return_value.open.call_args.args[0]
+            self.assertEqual(sent.get_header('Origin'), base)
+
     def test_web_entry_keeps_token_private_and_opens_the_panel(self):
         (self.root / 'windows-server.log').write_text('dsh web: http://127.0.0.1:3083/?token=old\ndsh web: http://127.0.0.1:3083/?token=synthetic\n' + 'event\n' * 600 + 'dsh web: http://127.0.0.1:3097/?token=other\n', encoding='utf-8')
         with patch.object(launcher.webbrowser, 'open', return_value=True) as browser:

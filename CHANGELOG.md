@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.12 (2026-11-25)
+
+- Authenticate activation settings and send the local origin on the first dispatch control request. (#405)
+
 ## 0.9.11 (2026-11-24)
 
 - The Windows owner launcher uses the current loopback sign-in for browser navigation, health checks and dispatch control. Reopening the workbench finds the latest entry after long sessions.

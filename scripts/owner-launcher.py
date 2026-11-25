@@ -78,6 +78,8 @@ def management_open(config, request, timeout):
     if not request.full_url.startswith(base + '/orchestrator/api/'):
         raise ValueError('Unexpected owner management endpoint')
 
+    request.add_header('Origin', base)
+
     class LocalRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             if urlsplit(newurl).netloc != urlsplit(base).netloc or urlsplit(newurl).scheme != 'http':
@@ -104,7 +106,6 @@ if ($p.ExecutablePath -ne $t.node -or !$p.CommandLine.Contains($t.cli) -or $p.Co
     url = owner_entry(config)
     with opener.open(url, timeout=timeout):
         pass
-    request.add_header('Origin', base)
     return opener.open(request, timeout=timeout)
 
 
@@ -202,7 +203,7 @@ def activation_preflight(config):
         return
     request = urllib.request.Request(f"http://127.0.0.1:{config['port']}/orchestrator/api/settings",
                                      headers={'x-orchestrator-request': '1'})
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=15) as response:
+    with management_open(config, request, 15) as response:
         settings = json.load(response)
     source = next(row for row in settings['sources'] if row['kind'] == 'feishu' and row['value']['enabled'])
     cli = source['value']['config']['cli']
