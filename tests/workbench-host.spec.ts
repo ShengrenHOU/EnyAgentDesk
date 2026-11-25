@@ -7,6 +7,7 @@ import { SessionId, SessionSeq, SessionLogOffset, SESSION_FORMAT_VERSION } from 
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { apply } from '../src/sources/workbench-host.ts'
+import { KV } from '../src/kv.ts'
 import { startRuntime, feishu, type Host } from './fixtures/host.ts'
 import { needsGithub } from '../src/app/setup.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -393,6 +394,29 @@ it('delivers an explicit update only to its task and rejects stale decisions or 
   expect((await submit({ ...request, requestId: 'stale', attentionId: 'old-question' })).status).toBe(409)
   h.runtime.engine.stopTicket(ticketId)
   expect((await submit({ ...request, requestId: 'stopped' })).status).toBe(409)
+})
+
+it('continues an ended task from a later Main segment only through committed native handoffs', async () => {
+  const receipt = await (await send(input)).json()
+  await h.runtime.idle()
+  const accepted = await h.route({ kind: 'accept', trigger_id: receipt.triggerId, title: 'Continued task', worktree_name: 'continued-task', acknowledgement: 'Received' })
+  const ticketId = (accepted.ticket as { ticket_id: string }).ticket_id
+  const submit = (body: unknown) => update.fetch(new Request('http://localhost/api/superagent-workbench/update', { method: 'POST', body: JSON.stringify(body) }))
+  const next = 'orchestrator-next'
+  const transition = (phase: 'active' | 'abandoned') => ({ from: 'discussion', to: next, throughSeq: 0, at: '2026-11-23T08:00:00.000Z', phase })
+  h.runtime.store.set(KV.runtime.mainTransition('discussion'), transition('active'))
+  h.runtime.store.set(KV.runtime.masterId, next)
+  setInspection({ meta: { ...liveInspection.meta, id: SessionId(next) }, inheritedEventCount: SessionLogOffset(0),
+    events: [{ type: 'user/message', seq: SessionSeq(0), time: 0, surfaceOp: 'append', data: createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Add the second part.' }] }) }] })
+  const request = { ...input, sessionId: next, requestId: 'segment-1', ticketId, instruction: 'Add the second part.' }
+  const first = await submit(request)
+  expect(first.status).toBe(200)
+  const saved = await first.json()
+  expect(h.runtime.store.triggers.disposition(saved.triggerId)?.fanout).toEqual([ticketId])
+  expect(h.runtime.store.tickets.get(ticketId)!.inputs).toEqual(expect.arrayContaining([expect.objectContaining({ triggerId: saved.triggerId })]))
+  expect(await (await submit(request)).json()).toMatchObject({ received: 'duplicate', triggerId: saved.triggerId })
+  h.runtime.store.set(KV.runtime.mainTransition('discussion'), transition('abandoned'))
+  expect((await submit({ ...request, requestId: 'segment-abandoned', instruction: 'Add the third part.' })).status).toBe(409)
 })
 
 it('persists a conversational supplement on the original ticket and returns a deduplicated receipt', async () => {

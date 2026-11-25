@@ -209,6 +209,22 @@ export function discussionSummary(ctx: SourceContext, sessionId: string): Discus
     attention: tickets.filter(ticket => !!ticket.attention).length }
 }
 
+/**
+ * A later Main segment continues an earlier task only through committed native segment handoffs.
+ * The transition records the native parent and child identity, so session text cannot widen it.
+ */
+function continuedMainSegment(state: Pick<SourceContext['state'], 'get'>, from: string, to: string): boolean {
+  const seen = new Set([from])
+  let session = from
+  for (let step = 0; step < 128; step++) {
+    const transition = state.get(KV.runtime.mainTransition(session))
+    if (transition?.phase !== 'active' || seen.has(transition.to)) return false
+    if (transition.to === to) return true
+    seen.add(transition.to); session = transition.to
+  }
+  return false
+}
+
 /** Explicit updates reuse the task's native thread; unrelated discussion never enters this path. */
 export async function updateDiscussionTask(ctx: SourceContext, ownerId: string, request: WorkbenchUpdate,
   context: WorkbenchContext, at: string): Promise<{ triggerId: string; received: 'stored' | 'duplicate' }> {
@@ -218,8 +234,12 @@ export async function updateDiscussionTask(ctx: SourceContext, ownerId: string, 
   if (snapshot.sessionId !== input.sessionId || snapshot.throughSeq !== input.throughSeq) throw new Error('Discussion context does not match the update')
   const ticket = ctx.tickets.get(input.ticketId)
   const origin = ticket && ctx.triggers.get(ticket.origin.triggerId)
-  if (!ticket || !origin || origin.source !== WORKBENCH || origin.meta.sessionId !== input.sessionId
-    || origin.actor.id !== ownerId) throw new Error('Task does not belong to this owner discussion')
+  const originSession = origin?.meta.sessionId
+  // A normally closed Ticket keeps its identity when the owner continues it from the current Main segment.
+  const ownerDiscussion = origin?.source === WORKBENCH && originSession === input.sessionId
+    || input.sessionId === ctx.state.get(KV.runtime.masterId) && typeof originSession === 'string'
+      && continuedMainSegment(ctx.state, originSession, input.sessionId)
+  if (!ticket || !origin || !ownerDiscussion || origin.actor.id !== ownerId) throw new Error('Task does not belong to this owner discussion')
   const id = key(WORKBENCH, 'update', ownerId, input.ticketId, input.requestId)
   const previous = ctx.triggers.get(id)
   if (previous) {

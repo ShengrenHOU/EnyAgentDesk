@@ -75,7 +75,7 @@ def paused(config, value):
                                     data=json.dumps({'paused': value}).encode(), method='POST',
                                     headers={'x-orchestrator-request': '1', 'Content-Type': 'application/json'})
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=30) as response:
+        with launcher.management_open(config, request, 30) as response:
             json.load(response)
     except (OSError, ValueError):
         current = launcher.state(config)
@@ -134,15 +134,15 @@ def verify(config, version, commit, wait_seconds):
 
 
 def activate(config_path, release_dir, pnpm_js, receipt_path, candidate_patch=None, wait_seconds=300, preflight_only=False,
-             candidate_dsh_cli=None):
+             candidate_dsh_cli=None, candidate_node=None):
     config = launcher.validate_config(json.loads(config_path.read_text(encoding='utf-8-sig')))
     if not config.get('stateDir'):
         raise ValueError('Owner-managed activation requires the explicit stateDir')
     with launcher.launch_guard(Path(config['runtime']), 'owner-activation.lock'):
-        return _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli)
+        return _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli, candidate_node)
 
 
-def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli):
+def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate_patch, wait_seconds, preflight_only, candidate_dsh_cli, candidate_node):
     if receipt_path.exists():
         raise ValueError('Use a new private receipt path')
     root = Path(config['runtime'])
@@ -158,6 +158,10 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
     stopped = False
     try:
         target = release_files(release_dir)
+        if candidate_node is not None:
+            candidate_node = candidate_node.resolve()
+            if not candidate_dsh_cli or not candidate_node.is_file():
+                raise ValueError("A candidate Node executable requires a candidate DSH installation")
         if candidate_dsh_cli is not None:
             candidate_dsh_cli = candidate_dsh_cli.resolve()
             launcher.validate_config({**config, 'dshCli': str(candidate_dsh_cli)})
@@ -217,6 +221,8 @@ def _activate(config, config_path, release_dir, pnpm_js, receipt_path, candidate
             stopped = True
             if candidate_dsh_cli is not None:
                 config['dshCli'] = str(candidate_dsh_cli)
+                if candidate_node is not None:
+                    config['node'] = str(candidate_node)
             # Sources may have persisted more records while dispatch was paused; capture the stopped state too.
             before_db = database(db, backup / 'orchestrator.sqlite')
             receipt['beforeTickets'] = len(before_db['tickets'])
@@ -317,6 +323,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['config', 'release', 'pnpm-js', 'receipt']:
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--candidate-node', type=Path, help='Node executable for the candidate DSH host')
     parser.add_argument('--candidate-patch', type=Path)
     parser.add_argument('--candidate-dsh-cli', type=Path, help='Reviewed side-by-side DSH installation; switched only after the old instance stops')
     parser.add_argument('--wait-seconds', type=int, default=300)
@@ -325,7 +332,7 @@ if __name__ == '__main__':
     try:
         result = activate(args.config.resolve(), args.release.resolve(), args.pnpm_js.resolve(), args.receipt.resolve(),
                           args.candidate_patch.resolve() if args.candidate_patch else None, args.wait_seconds, args.preflight_only,
-                          args.candidate_dsh_cli)
+                          args.candidate_dsh_cli, args.candidate_node)
         print(json.dumps({'status': result['status'], 'stage': result['stage'], 'rollback': result['rollback']}))
     except Exception:
         parser.exit(1, 'Activation failed; inspect the private receipt before another attempt.\n')

@@ -113,7 +113,10 @@ class ActivationTest(unittest.TestCase):
         (modules / 'do-not-copy').write_text('Reinstall from lockfile')
         stopped = []
         self.stop.side_effect = lambda config: stopped.append(activation.launcher.dsh_cli(config)) or 123
-        result = self.activate(candidate_dsh_cli=entry)
+        node = self.root / 'candidate-node.exe'
+        node.touch()
+        result = self.activate(candidate_dsh_cli=entry, candidate_node=node)
+        self.assertEqual(json.loads(self.config.read_text())['node'], str(node.resolve()))
         self.assertEqual(stopped[0], self.root / 'windows/node_modules/@deepseek-ai/dsh/lib/bin.js')
         self.assertEqual(json.loads(self.config.read_text())['dshCli'], str(entry.resolve()))
         self.assertEqual(result['targetDshVersion'], '0.2.2-rc.1')

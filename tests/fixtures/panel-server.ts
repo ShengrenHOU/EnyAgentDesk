@@ -100,6 +100,8 @@ export interface PanelServer {
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'> & { lines?: ApiResponse<'GET search'>['lines'] }
   history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
+  /** Markdown bytes returned when a preview fetches a published artifact. */
+  artifact: string
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
   queued: Set<string>
@@ -265,6 +267,7 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [], masterId: 'master',
+    artifact: '# 交付报告\n\n| 项目 | 状态 |\n| --- | --- |\n| 表格 | 已渲染 |\n\n```ts\nconst ok = true\n```\n',
     runtime: { packageVersion: '0.5.19', commit: 'abc123def456', repository: 'acme/widgets', builtAt: '2026-11-09T00:00:00.000Z',
       startedAt: '2026-11-09T01:00:00.000Z' },
     setup: { machine: MACHINE, problem: null, feishuProblem: null, githubProblem: null,
@@ -575,6 +578,9 @@ export function usePanelServer(cleanup: () => void) {
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
+      // The artifact route returns the published file itself, not JSON; previews read it directly.
+      if (path === '/api/superagent-workbench/artifact') return new Response(server.artifact, { status: 200,
+        headers: { 'content-type': 'text/plain; charset=utf-8' } })
       const route = match(method, path.split('/'))
       if (!route) return new Reply({ error: 'Unknown operation' }, 404)
       const answer = await run(route.key, route.params, address.searchParams, body)

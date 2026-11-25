@@ -70,11 +70,49 @@ def ready(result):
     return True
 
 
+def management_open(config, request, timeout):
+    """Authenticate to the owned DSH loopback listener when the Host requires browser sign-in."""
+    from http.cookiejar import CookieJar
+    from urllib.parse import urlsplit
+    base = f"http://127.0.0.1:{config['port']}"
+    if not request.full_url.startswith(base + '/orchestrator/api/'):
+        raise ValueError('Unexpected owner management endpoint')
+
+    class LocalRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if urlsplit(newurl).netloc != urlsplit(base).netloc or urlsplit(newurl).scheme != 'http':
+                raise RuntimeError('Unexpected owner login redirect')
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), LocalRedirect(),
+                                         urllib.request.HTTPCookieProcessor(CookieJar()))
+    try:
+        return opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        if error.code != 401 or os.name != 'nt' or not all(config.get(k) for k in ('dshCli', 'profile', 'logName')):
+            raise
+        error.close()
+    # A different process could have taken the port. Verify the listener before presenting its private launch URL.
+    script = r"""$t = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$l = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $t.port -State Listen -ErrorAction Stop
+$p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $l.OwningProcess)
+if ($p.ExecutablePath -ne $t.node -or !$p.CommandLine.Contains($t.cli) -or $p.CommandLine -notmatch ([regex]::Escape($t.profile) + '(?:"|\s|$)')) {exit 1}"""
+    subprocess.run(['powershell.exe', '-NoProfile', '-Command', script],
+                   input=json.dumps(dict(port=config['port'], node=str(Path(config['node']).resolve()),
+                                         cli=str(dsh_cli(config)), profile=config['profile'])).encode(),
+                   capture_output=True, check=True, timeout=15, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    url = owner_entry(config)
+    with opener.open(url, timeout=timeout):
+        pass
+    request.add_header('Origin', base)
+    return opener.open(request, timeout=timeout)
+
+
 def state(config, timeout=15):
     request = urllib.request.Request(f"http://127.0.0.1:{config['port']}/orchestrator/api/state",
                                      headers={'x-orchestrator-request': '1'})
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=timeout) as response:
+        with management_open(config, request, timeout) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
         raise RuntimeError('The port is occupied but the management endpoint refused the request') from error
@@ -263,10 +301,21 @@ def ensure_running(config, config_path, respect_stop=False):
         return result
 
 
-def open_panel(config):
-    log = (Path(config['runtime']) / config.get('logName', 'windows-server.log')).read_text(encoding='utf-8', errors='replace')
-    urls = re.findall(r'dsh web:\s+(http://127\.0\.0\.1:' + str(config['port']) + r'/\S+)', log)
-    if not urls or not webbrowser.open(urls[-1].split('#', 1)[0] + '#main-conversation', new=0):
+def owner_entry(config):
+    """Return the most recent private login URL for this port, regardless of log length."""
+    base = f"http://127.0.0.1:{config['port']}"
+    import mmap
+    pattern = re.compile(rb'(?m)^dsh web: ' + re.escape(base.encode()) + rb'/\?token=([A-Za-z0-9_%~.+/-]+)\r?$')
+    with (Path(config['runtime']) / config.get('logName', 'windows-server.log')).open('rb') as log, mmap.mmap(log.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        offset = data.rfind(b'dsh web: ' + base.encode() + b'/')
+        entry = pattern.match(data, offset) if offset >= 0 else None
+        if not entry:
+            raise RuntimeError('Owner sign-in unavailable')
+        return base + '/?token=' + entry[1].decode()
+
+
+def open_panel(config, fragment='main-conversation'):
+    if not webbrowser.open(owner_entry(config) + '#' + fragment, new=0):
         raise RuntimeError('Could not open the native panel')
 
 
@@ -316,6 +365,8 @@ while (Get-NetTCPConnection -State Listen -LocalPort $target.port -ErrorAction S
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, type=Path)
+    parser.add_argument('--print-entry', action='store_true', help='Print the private browser entry only on explicit request')
+    parser.add_argument('--panel', action='store_true', help='Open the workbench panel')
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--preflight', action='store_true', help='Read-only activation check; refuses unhealthy, busy or mismatched bot configuration')
     parser.add_argument('--start-only', action='store_true')
@@ -343,7 +394,11 @@ def main():
             print(json.dumps({'ready': ready(result), 'running': result is not None, 'repository': ((result or {}).get('setup', {}).get('accounts') or {}).get('repository'),
                               'load': result['load'] if result else None, 'manually_stopped': marker.exists()}))
         else:
-            open_panel(config)
+            fragment = 'workbench' if args.panel else 'main-conversation'
+            if args.print_entry:
+                print(owner_entry(config) + '#' + fragment)
+            else:
+                open_panel(config, fragment)
     except Exception:
         if args.status or args.preflight or args.start_only or args.spawn or os.name != 'nt':
             raise

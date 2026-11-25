@@ -524,7 +524,7 @@ class OwnerLauncherTest(unittest.TestCase):
                 launcher.activation_preflight(config)
 
     def test_web_entry_keeps_token_private_and_opens_the_panel(self):
-        (self.root / 'windows-server.log').write_text('dsh web: http://127.0.0.1:3083/?token=synthetic\n', encoding='utf-8')
+        (self.root / 'windows-server.log').write_text('dsh web: http://127.0.0.1:3083/?token=old\ndsh web: http://127.0.0.1:3083/?token=synthetic\n' + 'event\n' * 600 + 'dsh web: http://127.0.0.1:3097/?token=other\n', encoding='utf-8')
         with patch.object(launcher.webbrowser, 'open', return_value=True) as browser:
             launcher.open_panel(self.config)
         browser.assert_called_once_with('http://127.0.0.1:3083/?token=synthetic#main-conversation', new=0)

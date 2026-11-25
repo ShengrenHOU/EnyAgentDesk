@@ -11,7 +11,7 @@ import { ReplyForm } from './reply-form.tsx'
 import { replyDraftKey, useReplyDrafts, type ReplyDraftTarget } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, when, type T } from './text.ts'
-import { CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite, SessionButton } from './widgets.tsx'
+import { ArtifactPreview, CloseTicketButton, ConfirmButton, ExternalLink, MarkdownLite, SessionButton } from './widgets.tsx'
 
 interface Props {
   sessionId: string; t: T; send(text: string): Promise<void>; openTicket(id: string): void
@@ -227,7 +227,7 @@ function Desk({ sessionId, send, openTicket, useInput, openMain }: Omit<Props, '
       </div>}
       {preview && <section className="dt-owner-preview"><div className="dt-owner-section-head"><strong>{preview.title}</strong>
         <ExternalLink href={preview.url}>{t('details')}</ExternalLink><Button size="sm" variant="ghost" onClick={() => setPreview(undefined)}>{t('close')}</Button></div>
-        <iframe src={preview.url} title={preview.title} sandbox="" />
+        <ArtifactPreview title={preview.title} url={preview.url} />
       </section>}
       {target && <section className="dt-owner-response">
         <div className="dt-owner-section-head"><strong>{t('workbenchUpdateTarget', { title: target.title })}</strong>

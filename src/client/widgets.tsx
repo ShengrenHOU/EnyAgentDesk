@@ -1,13 +1,43 @@
 /** Context-aware shared UI widgets: page/section headers, timestamps, Markdown rendering, and confirmation actions. */
-import { Fragment, memo, useState, type ReactNode } from 'react'
+import { Fragment, memo, useEffect, useState, type ReactNode } from 'react'
+import DOMPurify from 'dompurify'
+import { marked } from 'marked'
 import type { SetupProblem } from '../setup.ts'
 import { Button, Icon, InfoTip, Modal, StateDot, type DotState, type IconName } from './controls.tsx'
-import { inlines, linkify, markdownBlocks, type Inline } from './markdown.ts'
+import { linkify, type Inline } from './markdown.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute, type SettingsGroup } from './route.ts'
 import { errorText, fullTime, readableMarkers, setupText, when } from './text.ts'
 
 const external = { target: '_blank', rel: 'noopener noreferrer' } as const
+/**
+ * GFM tags only; static panel copy is trusted, but a report may quote arbitrary source text.
+ * Inline images are excluded: a source-derived `img` would fetch an external URL outside the
+ * artifact's no-network CSP, disclosing that the owner opened a private report. Verified files,
+ * including images, stay available through the sandboxed artifact preview.
+ */
+const MARKDOWN_TAGS = ['p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'blockquote', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'hr', 'input']
+const MARKDOWN_ATTRIBUTES = ['href', 'title', 'colspan', 'rowspan', 'align', 'type', 'checked', 'disabled']
+let sanitizerReady = false
+/** Parses GFM (tables, fenced code, task lists) and removes every script, frame, arbitrary form control and style. */
+export function markdownHtml(text: string): { __html: string } {
+  if (!sanitizerReady) {
+    DOMPurify.addHook('afterSanitizeAttributes', node => {
+      if (node.tagName === 'A') { node.setAttribute('target', external.target); node.setAttribute('rel', external.rel) }
+      // A task list may show its state; every other input is a form control the panel does not accept.
+      if (node.tagName === 'INPUT') {
+        if (node.getAttribute('type') === 'checkbox') node.setAttribute('disabled', '')
+        else node.remove()
+      }
+    })
+    sanitizerReady = true
+  }
+  const html = marked.parse(text, { async: false, gfm: true }) as string
+  return { __html: DOMPurify.sanitize(html, { ALLOWED_TAGS: MARKDOWN_TAGS, ALLOWED_ATTR: MARKDOWN_ATTRIBUTES,
+    FORBID_TAGS: ['style', 'form', 'button', 'textarea', 'select', 'iframe', 'object', 'embed', 'link', 'meta'],
+    FORBID_ATTR: ['style'] }) }
+}
 
 export function When({ at }: { at: string | undefined }) {
   const { t } = usePanel()
@@ -51,21 +81,52 @@ export function KeyValues({ rows }: { rows: [string, ReactNode][] }) {
 }
 
 function Inlines({ parts }: { parts: Inline[] }) {
-  return <>{parts.map((part, index) => part.kind === 'bold' ? <strong key={index}>{part.text}</strong>
-    : part.kind === 'code' ? <code key={index} className="dt-code">{part.text}</code>
-    : part.kind === 'link' ? <a key={index} className="dt-inline-link" href={part.url} title={part.url} {...external}>{part.text}</a>
+  return <>{parts.map((part, index) => part.kind === 'link'
+    ? <a key={index} className="dt-inline-link" href={part.url} title={part.url} {...external}>{part.text}</a>
     : <Fragment key={index}>{part.text}</Fragment>)}</>
 }
-/** Renders a safe Markdown subset (headings, lists, paragraphs, bold, inline code, links) without interpreting raw HTML. */
+/** Renders report and question Markdown with GFM tables and fenced code; raw HTML is sanitized instead of trusted. */
 export const MarkdownLite = memo(function MarkdownLite({ text }: { text: string }) {
   const { t } = usePanel()
-  return <div className="dt-md">{markdownBlocks(readableMarkers(t, text)).map((block, index) => {
-    if (block.kind !== 'list') return <p key={index} className={block.kind === 'heading' ? 'dt-md-heading' : undefined}><Inlines
-      parts={inlines(block.text)} /></p>
-    const items = block.items.map((item, at) => <li key={at}><Inlines parts={inlines(item)} /></li>)
-    return block.ordered ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>
-  })}</div>
+  return <div className="dt-md" dangerouslySetInnerHTML={markdownHtml(readableMarkers(t, text))} />
 })
+const MARKDOWN_FILE = /\.(?:md|markdown|mdown|mkd)$/i
+const MAX_MARKDOWN_PREVIEW = 2 * 1024 * 1024
+/** Whether an artifact URL names a Markdown file, judged by the published path rather than its display title. */
+export function isMarkdownArtifact(url: string): boolean {
+  // Artifact links are same-origin relative addresses; the placeholder base only lets the parser read `path`.
+  try { return MARKDOWN_FILE.test(new URL(url, 'http://localhost').searchParams.get('path') ?? '') } catch { return false }
+}
+/**
+ * Shows one verified workbench artifact: Markdown through the panel's GFM renderer, every other type in the sandboxed frame.
+ * The Markdown bytes travel on the same authenticated owner request that already serves the published file.
+ */
+export function ArtifactPreview({ title, url }: { title: string; url: string }) {
+  const { t } = usePanel()
+  const markdown = isMarkdownArtifact(url)
+  const [state, setState] = useState<{ kind: 'loading' } | { kind: 'failed'; message: string } | { kind: 'ready'; text: string }>(
+    { kind: 'loading' })
+  useEffect(() => {
+    if (!markdown) return
+    const abort = new AbortController()
+    setState({ kind: 'loading' })
+    void fetch(url, { credentials: 'same-origin', signal: abort.signal }).then(async response => {
+      if (!response.ok) throw new Error(t('markdownPreviewFailed', { detail: `HTTP ${response.status}` }))
+      const text = await response.text()
+      if (text.length > MAX_MARKDOWN_PREVIEW) throw new Error(t('markdownPreviewFailed', { detail: t('markdownTooLarge') }))
+      setState({ kind: 'ready', text })
+    }).catch(error => { if (!abort.signal.aborted) setState({ kind: 'failed', message: errorText(error) }) })
+    return () => abort.abort()
+  }, [markdown, t, url])
+  // The frame stays for images, PDFs and other verified files whose own viewer belongs to the browser.
+  if (!markdown) return <iframe title={title} src={url} sandbox="" />
+  return <div className="dt-artifact-preview">
+    {state.kind === 'loading' && <p className="dt-hint" role="status">{t('markdownLoading')}</p>}
+    {state.kind === 'failed' && <p className="dt-error" role="alert">{state.message}{' '}
+      <ExternalLink href={url}>{t('openOriginal')}</ExternalLink></p>}
+    {state.kind === 'ready' && <div className="dt-md dt-artifact-md" dangerouslySetInnerHTML={markdownHtml(state.text)} />}
+  </div>
+}
 function MoreToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   const { t } = usePanel()
   return <button type="button" className="dt-textlink dt-more" aria-expanded={open} onClick={onToggle}>{open ? t('collapse')

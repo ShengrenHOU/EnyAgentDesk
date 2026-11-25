@@ -13,7 +13,8 @@ import { ReplyForm } from './reply-form.tsx'
 import { replyDraftKey, useReplyDrafts } from './reply-draft.ts'
 import { PendingFollowups } from './rows.tsx'
 import { errorText, fullTime, localized, valueLabel, when, type T } from './text.ts'
-import { CloseTicketButton, ConfirmButton, ExternalLink, LoadState, MarkdownLite, RefreshFailure, SessionButton } from './widgets.tsx'
+import { ArtifactPreview, CloseTicketButton, ConfirmButton, ExternalLink, LoadState, MarkdownLite,
+  RefreshFailure, SessionButton } from './widgets.tsx'
 
 interface QueueAdvice { summary: string; reason?: string; risk?: string; draft?: string }
 interface QueueItem {
@@ -387,7 +388,7 @@ export function Workbench(props: Props) {
       {preview && <section className="pw-preview" ref={previewPanel} tabIndex={-1} aria-label={preview.title}>
         <div className="pw-section-title"><h2>{preview.title}</h2>
         <div className="pw-actions"><ExternalLink href={preview.url}>{t('details')}</ExternalLink><Button size="sm" variant="ghost" onClick={closePreview}>{t('close')}</Button></div></div>
-        <iframe title={preview.title} src={preview.url} sandbox="" /></section>}
+        <ArtifactPreview title={preview.title} url={preview.url} /></section>}
       {selectedLine ? <LineDetail key={selectedLine} line={lineView} error={lineDetail.error} updatedAt={lineDetail.updatedAt} onRetry={lineDetail.reload}
         onDiscuss={state?.masterId ? async text => { await props.send(state.masterId, text); await props.openSession(state.masterId) } : undefined}
         destinations={lines.data?.open}

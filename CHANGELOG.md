@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.11 (2026-11-24)
+
+- The Windows owner launcher uses the current loopback sign-in for browser navigation, health checks and dispatch control. Reopening the workbench finds the latest entry after long sessions.
+
+## 0.9.10 — 2026-11-23
+
+- 工单执行会话可使用 DSH 原生 Timeline 维护任务树与进展。子智能体向主执行器汇报。 (#399)
+
+- Render Ticket reports and Markdown deliverables as GFM, including tables, fenced code and task-list state; other file types keep the artifact sandbox. Inline Markdown does not load external images, preserving the artifact's no-network policy.
+- Restore the saved discussion-conclusion receipt when a settled Ticket Session is reopened. Prefill conclusions and return to Main from the original Session.
+- Continue a normally closed Ticket from the current Main segment when committed native segment handoffs link it to the segment that opened the Ticket. Human stops, unrelated Sessions and abandoned handoffs remain refused.
+- Require native Lark transport for multi-line Windows arguments: worker guidance now avoids `.cmd` shims that keep only the text before the first newline.
+
+Upgrade note: no schema, dependency, source-scope or permission change from 0.9.9. Refresh an existing browser tab once to load the new client. Existing Tickets, Sessions and saved receipts are retained.
+
 ## 0.9.9 — 2026-11-19
 
 - Open the original Ticket Session directly from the Main conversation and personal workbench. Save a confirmed short conclusion on the Ticket and notify Main.

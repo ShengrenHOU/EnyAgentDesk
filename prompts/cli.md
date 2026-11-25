@@ -11,6 +11,7 @@ Start with lark-cli <domain> --help, schema <service.resource.method>, or skills
 Follow root_id, parent_id, thread_id, forwarded message IDs and document URLs recursively as relevant, tracking visited IDs.
 im +messages-mget expands merged forwards; im +threads-messages-list pages replies.
 Check truncations and pagination rather than assuming a returned bundle is complete.
+On Windows, send multi-line Lark text through the native lark-cli executable or the lark-write-safety UTF-8 helper, never a .cmd/.bat/.ps1 shim: cmd.exe keeps only the text before the first newline. When only a shim is available, escape newlines in --content JSON and read the sent message back.
 For attachments inspect command help, then download relevant resources locally and use read/read_image when supported by the selected model.
 Discover docs/wiki/drive commands on demand.
 Write large CLI output to a local file and read selected ranges; avoid dumping whole histories.

@@ -1,7 +1,8 @@
 /** One-line replies on a Ticket that needs you, or quoting a selected main-conversation Turn. */
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { Button } from './controls.tsx'
-import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
+import { apiMessages, PanelProvider, usePanel, usePanelData } from './provider.tsx'
+import { caller, type TicketPageView } from './api.ts'
 import { errorText, type T } from './text.ts'
 
 /** Sends on Enter and keeps the text when the send fails, so a short answer is never typed twice. */
@@ -116,19 +117,50 @@ export function TurnQuickReply(props: TurnReplyProps) {
   return <MainTurnReply {...props} />
 }
 
+type DiscussionConclusion = TicketPageView['discussionConclusion']
+type DiscussionRead = { conclusion: DiscussionConclusion } | { failed: true }
+const conclusionReads = new Map<string, Promise<DiscussionConclusion>>()
+
+/** Coalesce settled turns mounting together; reopening the Session reads the Ticket again. */
+function readDiscussionConclusion(sessionId: string, t: T): Promise<DiscussionConclusion> {
+  const existing = conclusionReads.get(sessionId)
+  if (existing) return existing
+  const id = sessionId.slice('worker-'.length)
+  const pending = caller(() => apiMessages(t))('GET tickets/:id', { id }).then(ticket => {
+    if (ticket?.id !== id) throw new Error('Unexpected Ticket receipt')
+    return ticket.discussionConclusion
+  }).finally(() => conclusionReads.delete(sessionId))
+  conclusionReads.set(sessionId, pending)
+  return pending
+}
+
 /** Confirm the short Ticket record from the original assistant reply without sending a new chat turn. */
-export function WorkerDiscussionSave({ sessionId, throughSeq, t }: { sessionId: string; throughSeq: number; t: T }) {
+export function WorkerDiscussionSave({ sessionId, throughSeq, readReply, t, openMain }: {
+  sessionId: string; throughSeq: number; readReply(): string; t: T; openMain(): Promise<void>
+}) {
+  const limit = 600
   const [open, setOpen] = useState(false)
-  const [summary, setSummary] = useState('')
+  const [summary, setSummary] = useState<string>()
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [failure, setFailure] = useState<string>()
+  const [read, setRead] = useState<DiscussionRead>()
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let active = true
+    void readDiscussionConclusion(sessionId, t).then(conclusion => {
+      if (active) setRead({ conclusion })
+    }, () => { if (active) setRead({ failed: true }) })
+    return () => { active = false }
+  }, [sessionId, t, attempt])
+  const conclusion = read && 'conclusion' in read && read.conclusion?.sessionId === sessionId ? read.conclusion : undefined
   const submit = async () => {
-    if (!summary.trim() || busy) return
+    const conclusion = summary?.trim()
+    if (!conclusion || busy) return
     setBusy(true); setFailure(undefined)
     try {
       const response = await fetch('/api/superagent-workbench/worker-discussion', { method: 'POST',
-        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, throughSeq, summary: summary.trim() }) })
+        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, throughSeq, summary: conclusion }) })
       const receipt = await response.json()
       if (!response.ok) throw new Error(receipt.error ?? t('discussionConclusionFailed'))
       if (receipt.sessionId !== sessionId || receipt.throughSeq !== throughSeq) throw new Error(t('discussionConclusionFailed'))
@@ -136,16 +168,40 @@ export function WorkerDiscussionSave({ sessionId, throughSeq, t }: { sessionId: 
     } catch (error) { setFailure(errorText(error)) }
     finally { setBusy(false) }
   }
-  if (saved) return <p className="dt-hint" role="status">{t('discussionConclusionSaved')}</p>
-  if (!open) return <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>{t('discussionConclusionSave')}</Button>
+  if (saved || conclusion?.throughSeq === throughSeq) return <>
+    <div className="pw-actions">
+      <p className="dt-hint" role="status">{t('discussionConclusionSaved')}</p>
+      <Button size="sm" disabled={busy} onClick={async () => {
+        setBusy(true); setFailure(undefined)
+        try { await openMain() }
+        catch (error) { setFailure(errorText(error)) }
+        finally { setBusy(false) }
+      }}>{t('discussionReturnMain')}</Button>
+    </div>
+    {failure && <p role="alert" className="dt-error">{failure}</p>}
+  </>
+  if (!read) return null
+  if ('failed' in read) return <div className="pw-actions">
+    <p className="dt-error" role="alert">{t('discussionConclusionReadFailed')}</p>
+    <Button size="sm" variant="ghost" onClick={() => { setRead(undefined); setAttempt(value => value + 1) }}>{t('retry')}</Button>
+  </div>
+  // The Ticket only retains its newest conclusion; older replies cannot replace it.
+  if (conclusion && conclusion.throughSeq > throughSeq) return null
+  if (!open) return <Button size="sm" variant="ghost" onClick={() => {
+    if (summary === undefined) {
+      const reply = readReply().trim()
+      setSummary(reply.length <= limit ? reply : '')
+    }
+    setOpen(true)
+  }}>{t('discussionConclusionSave')}</Button>
   return <form className="dt-turn-reply dt-fields" onSubmit={event => { event.preventDefault(); void submit() }}>
     <label className="dt-field">
       <span>{t('discussionConclusionLabel')}</span>
-      <textarea autoFocus rows={3} maxLength={600} value={summary} disabled={busy}
+      <textarea autoFocus rows={3} maxLength={limit} value={summary ?? ''} disabled={busy}
         placeholder={t('discussionConclusionHint')} onChange={event => setSummary(event.target.value)} />
     </label>
     <div className="pw-actions">
-      <Button size="sm" variant="outline" type="submit" disabled={busy || !summary.trim()}>{t('save')}</Button>
+      <Button size="sm" variant="outline" type="submit" disabled={busy || !summary?.trim()}>{t('save')}</Button>
       <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={() => setOpen(false)}>{t('cancel')}</Button>
     </div>
     {failure && <p role="alert" className="dt-error">{failure}</p>}

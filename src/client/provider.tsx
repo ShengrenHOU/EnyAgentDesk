@@ -55,7 +55,7 @@ export function useAction<A extends unknown[]>(action: (...args: A) => Promise<u
   return { run, busy }
 }
 
-const messages = (t: T): ApiMessages => ({
+export const apiMessages = (t: T): ApiMessages => ({
   offline: t('offline'), notRunning: t('hostNotRunning'), serverError: status => t('serverError', { status }),
     requestFailed: status => t('requestFailed', { status }),
   setup: problem => problem.values.output ? `${setupText(t, problem)}\n${problem.values.output}` : setupText(t, problem),
@@ -79,7 +79,7 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
-  const call = useMemo(() => caller(() => messages(copy.current)), [])
+  const call = useMemo(() => caller(() => apiMessages(copy.current)), [])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.

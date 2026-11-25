@@ -322,12 +322,14 @@ it('reuses a follow-up request after an uncertain connection failure', async () 
   expect(server.ticketDetails.t1!.followups).toHaveLength(1)
 })
 
-it('previews an authenticated local deliverable on the Ticket page', async () => {
+it('renders an authenticated local Markdown deliverable as GFM instead of raw text', async () => {
   server.ticketDetails.t1!.deliverables = [{ title: '交付报告', url: '/api/superagent-workbench/artifact?ticketId=t1&path=report.md&sha256=fixed' }]
   at({ page: 'execution', id: 't1' }); await mount()
-  await click(zh.ticketPreview)
-  expect(document.querySelector('iframe')?.title).toBe('交付报告')
-  expect(document.querySelector('iframe')?.getAttribute('sandbox')).toBe('')
+  await click('交付报告')
+  expect(document.querySelector('iframe')).toBeNull()
+  const preview = document.querySelector('.dt-artifact-md')
+  expect(preview?.querySelector('table')).not.toBeNull()
+  expect(preview?.querySelector('pre code')?.textContent).toContain('const ok = true')
 })
 
 it('reuses the same answer after an uncertain transport result', async () => {

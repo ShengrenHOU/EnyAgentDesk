@@ -15,6 +15,7 @@ import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-api-session-controller/remote-events'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
+import { caller } from './api.ts'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
@@ -25,7 +26,7 @@ import { Workbench } from './personal-workbench.tsx'
 import { TurnQuickReply, WorkerDiscussionSave } from './quick-reply.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import { remember, settingsRoute } from './route.ts'
-import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
+import { apiMessages, PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Button } from './controls.tsx'
 import { LoadState } from './widgets.tsx'
 import { startViewEvents } from './view-events.ts'
@@ -139,14 +140,19 @@ export function apply(ctx: ClientContext): void {
     const turnTail = props.turn.data.get('turn-tail')
     const tail = turnTail?.closing
     const closing = tail?.finalNode
+    const readReply = () => closing?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
     if (props.sessionId.startsWith('worker-')) {
       return tail?.status === 'settled' && closing
-        ? <WorkerDiscussionSave key={`${props.sessionId}:${closing.seq}`} sessionId={props.sessionId} throughSeq={closing.seq} t={props.t} />
+        ? <WorkerDiscussionSave key={`${props.sessionId}:${closing.seq}`} sessionId={props.sessionId} throughSeq={closing.seq} t={props.t}
+          readReply={readReply} openMain={async () => {
+            const { masterId } = await caller(() => apiMessages(props.t))('GET state')
+            if (!masterId) throw new Error(props.t('masterNotReady'))
+            await openNativeSession(ctx, masterId, AbortSignal.timeout(20_000))
+          }} />
         : null
     }
-    const quote = closing?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
     return <TurnQuickReply sessionId={props.sessionId} t={props.t} turn={props.turn.turn} seq={closing?.seq ?? props.seq}
-      quote={quote} send={props.send} />
+      quote={readReply()} send={props.send} />
   }))
   ctx.slots.inject('sidebar.workspaces.session.row.action', () => ctx.slots.register({
     name: 'sidebar.workspaces.session.row.action', id: 'superagent-workbench', order: 150, locale: NS,

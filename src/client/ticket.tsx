@@ -12,8 +12,8 @@ import { Field } from './settings-kit.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, errorText, fullTime, localized, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
-import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, RefreshFailure, Section, SessionButton,
-  StageMark, When } from './widgets.tsx'
+import { ActionLink, ArtifactPreview, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead,
+  RefreshFailure, Section, SessionButton, StageMark, When } from './widgets.tsx'
 
 type Input = TicketPageView['inputs'][number]
 function ContinueStopped({ id, reload }: { id: string; reload: () => Promise<void> }) {
@@ -377,13 +377,14 @@ export function TicketPage({ id }: { id: string }) {
     {!!data.deliverables?.length && <Section title={t('ticketDeliverables')}>
       <ul className="dt-plain-list">{data.deliverables.map(item => {
         const url = new URL(item.url, location.href)
-        return <li key={item.url}><ExternalLink href={item.url}>{item.title}</ExternalLink>
-          {url.origin === location.origin && url.pathname === '/api/superagent-workbench/artifact' && <Button size="sm" variant="ghost"
-            onClick={() => setPreview(item)}>{t('ticketPreview')}</Button>}</li>
+        const local = url.origin === location.origin && url.pathname === '/api/superagent-workbench/artifact'
+        return <li key={item.url}>{local ? <button type="button" className="dt-textlink" onClick={() => setPreview(item)}>{item.title}</button>
+          : <ExternalLink href={item.url}>{item.title}</ExternalLink>}
+          {local && <ExternalLink href={item.url}>{t('openOriginal')}</ExternalLink>}</li>
       })}</ul>
       {preview && <div className="dt-owner-preview"><div className="dt-owner-section-head"><strong>{preview.title}</strong>
         <Button size="sm" variant="ghost" onClick={() => setPreview(undefined)}>{t('close')}</Button></div>
-        <iframe src={preview.url} title={preview.title} sandbox="" />
+        <ArtifactPreview title={preview.title} url={preview.url} />
       </div>}
     </Section>}
     {!data.attention && workbench?.sessionId && data.ended?.by !== 'human' && <Section title={t('ownerDeskRevise')} icon="message">

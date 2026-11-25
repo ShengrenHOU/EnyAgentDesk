@@ -98,24 +98,122 @@ it('opens the original worker Session directly from the Main card', async () => 
   expect(openTicket).not.toHaveBeenCalled()
 })
 
-it('keeps a failed conclusion draft bound to the exact assistant reply', async () => {
-  const fetch = vi.fn().mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValue(Response.json({ sessionId: 'worker-t1', throughSeq: 36 }))
+it('prefills an editable conclusion and keeps the saved receipt if Main navigation fails', async () => {
+  const post = vi.fn().mockRejectedValueOnce(new Error('offline'))
+    .mockImplementation(() => Promise.resolve(Response.json({ sessionId: 'worker-t1', throughSeq: 36 })))
+  const fetch = vi.fn((url: string, init: RequestInit) => init.method === 'GET'
+    ? Promise.resolve(Response.json({ id: 't1' })) : post(url, init))
   vi.stubGlobal('fetch', fetch)
   const container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
-  await act(async () => { root.render(<WorkerDiscussionSave sessionId="worker-t1" throughSeq={36} t={t} />) })
+  const readReply = vi.fn(() => ' Original conclusion. ')
+  const openCurrentMain = vi.fn().mockRejectedValueOnce(new Error('Main unavailable')).mockResolvedValue(undefined)
+  await act(async () => { root.render(<WorkerDiscussionSave sessionId="worker-t1" throughSeq={36} t={t} readReply={readReply}
+    openMain={openCurrentMain} />) })
+  expect(readReply).not.toHaveBeenCalled()
   await click(zh.discussionConclusionSave)
   const draft = 'Reviewed the final figures.'
   const input = document.querySelector('textarea')!
+  expect(input.value).toBe('Original conclusion.')
   await type(input, draft)
   await click(zh.save)
   expect(input.value).toBe(draft)
   await click(zh.save)
-  expect(fetch.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual(Array(2).fill(
+  expect(post.mock.calls.map(([url, init]) => [url, JSON.parse(init.body)])).toEqual(Array(2).fill(
     ['/api/superagent-workbench/worker-discussion', { sessionId: 'worker-t1', throughSeq: 36, summary: draft }]))
   expect(document.querySelector('[role="status"]')?.textContent).toBe(zh.discussionConclusionSaved)
+  await click(zh.discussionReturnMain)
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe('Main unavailable')
+  expect(document.querySelector('[role="status"]')?.textContent).toBe(zh.discussionConclusionSaved)
+  await click(zh.discussionReturnMain)
+  expect(openCurrentMain).toHaveBeenCalledTimes(2)
+  expect(fetch).toHaveBeenCalledTimes(3)
+})
+
+it('recovers the edited saved conclusion after remount without making a duplicate POST', async () => {
+  const sessionId = 'worker-t1', throughSeq = 36
+  const openCurrentMain = vi.fn(async () => {})
+  const readReply = vi.fn(() => 'Original assistant reply')
+  let saved: { sessionId: string; throughSeq: number; summary: string } | undefined
+  const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+    if (init.method === 'GET') return Response.json({ id: 't1', discussionConclusion: saved })
+    saved = JSON.parse(String(init.body))
+    return Response.json(saved)
+  })
+  vi.stubGlobal('fetch', fetch)
+  const mountConclusion = async () => {
+    const container = document.createElement('div'); document.body.append(container)
+    root = createRoot(container)
+    await act(async () => { root.render(<WorkerDiscussionSave sessionId={sessionId} throughSeq={throughSeq} t={t}
+      readReply={readReply} openMain={openCurrentMain} />) })
+  }
+  await mountConclusion()
+  await click(zh.discussionConclusionSave)
+  await type(document.querySelector('textarea')!, 'Owner-edited conclusion')
+  await click(zh.save)
+  expect(saved?.summary).toBe('Owner-edited conclusion')
+  await act(async () => { root.unmount() })
+  await mountConclusion()
+  expect(document.body.textContent).toContain(zh.discussionConclusionSaved)
+  expect(Array.from(document.querySelectorAll('button'), button => button.textContent)).not.toContain(zh.discussionConclusionSave)
+  expect(document.querySelector('textarea')).toBeNull()
+  expect(readReply).toHaveBeenCalledOnce()
+  await click(zh.discussionReturnMain)
+  expect(openCurrentMain).toHaveBeenCalledOnce()
+  expect(fetch.mock.calls.map(([url, init]) => [url, init.method])).toEqual([
+    ['/orchestrator/api/tickets/t1', 'GET'], ['/api/superagent-workbench/worker-discussion', 'POST'], ['/orchestrator/api/tickets/t1', 'GET'],
+  ])
+})
+
+it('coalesces mounted turns and does not show a newer reply or a different Session as saved', async () => {
+  const receipt = { sessionId: 'worker-t1', throughSeq: 36, summary: 'Owner-edited conclusion' }
+  const fetch = vi.fn(async (url: string) => Response.json({ id: url.endsWith('/t1') ? 't1' : 't2', discussionConclusion: receipt }))
+  vi.stubGlobal('fetch', fetch)
+  const container = document.createElement('div'); document.body.append(container)
+  root = createRoot(container)
+  const view = (sessionId: string, throughSeq: number) => <WorkerDiscussionSave sessionId={sessionId} throughSeq={throughSeq}
+    t={t} readReply={() => 'Another reply'} openMain={vi.fn()} />
+  await act(async () => { root.render(<>
+    <div id="older">{view('worker-t1', 35)}</div><div id="match">{view('worker-t1', 36)}</div>
+    <div id="new">{view('worker-t1', 37)}</div><div id="another">{view('worker-t2', 36)}</div>
+  </>) })
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual(['/orchestrator/api/tickets/t1', '/orchestrator/api/tickets/t2'])
+  expect(document.querySelector('#older')?.textContent).toBe('')
+  expect(document.querySelector('#match')?.textContent).toContain(zh.discussionConclusionSaved)
+  for (const id of ['#new', '#another']) {
+    const view = document.querySelector(id)
+    expect(view?.querySelector('button')?.textContent).toBe(zh.discussionConclusionSave)
+    expect(view?.textContent).not.toContain(zh.discussionConclusionSaved)
+  }
+})
+
+it('keeps an unverifiable conclusion distinct from an unsaved reply and retries the read', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new Error('offline')).mockImplementation(async () => Response.json({
+    id: 't1', discussionConclusion: { sessionId: 'worker-t1', throughSeq: 36, summary: 'Owner-edited conclusion' },
+  }))
+  vi.stubGlobal('fetch', fetch)
+  const container = document.createElement('div'); document.body.append(container)
+  root = createRoot(container)
+  await act(async () => { root.render(<WorkerDiscussionSave sessionId="worker-t1" throughSeq={36} t={t}
+    readReply={() => 'Original'} openMain={vi.fn()} />) })
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe(zh.discussionConclusionReadFailed)
+  expect(document.querySelector('button')?.textContent).toBe(zh.retry)
+  await click(zh.retry)
+  expect(document.body.textContent).toContain(zh.discussionConclusionSaved)
+  expect(fetch.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+})
+
+it('leaves a long reply available in history without pre-filling a truncated conclusion', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ id: 't1' })))
+  const container = document.createElement('div')
+  document.body.append(container)
+  root = createRoot(container)
+  await act(async () => { root.render(<WorkerDiscussionSave sessionId="worker-t1" throughSeq={36} t={t}
+    readReply={() => 'a'.repeat(601)} openMain={vi.fn()} />) })
+  await click(zh.discussionConclusionSave)
+  expect(document.querySelector('textarea')?.value).toBe('')
+  expect(document.querySelector<HTMLButtonElement>('button[type=submit]')?.disabled).toBe(true)
 })
 
 it('starts collapsed and remembers the owner opening it', async () => {
@@ -444,7 +542,8 @@ it('previews a published artifact beside the conversation and lets the owner rev
   const send = await mount()
   await click([...document.querySelectorAll<HTMLButtonElement>('.dt-owner-tabs button')].at(-1)!)
   await click('报告原文')
-  expect(document.querySelector('iframe')?.getAttribute('sandbox')).toBe('')
+  expect(document.querySelector('iframe')).toBeNull()
+  expect(document.querySelector('.dt-artifact-md table')).not.toBeNull()
   await click(zh.ownerDeskRevise)
   await type(document.querySelector('textarea')!, '请增加具体下一步')
   await click(zh.workbenchSendUpdate)
